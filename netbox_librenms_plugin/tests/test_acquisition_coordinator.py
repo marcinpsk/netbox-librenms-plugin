@@ -3,6 +3,7 @@
 import pytest
 
 from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row
+from netbox_librenms_plugin.tests.view_test_helpers import make_request
 
 SERVER_KEY = "default"
 
@@ -86,7 +87,7 @@ def test_a_payload_of_another_plugin_version_reads_as_no_snapshot(live_librenms,
 
     device = make_device("coord-version", librenms_cf={SERVER_KEY: {"id": 504}})
     _serve_ip_and_vlans(live_librenms.server, 504)
-    assert source_cache.refresh(device, Resource.VLANS, SERVER_KEY).error is None
+    assert source_cache.refresh(make_request("post"), device, Resource.VLANS, SERVER_KEY).error is None
     key = source_cache.snapshot_key(device, Resource.VLANS, SERVER_KEY)
     payload = cache.get(key)
 
@@ -102,10 +103,13 @@ def test_a_refresh_of_an_unmapped_subject_fails_and_drops_the_older_snapshot(liv
     from netbox_librenms_plugin.tests.conftest import make_device
     from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_source_snapshot
 
-    device = make_device("coord-unmapped")
-    seed_source_snapshot(device, Resource.VLANS, SERVER_KEY, vlans=[])
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
 
-    result = source_cache.refresh(device, Resource.VLANS, SERVER_KEY)
+    device = make_device("coord-unmapped", librenms_cf={SERVER_KEY: {"id": 505}})
+    seed_source_snapshot(device, Resource.VLANS, SERVER_KEY, vlans=[])
+    seed_stored_mapping(device, {SERVER_KEY: None}, save=True)
+
+    result = source_cache.refresh(make_request("post"), device, Resource.VLANS, SERVER_KEY)
 
     assert result == source_cache.Refresh(None, "Device not found in LibreNMS.")
     assert source_cache.read(device, Resource.VLANS, SERVER_KEY) is None
@@ -138,29 +142,43 @@ def test_a_blocked_vlan_refresh_reports_the_failed_source_and_keeps_no_snapshot(
 
 
 @pytest.mark.django_db
-def test_converted_and_unconverted_tabs_share_status_fragment_mutation_and_cleanup(
-    client, settings, django_capture_on_commit_callbacks
-):
+def test_resource_tabs_share_status_fragment_mutation_and_cleanup(client, settings, django_capture_on_commit_callbacks):
     from django.core.cache import cache
     from django.urls import reverse
 
     from netbox_librenms_plugin import source_cache
     from netbox_librenms_plugin.acquisition.registry import Resource
-    from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, sync_snapshot_key
+    from netbox_librenms_plugin.sync_cache import (
+        SyncCacheConsistency,
+        SyncTab,
+        module_inventory_cache_payload,
+        sync_snapshot_key,
+    )
     from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server, make_device, make_superuser
-    from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_interfaces_snapshot, seed_source_snapshot
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import (
+        link_row,
+        port_row,
+        seed_cables_snapshot,
+        seed_interfaces_snapshot,
+        seed_source_snapshot,
+    )
 
     configure_default_librenms_server(settings)
     device = make_device("coord-mixed", librenms_cf={SERVER_KEY: {"id": 506}})
     seed_source_snapshot(device, Resource.VLANS, SERVER_KEY, vlans=[])
     interfaces = seed_interfaces_snapshot(device, [{"port_id": 1, "ifName": "eth1"}], server_key=SERVER_KEY)
-    # The cables tab is not converted yet, so it still stores its own payload.
-    links_key = sync_snapshot_key(device, "links", SERVER_KEY)
-    cache.set(links_key, {"links": []}, timeout=300)
+    seed_cables_snapshot(
+        device,
+        [link_row(1, "eth2", remote_hostname="peer")],
+        [port_row(1, "eth1", device_id=506)],
+        server_key=SERVER_KEY,
+    )
+    inventory_key = sync_snapshot_key(device, "inventory", SERVER_KEY)
+    cache.set(inventory_key, module_inventory_cache_payload([], 506, None), timeout=300)
     coordinator = SyncCacheConsistency(device)
 
     status = coordinator.status(SERVER_KEY)
-    assert all(status[tab]["snapshot_available"] for tab in ("vlans", "interfaces", "cables"))
+    assert all(status[tab]["snapshot_available"] for tab in ("vlans", "interfaces", "cables", "modules"))
     assert not status["ipaddresses"]["snapshot_available"]
 
     client.force_login(make_superuser("coord-mixed-user"))
@@ -174,13 +192,24 @@ def test_converted_and_unconverted_tabs_share_status_fragment_mutation_and_clean
     assert fragment.status_code == 200
     assert [row.record["port_id"] for row in fragment.context["interface_sync"]["table"].rows] == [1]
 
+    cable_fragment = client.get(
+        reverse(
+            "plugins:netbox_librenms_plugin:sync_cache_fragment",
+            kwargs={"object_type": "device", "pk": device.pk, "tab": SyncTab.CABLES.value},
+        ),
+        {"server_key": SERVER_KEY},
+    )
+    assert cable_fragment.status_code == 200
+    assert [row.record["local_port_id"] for row in cable_fragment.context["cable_sync"]["table"].rows] == [1]
+
     # A sync of the interfaces tab keeps its own snapshot and clears the others.
     with django_capture_on_commit_callbacks(execute=True):
         transition = coordinator.schedule_mutation(SyncTab.INTERFACES, SERVER_KEY)
     assert transition.completed
     assert source_cache.read(device, Resource.INTERFACES, SERVER_KEY) == interfaces
     assert source_cache.read(device, Resource.VLANS, SERVER_KEY) is None
-    assert not cache.has_key(links_key)
+    assert source_cache.read(device, Resource.CABLES, SERVER_KEY) is None
+    assert cache.get(inventory_key) is None
 
     coordinator.invalidate_every_tab()
 

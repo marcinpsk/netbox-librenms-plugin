@@ -11,7 +11,7 @@ from netbox_librenms_plugin.server_mappings import MappingRole
 
 # Increase when the payload changes meaning. A reader also refuses a payload that another plugin version
 # wrote, because a decoder change alters what a stored value means.
-SNAPSHOT_SCHEMA_VERSION = 1
+SNAPSHOT_SCHEMA_VERSION = 2
 
 
 class Outcome(StrEnum):
@@ -32,11 +32,12 @@ class MappingState(StrEnum):
 
 
 class IncompleteSource(Exception):
-    """A reader asked for a response that acquisition did not obtain."""
+    """A reader asked for a response that acquisition did not obtain; ``visible`` says whether the user may see why."""
 
-    def __init__(self, record):
+    def __init__(self, record, *, visible=False):
         super().__init__(f"{record.request.route_key} was not obtained: {record.outcome} ({record.reason})")
         self.record = record
+        self.visible = visible
 
 
 @dataclass(frozen=True)
@@ -121,7 +122,7 @@ class ResourceSource:
 
     resource: Resource
     owner: ObjectRef
-    host: MappingSource
+    host: MappingSource | None
     # None means the owner has no out-of-band controller.
     oob: MappingSource | None = None
 
@@ -143,7 +144,10 @@ class SourceSnapshot:
 
     def record(self, resource, part, role=MappingRole.OWN):
         """Return the response record of one part of a resource's mapping."""
-        return self.responses[dict(self.resources[resource].mapping(role).parts)[part]]
+        mapping = self.resources[resource].mapping(role)
+        if mapping is None:
+            raise LookupError(f"The {resource} source has no {role} mapping.")
+        return self.responses[dict(mapping.parts)[part]]
 
     def value(self, resource, part, role=MappingRole.OWN):
         """Return a copy of an obtained part's value; raise IncompleteSource for any other outcome."""
@@ -208,6 +212,8 @@ class SourceSnapshot:
 
 
 def _mapping_payload(mapping):
+    if mapping is None:
+        return None
     return {
         "role": mapping.role.value,
         "librenms_id": mapping.librenms_id,
@@ -217,6 +223,8 @@ def _mapping_payload(mapping):
 
 
 def _mapping_from_payload(item):
+    if item is None:
+        return None
     return MappingSource(
         role=MappingRole(item["role"]),
         librenms_id=item["librenms_id"],

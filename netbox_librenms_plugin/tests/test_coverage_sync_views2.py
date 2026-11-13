@@ -6,12 +6,12 @@ import pytest
 from dcim.models import Cable, Site
 from django.contrib import messages
 from django.contrib.messages import get_messages
-from django.core.cache import cache
 from django.urls import reverse
 from ipam.models import IPAddress, VLAN, VLANGroup, VRF
 from virtualization.models import VMInterface, VirtualMachine
 
 from netbox_librenms_plugin.acquisition.registry import Resource
+from netbox_librenms_plugin.tests.source_snapshot_helpers import link_row, port_row, seed_cables_snapshot
 from netbox_librenms_plugin.tests.conftest import (
     cable_together,
     make_device,
@@ -23,7 +23,6 @@ from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_sto
 from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, seed_ip_snapshot, seed_source_snapshot
 from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 from netbox_librenms_plugin.utils import get_librenms_cable_tag
-from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
 
 
@@ -39,10 +38,6 @@ def _response_messages(response, level=None):
     return [
         str(message) for message in get_messages(response.wsgi_request) if wanted is None or message.level == wanted
     ]
-
-
-def _seed(view, obj, data_type, payload):
-    cache.set(view.get_cache_key(obj, data_type, SERVER_KEY), payload, timeout=300)
 
 
 def _set_id(obj, value):
@@ -94,11 +89,12 @@ class TestCableWriteFailures:
     def test_empty_selection_reports_an_error_without_mutation(self, client, live_librenms):
         device = make_device("cable-no-selection", librenms_cf={SERVER_KEY: {"id": 102}})
         interface = make_interface(device, "Ethernet1")
-        _seed(
-            SyncCablesView(),
+        seed_cables_snapshot(
             device,
-            "links",
-            {"links": [{"local_port_id": 7321, "local_port": interface.name}]},
+            [link_row(7321, "", remote_hostname="")],
+            [port_row(7321, interface.name, device_id=102)],
+            neighbour_ports={},
+            server_key=SERVER_KEY,
         )
         _login(client, "cable-no-selection-user")
 
@@ -115,22 +111,16 @@ class TestCableWriteFailures:
         remote = make_interface(remote_device, "Ethernet2")
         _set_id(local, 7301)
         _set_id(remote, 7302)
-        _seed(
-            SyncCablesView(),
+        seed_cables_snapshot(
             device,
-            "links",
-            {
-                "links": [
-                    {
-                        "local_port_id": 7301,
-                        "local_port": local.name,
-                        "remote_port_id": 7302,
-                        "remote_port": remote.name,
-                        "remote_device": remote_device.name,
-                        "remote_device_id": 104,
-                    }
-                ]
-            },
+            [
+                link_row(
+                    7301, remote.name, remote_device_id=104, remote_port_id=7302, remote_hostname=remote_device.name
+                )
+            ],
+            [port_row(7301, local.name, device_id=103)],
+            neighbour_ports={104: [port_row(7302, remote.name, device_id=104)]},
+            server_key=SERVER_KEY,
         )
         client.force_login(make_user_with_perms("cable-denied-user", []))
 
@@ -160,22 +150,16 @@ class TestCableWriteFailures:
         _set_id(local, 7311)
         _set_id(remote, 7312)
         existing = cable_together(local, remote)
-        _seed(
-            SyncCablesView(),
+        seed_cables_snapshot(
             device,
-            "links",
-            {
-                "links": [
-                    {
-                        "local_port_id": 7311,
-                        "local_port": local.name,
-                        "remote_port_id": 7312,
-                        "remote_port": remote.name,
-                        "remote_device": remote_device.name,
-                        "remote_device_id": 106,
-                    }
-                ]
-            },
+            [
+                link_row(
+                    7311, remote.name, remote_device_id=106, remote_port_id=7312, remote_hostname=remote_device.name
+                )
+            ],
+            [port_row(7311, local.name, device_id=105)],
+            neighbour_ports={106: [port_row(7312, remote.name, device_id=106)]},
+            server_key=SERVER_KEY,
         )
         Tag.objects.create(name="Unrelated tag", slug="librenms")
         _login(client, "cable-existing-user")

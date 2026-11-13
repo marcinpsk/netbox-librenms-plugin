@@ -132,30 +132,30 @@ def _ports_with(**vlan_fields):
 
 @pytest.mark.django_db
 @pytest.mark.parametrize(
-    ("serve", "failed_path", "reason"),
+    ("serve", "failed_path", "http_status"),
     [
-        (_break_ports(lambda s, p: s.register(p, {"status": "ok", "ports": "x"})), PORTS_PATH, "malformed"),
+        (_break_ports(lambda s, p: s.register(p, {"status": "ok", "ports": "x"})), PORTS_PATH, 200),
         (
             _break_ports(lambda s, p: s.register(p, {"status": "error", "message": "boom"}, status=500)),
             PORTS_PATH,
-            "boom",
+            500,
         ),
-        (_break_ports(lambda s, p: s.register_disconnect(p)), PORTS_PATH, "could not be reached"),
-        (_ports_with(ifVlan="trunk"), PORTS_PATH, "VLAN"),
-        (_ports_with(ifVlan=True), PORTS_PATH, "VLAN"),
-        (_ports_with(vlans={"vlan": 10}), PORTS_PATH, "VLAN"),
-        (_ports_with(vlans=["10"]), PORTS_PATH, "VLAN"),
-        (_ports_with(vlans=[{"untagged": 1}]), PORTS_PATH, "VLAN"),
-        (_ports_with(vlans=[{"vlan": "N/A", "untagged": 0}]), PORTS_PATH, "VLAN"),
-        (_break_stack([{"high_port_id": 1, "low_port_id": 100}]), STACK_PATH, "malformed"),
-        (_break_stack({"status": "error", "message": "polling off", "mappings": []}), STACK_PATH, "polling off"),
-        (_break_stack({"status": False, "mappings": []}), STACK_PATH, "malformed"),
-        (_break_stack({"status": "ok"}), STACK_PATH, "not port pairs"),
-        (_break_stack({"status": "ok", "mappings": None}), STACK_PATH, "not port pairs"),
-        (_break_stack({"status": "ok", "mappings": ["x"]}), STACK_PATH, "not port pairs"),
-        (_break_stack({"status": "ok", "mappings": [{"high_port_id": 1}]}), STACK_PATH, "not port pairs"),
-        (_break_stack({"status": "error", "message": "Device does not exist"}, 404), STACK_PATH, "does not exist"),
-        (lambda s: (_serve(s), s.register_raw(STACK_PATH, "not-json")), STACK_PATH, "malformed"),
+        (_break_ports(lambda s, p: s.register_disconnect(p)), PORTS_PATH, None),
+        (_ports_with(ifVlan="trunk"), PORTS_PATH, 200),
+        (_ports_with(ifVlan=True), PORTS_PATH, 200),
+        (_ports_with(vlans={"vlan": 10}), PORTS_PATH, 200),
+        (_ports_with(vlans=["10"]), PORTS_PATH, 200),
+        (_ports_with(vlans=[{"untagged": 1}]), PORTS_PATH, 200),
+        (_ports_with(vlans=[{"vlan": "N/A", "untagged": 0}]), PORTS_PATH, 200),
+        (_break_stack([{"high_port_id": 1, "low_port_id": 100}]), STACK_PATH, 200),
+        (_break_stack({"status": "error", "message": "polling off", "mappings": []}), STACK_PATH, 200),
+        (_break_stack({"status": False, "mappings": []}), STACK_PATH, 200),
+        (_break_stack({"status": "ok"}), STACK_PATH, 200),
+        (_break_stack({"status": "ok", "mappings": None}), STACK_PATH, 200),
+        (_break_stack({"status": "ok", "mappings": ["x"]}), STACK_PATH, 200),
+        (_break_stack({"status": "ok", "mappings": [{"high_port_id": 1}]}), STACK_PATH, 200),
+        (_break_stack({"status": "error", "message": "Device does not exist"}, 404), STACK_PATH, 404),
+        (lambda s: (_serve(s), s.register_raw(STACK_PATH, "not-json")), STACK_PATH, 200),
     ],
     ids=[
         "ports-malformed-envelope",
@@ -178,7 +178,7 @@ def _ports_with(**vlan_fields):
         "stack-not-json",
     ],
 )
-def test_an_unusable_ports_or_port_stack_answer_blocks_the_host_scope(live_librenms, serve, failed_path, reason):
+def test_an_unusable_ports_or_port_stack_answer_blocks_the_host_scope(live_librenms, serve, failed_path, http_status):
     from netbox_librenms_plugin.acquisition.registry import Resource
     from netbox_librenms_plugin.acquisition.snapshot import IncompleteSource, Outcome
 
@@ -189,7 +189,8 @@ def test_an_unusable_ports_or_port_stack_answer_blocks_the_host_scope(live_libre
     part = "ports" if failed_path == PORTS_PATH else "port_stack"
     record = snapshot.record(Resource.INTERFACES, part)
     assert record.outcome is Outcome.FAILED
-    assert reason in record.reason
+    assert record.request.path == failed_path.removeprefix("/api/v0/")
+    assert record.http_status == http_status
     (blocker,) = _blocked(snapshot)["host"]
     assert blocker.path == failed_path.removeprefix("/api/v0/")
     assert not _ready(snapshot)
@@ -283,7 +284,6 @@ def test_a_blocked_host_scope_blocks_the_oob_rows_too(live_librenms):
 
 @pytest.mark.django_db
 def test_a_corrupt_oob_id_is_an_invalid_mapping_that_makes_no_request(live_librenms):
-    from netbox_librenms_plugin.acquisition.coordinator import INVALID_OOB_REASON
     from netbox_librenms_plugin.acquisition.registry import Resource
     from netbox_librenms_plugin.acquisition.snapshot import MappingState, Outcome
     from netbox_librenms_plugin.server_mappings import MappingRole
@@ -296,7 +296,9 @@ def test_a_corrupt_oob_id_is_an_invalid_mapping_that_makes_no_request(live_libre
     oob = snapshot.resources[Resource.INTERFACES].oob
     assert (oob.librenms_id, oob.state) == (None, MappingState.INVALID)
     record = snapshot.record(Resource.INTERFACES, "ports", MappingRole.OOB)
-    assert (record.outcome, record.reason, record.http_status) == (Outcome.FAILED, INVALID_OOB_REASON, None)
+    assert record.outcome is Outcome.FAILED
+    assert record.http_status is None
+    assert record.request.path == "devices/None/ports"
     assert set(_blocked(snapshot)) == {"oob"}
     assert _blocked(snapshot)["oob"][0].path == "oob"
     assert sorted(_paths(live_librenms.server)) == sorted([PORTS_PATH, STACK_PATH, DEVICE_PATH])

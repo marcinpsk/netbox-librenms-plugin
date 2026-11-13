@@ -39,6 +39,11 @@ def _serve_cables(server, device):
     server.register(f"/api/v0/devices/{DEVICE_ID}/links", {"status": "ok", "links": links})
     ports = [{"port_id": 7300 + index, "ifName": f"eth{index}", "ifDescr": f"eth{index}"} for index in range(ROWS)]
     server.register(f"/api/v0/devices/{DEVICE_ID}/ports", {"status": "ok", "ports": ports})
+    for link in links:
+        server.register(
+            f"/api/v0/devices/{link['remote_device_id']}/ports",
+            {"status": "ok", "ports": [{"port_id": link["remote_port_id"], "ifName": link["remote_port"]}]},
+        )
 
 
 def _serve_ip_addresses(server, device):

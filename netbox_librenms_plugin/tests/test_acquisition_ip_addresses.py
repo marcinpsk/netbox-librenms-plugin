@@ -103,30 +103,31 @@ def test_a_device_with_no_addresses_is_an_obtained_empty_list(live_librenms):
 
 @pytest.mark.django_db
 @pytest.mark.parametrize(
-    ("serve", "reason"),
+    ("serve", "http_status"),
     [
-        (lambda server: server.register(ADDRESSES_PATH, {"status": "ok", "addresses": "nope"}), "malformed"),
-        (lambda server: server.register(ADDRESSES_PATH, {"status": "error", "message": "boom"}, status=500), "boom"),
+        (lambda server: server.register(ADDRESSES_PATH, {"status": "ok", "addresses": "nope"}), 200),
+        (lambda server: server.register(ADDRESSES_PATH, {"status": "error", "message": "boom"}, status=500), 500),
         (
             lambda server: server.register(ADDRESSES_PATH, {"status": "error", "message": "No device"}, status=404),
-            "No device",
+            404,
         ),
-        (lambda server: server.register_disconnect(ADDRESSES_PATH), "could not be reached"),
+        (lambda server: server.register_disconnect(ADDRESSES_PATH), None),
     ],
     ids=["malformed-envelope", "endpoint-failure", "other-404", "disconnect"],
 )
-def test_an_unusable_address_answer_blocks_the_resource_and_is_never_an_empty_list(live_librenms, serve, reason):
+def test_an_unusable_address_answer_blocks_the_resource_and_is_never_an_empty_list(live_librenms, serve, http_status):
     from netbox_librenms_plugin.acquisition.registry import Resource
     from netbox_librenms_plugin.acquisition.snapshot import IncompleteSource, Outcome
 
     _serve(live_librenms.server, ports=[_port()], device={"ip": ""})
     serve(live_librenms.server)
 
-    snapshot = _acquire(_device(f"acq-ip-{reason.split()[0].lower()}"))
+    snapshot = _acquire(_device("acq-ip-unusable-addresses"))
 
     record = _record(snapshot, "addresses")
     assert record.outcome is Outcome.FAILED
-    assert reason in record.reason
+    assert record.request.path == ADDRESSES_PATH.removeprefix("/api/v0/")
+    assert record.http_status == http_status
     assert not _ready(snapshot)
     with pytest.raises(IncompleteSource):
         snapshot.value(Resource.IP_ADDRESSES, "addresses")
@@ -165,7 +166,8 @@ def test_one_unusable_address_row_makes_the_whole_answer_malformed(live_librenms
 
     record = _record(snapshot, "addresses")
     assert record.outcome is Outcome.FAILED
-    assert "IP address row" in record.reason
+    assert record.request.path == ADDRESSES_PATH.removeprefix("/api/v0/")
+    assert record.http_status == 200
     assert not _ready(snapshot)
 
 

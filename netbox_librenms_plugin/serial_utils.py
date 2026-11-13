@@ -3,10 +3,8 @@ Utilities for mapping LibreNMS serial-port sensor data to cable-sync link rows.
 
 Serial ports on console servers (e.g. Avocent ACS) are not SNMP ifTable
 entries and do not appear in LibreNMS port listings.  They surface instead as
-``sensor_class=state`` sensors in the "Serial Ports" group.  This module
-converts those sensor records into the same link-row shape that
-``BaseCableTableView.get_links_data()`` produces, so the existing Cables tab
-enrichment and sync pipeline can reuse them with minimal branching.
+``sensor_class=state`` sensors in the "Serial Ports" group.  The cable assessment projects
+these sensor records into serial rows, then compares them with visible NetBox ports.
 
 Row shape emitted (all keys match the cables-view link dict):
     local_port        str   - ConsoleServerPort name, e.g. "ttyS7"
@@ -25,6 +23,7 @@ Sorting: rows are returned ordered by sensor_index_int (port number).
 
 import logging
 import re
+from dataclasses import dataclass
 
 from netbox_librenms_plugin.constants import SERIAL_INVENTORY_SOURCE
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
@@ -36,6 +35,48 @@ logger = logging.getLogger(__name__)
 DEFAULT_SERIAL_PORT_NAME_PATTERN = "ttyS{N}"
 
 _INDEX_SUFFIX_RE = re.compile(r"\.(\d+)$")
+
+
+@dataclass(frozen=True)
+class SerialSensorProjection:
+    """The recognized live sensors, or the reason their source cannot be used."""
+
+    ready: bool
+    rows: list
+    type_map: dict
+    reason: str = ""
+
+
+def sensor_deleted_flag(sensor):
+    """Return the deleted flag as 0 or 1, or None for an invalid flag."""
+    deleted = sensor.get("sensor_deleted", 0)
+    if isinstance(deleted, int) and not isinstance(deleted, bool) and deleted in (0, 1):
+        return deleted
+    if isinstance(deleted, str) and deleted in ("0", "1"):
+        return int(deleted)
+    return None
+
+
+def project_serial_sensors(rows, type_map):
+    """Validate recognized sensors and discard deleted rows before checking their identities."""
+    selected = []
+    for sensor in rows:
+        sensor_type = sensor.get("sensor_type") if isinstance(sensor, dict) else None
+        if not isinstance(sensor_type, str) or sensor_type not in type_map:
+            continue
+        deleted = sensor_deleted_flag(sensor)
+        if deleted is None:
+            return SerialSensorProjection(False, [], type_map, "Invalid sensor_deleted in a serial sensor row.")
+        if deleted:
+            continue
+        sensor_id = coerce_librenms_id(sensor.get("sensor_id"))
+        if sensor_id is None:
+            return SerialSensorProjection(False, [], type_map, "Invalid sensor_id in a serial sensor row.")
+        sensor_index = sensor.get("sensor_index")
+        if not isinstance(sensor_index, str) or parse_port_number(sensor_index) is None:
+            return SerialSensorProjection(False, [], type_map, "Invalid sensor_index in a serial sensor row.")
+        selected.append({**sensor, "sensor_id": sensor_id})
+    return SerialSensorProjection(True, selected, type_map)
 
 
 def get_serial_sensor_type_patterns() -> dict:

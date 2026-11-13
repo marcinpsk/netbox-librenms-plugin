@@ -67,26 +67,27 @@ def test_a_device_with_no_vlans_is_an_obtained_empty_list(live_librenms):
 
 @pytest.mark.django_db
 @pytest.mark.parametrize(
-    ("serve", "reason"),
+    ("serve", "http_status"),
     [
-        (lambda server: server.register(VLANS_PATH, {"status": "ok", "vlans": "not-a-list"}), "malformed"),
-        (lambda server: server.register(VLANS_PATH, {"status": "error", "message": "boom"}, status=500), "boom"),
-        (lambda server: server.register_disconnect(VLANS_PATH), "could not be reached"),
+        (lambda server: server.register(VLANS_PATH, {"status": "ok", "vlans": "not-a-list"}), 200),
+        (lambda server: server.register(VLANS_PATH, {"status": "error", "message": "boom"}, status=500), 500),
+        (lambda server: server.register_disconnect(VLANS_PATH), None),
     ],
     ids=["malformed-envelope", "endpoint-failure", "disconnect"],
 )
-def test_an_unusable_answer_blocks_the_resource_and_is_never_an_empty_list(live_librenms, serve, reason):
+def test_an_unusable_answer_blocks_the_resource_and_is_never_an_empty_list(live_librenms, serve, http_status):
     from netbox_librenms_plugin.acquisition.registry import Resource
     from netbox_librenms_plugin.acquisition.resources import is_ready
     from netbox_librenms_plugin.acquisition.snapshot import IncompleteSource, Outcome
 
     serve(live_librenms.server)
 
-    snapshot = _acquire(_device(f"acq-vlan-{reason.split()[0]}"))
+    snapshot = _acquire(_device("acq-vlan-unusable"))
 
     record = _record(snapshot)
     assert record.outcome is Outcome.FAILED
-    assert reason in record.reason
+    assert record.request.path == VLANS_PATH.removeprefix("/api/v0/")
+    assert record.http_status == http_status
     assert not is_ready(snapshot, Resource.VLANS)
     with pytest.raises(IncompleteSource):
         snapshot.value(Resource.VLANS, "vlans")
