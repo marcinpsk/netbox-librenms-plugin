@@ -330,6 +330,26 @@ def read_mapping(obj) -> MappingState:
     return _decode_stored_mapping(obj.custom_field_data.get(_MAPPING_KEY))
 
 
+def prefetch_mappings(objects: Iterable) -> list:
+    """
+    Load the mappings of *objects* for later :func:`read_mapping` calls, and return the objects as a list.
+
+    A producer that reads the mapping of each object in a collection calls this once, before its
+    first read, and then reads the returned instances. A read on another instance of the same row
+    is not prefetched, so a producer must not evaluate a queryset again. The list keeps the order
+    of *objects*, and the objects keep their database alias. An unsaved object is accepted. The
+    custom-field storage loads with the object, so this storage runs no query.
+
+    Raises:
+        TypeError: If an object is not a Device, VirtualMachine, Interface or VMInterface.
+
+    """
+    objects = list(objects)
+    for obj in objects:
+        _space_of(type(obj))
+    return objects
+
+
 def read_mappings(queryset, *, fields: Iterable[str]) -> tuple[MappedRecord, ...]:
     """
     Read *fields* and the mapping of every row in *queryset*, in one query.
@@ -584,8 +604,8 @@ def mapped_device_servers(subject, *, active_server: str | None = None) -> tuple
     members = [subject]
     virtual_chassis = getattr(subject, "virtual_chassis", None)
     if virtual_chassis is not None:
-        members = list(virtual_chassis.members.all())
-    mappings = [read_mapping(member) for member in members]
+        members = virtual_chassis.members.all()
+    mappings = [read_mapping(member) for member in prefetch_mappings(members)]
 
     server_keys = {
         entry.server

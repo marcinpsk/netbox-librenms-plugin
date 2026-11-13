@@ -7,7 +7,12 @@ from django.conf import settings as django_settings
 
 from netbox_librenms_plugin.ip_addressing import primary_ips
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-from netbox_librenms_plugin.server_mappings import PreferenceStatus, read_mapping, require_server_key
+from netbox_librenms_plugin.server_mappings import (
+    PreferenceStatus,
+    prefetch_mappings,
+    read_mapping,
+    require_server_key,
+)
 
 
 class ServerSelectionState(StrEnum):
@@ -189,7 +194,7 @@ def build_server_mappings(owner, active_key=None, *, plugin_config=None, mapping
     return tuple(mappings)
 
 
-def get_librenms_sync_device(device, server_key: str | None = None):  # noqa: C901
+def get_librenms_sync_device(device, server_key: str | None = None):
     """
     Determine which Virtual Chassis member should handle LibreNMS sync operations.
 
@@ -221,7 +226,46 @@ def get_librenms_sync_device(device, server_key: str | None = None):  # noqa: C9
         return device
 
     vc = device.virtual_chassis
-    all_members = vc.members.all()
+    return _select_sync_member(vc.master_id, prefetch_mappings(vc.members.all()), server_key)
+
+
+def chassis_sync_devices(devices, server_key: str | None = None) -> dict:
+    """
+    Return the sync member of each virtual chassis that *devices* belong to, keyed by chassis ID.
+
+    A list of many chassis rows uses this instead of one :func:`get_librenms_sync_device` call per
+    row: one query loads the members of every chassis, and one prefetch loads their mappings.
+
+    Args:
+        devices (Iterable[Device]): The listed devices; a device outside a chassis is skipped.
+        server_key (str | None): As for :func:`get_librenms_sync_device`.
+
+    Returns:
+        dict[int, Device | None]: The sync member of each chassis, chosen by the same rules.
+
+    """
+    from dcim.models import Device
+
+    if server_key is not None:
+        server_key = require_server_key(server_key)
+    chassis_ids = {device.virtual_chassis_id for device in devices if device.virtual_chassis_id is not None}
+    if not chassis_ids:
+        return {}
+    members_by_chassis = {}
+    members = Device.objects.filter(virtual_chassis_id__in=chassis_ids).select_related(
+        "virtual_chassis", "primary_ip4", "primary_ip6"
+    )
+    for member in prefetch_mappings(members):
+        members_by_chassis.setdefault(member.virtual_chassis_id, []).append(member)
+    return {
+        chassis_id: _select_sync_member(chassis_members[0].virtual_chassis.master_id, chassis_members, server_key)
+        for chassis_id, chassis_members in members_by_chassis.items()
+    }
+
+
+def _select_sync_member(master_id, all_members, server_key):  # noqa: C901
+    """Choose the sync member from the prefetched *all_members* of one chassis."""
+    # nosemgrep: mapping-read-loop-needs-prefetch  # noqa: ERA001  # each caller prefetches all_members
     mappings = [(member, read_mapping(member)) for member in all_members]
 
     if server_key is not None:
@@ -256,9 +300,10 @@ def get_librenms_sync_device(device, server_key: str | None = None):  # noqa: C9
             if any(entry.oob_id is not None for entry in mapping.servers):
                 return member
 
-    # Priority 2: Use master device if it has primary IP
-    if vc.master and primary_ips(vc.master):
-        return vc.master
+    # Priority 2: Use master device if it has primary IP (the prefetched member, not a new instance)
+    master = next((member for member in all_members if member.pk == master_id), None)
+    if master and primary_ips(master):
+        return master
 
     # Priority 3: Find any member with primary IP
     for member in all_members:

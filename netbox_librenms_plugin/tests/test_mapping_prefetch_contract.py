@@ -1,0 +1,1145 @@
+"""
+The read-loading contract: every collection producer prefetches the mappings it reads.
+
+Each test drives a producer through its real entry point, mostly an HTTP request to the view, on
+real rows. The spy tests prove that every saved instance read in the producer was passed to
+``prefetch_mappings`` first. The query-count tests prove that the producer runs the same number of
+queries for one object and for many objects in mixed mapping states. On the custom-field storage a
+missing prefetch changes no query count, so the spy tests catch it today and the query-count tests
+catch it after the storage moves to its own tables.
+"""
+
+import json
+
+import pytest
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
+from django.urls import reverse
+
+from netbox_librenms_plugin.models import InterfaceTypeMapping
+from netbox_librenms_plugin.server_mappings import read_mapping
+from netbox_librenms_plugin.tests.conftest import (
+    bind_librenms_server,
+    cable_together,
+    make_cluster,
+    make_device,
+    make_interface,
+    make_ip,
+    make_superuser,
+    make_virtual_chassis_members,
+    make_vm,
+)
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
+from netbox_librenms_plugin.tests.mapping_prefetch_spy import spy_mapping_reads
+from netbox_librenms_plugin.tests.source_snapshot_helpers import (
+    link_row,
+    port_pair,
+    port_row,
+    seed_cables_snapshot,
+    seed_interfaces_snapshot,
+    seed_ip_snapshot,
+    seed_mapped_modules,
+    transceiver_row,
+)
+
+SERVER_KEY = "default"
+OTHER_SERVER = "secondary"
+MANY = 100
+# One link per mixed state: one object cannot hold every state, and a hostname-only link adds one name lookup.
+FEW_LINKS = 5
+# The cable catalog reads 32 identities per query and each link names two ports, so 16 links fit in one chunk.
+MANY_LINKS = 16
+HOST_ID = 61
+NEIGHBOUR_BASE = 20_000
+REMOTE_PORT_BASE = 30_000
+
+
+@pytest.fixture
+def superuser_client(client, live_librenms):
+    # A loopback LibreNMS: the sync page asks the server for the device, and no test may reach the network.
+    client.force_login(make_superuser("mapping-prefetch-user"))
+    return client
+
+
+def _seed_port_mapping(interface, index, port_id):
+    """Give *interface* one of the mixed port mapping states, chosen by *index*."""
+    state = index % 4
+    if state == 1:
+        seed_mapping(interface, SERVER_KEY, own=port_id)
+    elif state == 2:
+        seed_mapping(interface, SERVER_KEY, own=port_id)
+        seed_mapping(interface, OTHER_SERVER, own=port_id + 50_000)
+    elif state == 3:
+        seed_stored_mapping(interface, "not-an-id", save=True)
+    return interface
+
+
+def _seed_device_mapping(device, index, librenms_id):
+    """
+    Give *device* one of the mixed device mapping states, chosen by *index*.
+
+    The states are: own ID only, own plus OOB, own on two servers, absent and an invalid stored value.
+    Returns the LibreNMS IDs that *device* holds on the default server.
+    """
+    state = index % 5
+    if state == 0:
+        seed_mapping(device, SERVER_KEY, own=librenms_id)
+    elif state == 1:
+        seed_mapping(device, SERVER_KEY, own=librenms_id, oob=librenms_id + 50_000)
+        return (librenms_id, librenms_id + 50_000)
+    elif state == 2:
+        seed_mapping(device, SERVER_KEY, own=librenms_id)
+        seed_mapping(device, OTHER_SERVER, own=librenms_id + 50_000)
+    elif state == 4:
+        seed_stored_mapping(device, "not-an-id", save=True)
+    return (librenms_id,) if state < 3 else ()
+
+
+def _port(port_id, name, if_type="ethernetCsmacd"):
+    return {
+        "port_id": port_id,
+        "ifName": name,
+        "ifDescr": name,
+        "ifType": if_type,
+        "ifAdminStatus": "up",
+        "ifSpeed": 1_000_000_000,
+        "ifMtu": 1500,
+        "ifPhysAddress": "",
+        "ifAlias": "",
+    }
+
+
+def _interfaces_device(name, count):
+    """Return a device whose *count* interfaces are LAG members in mixed mapping states, with their snapshot."""
+    device = make_device(name, librenms_cf={SERVER_KEY: {"id": 61}})
+    lag = make_interface(device, "ae0", iface_type="lag")
+    seed_mapping(lag, SERVER_KEY, own=999)
+    ports = [_port(999, "ae0", "ieee8023adLag")]
+    stack = []
+    for index in range(count):
+        port_id = 1000 + index
+        interface = make_interface(device, f"eth{index}", iface_type="1000base-t")
+        interface.lag = lag
+        interface.save()
+        _seed_port_mapping(interface, index, port_id)
+        ports.append(_port(port_id, f"eth{index}"))
+        stack.append(port_pair(port_id, 999))
+    seed_interfaces_snapshot(device, ports, stack, server_key=SERVER_KEY)
+    return device
+
+
+def _interfaces_tab(client, device):
+    url = reverse(
+        "plugins:netbox_librenms_plugin:sync_cache_fragment",
+        kwargs={"object_type": "device", "pk": device.pk, "tab": "interfaces"},
+    )
+    response = client.get(url, {"server_key": SERVER_KEY, "interface_name_field": "ifName"})
+    assert response.status_code == 200
+    return response
+
+
+def _tab(client, device, tab, **params):
+    url = reverse(
+        "plugins:netbox_librenms_plugin:sync_cache_fragment",
+        kwargs={"object_type": "device", "pk": device.pk, "tab": tab},
+    )
+    response = client.get(url, {"server_key": SERVER_KEY, **params})
+    assert response.status_code == 200
+    return response
+
+
+def _ignore_rule():
+    """Store an interface rule that ignores no port here, so the tables preload the port disclosure."""
+    InterfaceTypeMapping.objects.create(action=InterfaceTypeMapping.ACTION_IGNORE, name_pattern="^no-such-port$")
+
+
+def _assert_prefetched(spy, *single, models=None):
+    assert spy.saved_reads(), "the request read no saved mapping, so the check proves nothing"
+    violations = spy.unprefetched(single=single, models=models)
+    assert not violations, "\n".join(violations)
+
+
+def _query_count(request):
+    """Return the queries *request* runs; NetBox reloads its config revision when its cache expires, so that is left out."""
+    with CaptureQueriesContext(connection) as queries:
+        request()
+    return len([query for query in queries.captured_queries if "core_configrevision" not in query["sql"]])
+
+
+@pytest.mark.django_db
+def test_a_violation_names_the_function_that_read_the_mapping():
+    """The spy reports the read location first, so a violation shows where the prefetch is missing."""
+    from netbox_librenms_plugin.server_mappings import name_match_may_be_port
+
+    interface = make_interface(make_device("prefetch-spy-read-site"), "eth0")
+
+    with spy_mapping_reads() as spy:
+        name_match_may_be_port(interface, server=SERVER_KEY, port_id=5)
+
+    (violation,) = spy.unprefetched()
+    assert violation.split(" at ", 1)[1].startswith("name_match_may_be_port (server_mappings.py:"), violation
+
+
+@pytest.mark.django_db
+class TestInterfacesTab:
+    def test_every_interface_read_is_prefetched(self, superuser_client):
+        device = _interfaces_device("prefetch-interfaces", 8)
+
+        with spy_mapping_reads() as spy:
+            _interfaces_tab(superuser_client, device)
+
+        _assert_prefetched(spy, device)
+
+    def test_the_query_count_does_not_grow_with_the_interfaces(self, superuser_client):
+        one = _interfaces_device("prefetch-interfaces-one", 1)
+        many = _interfaces_device("prefetch-interfaces-many", MANY)
+        _interfaces_tab(superuser_client, _interfaces_device("prefetch-interfaces-warm", 1))
+
+        counts = [
+            _query_count(lambda device=device: _interfaces_tab(superuser_client, device)) for device in (one, many)
+        ]
+
+        assert counts[0] == counts[1], counts
+
+
+def _cables_device(name, count):
+    """Return a device whose *count* LLDP neighbours and both ends are in mixed mapping states, with its snapshot."""
+    device = make_device(name, librenms_cf={SERVER_KEY: {"id": HOST_ID}})
+    links, ports, neighbour_ports = [], [], {}
+    for index in range(count):
+        local_port_id, neighbour_id, remote_port_id = 1000 + index, NEIGHBOUR_BASE + index, REMOTE_PORT_BASE + index
+        local = make_interface(device, f"eth{index}", iface_type="1000base-t")
+        _seed_port_mapping(local, index, local_port_id)
+        neighbour = make_device(f"{name}-peer{index}")
+        held_ids = _seed_device_mapping(neighbour, index, neighbour_id)
+        remote = make_interface(neighbour, "eth-r", iface_type="1000base-t")
+        _seed_port_mapping(remote, index, remote_port_id)
+        neighbour_ports.update((held_id, []) for held_id in held_ids)
+        links.append(
+            link_row(
+                local_port_id,
+                "eth-r",
+                local_port=f"eth{index}",
+                remote_device_id=neighbour_id if held_ids else None,
+                remote_port_id=remote_port_id,
+                remote_hostname=neighbour.name,
+            )
+        )
+        ports.append(port_row(local_port_id, f"eth{index}", device_id=HOST_ID))
+        neighbour_ports[neighbour_id] = [port_row(remote_port_id, "eth-r", device_id=neighbour_id)]
+    seed_cables_snapshot(device, links, ports, neighbour_ports=neighbour_ports, server_key=SERVER_KEY)
+    return device
+
+
+def _cables_tab(client, device):
+    url = reverse(
+        "plugins:netbox_librenms_plugin:sync_cache_fragment",
+        kwargs={"object_type": "device", "pk": device.pk, "tab": "cables"},
+    )
+    response = client.get(url, {"server_key": SERVER_KEY})
+    assert response.status_code == 200
+    assert response.context["cable_sync"]["table"] is not None
+    return response
+
+
+@pytest.mark.django_db
+class TestCablesTab:
+    def test_every_device_and_interface_read_is_prefetched(self, superuser_client):
+        _ignore_rule()
+        device = _cables_device("prefetch-cables", 10)
+
+        with spy_mapping_reads() as spy:
+            _cables_tab(superuser_client, device)
+
+        _assert_prefetched(spy, device)
+
+    def test_the_query_count_does_not_grow_with_the_links(self, superuser_client):
+        one = _cables_device("prefetch-cables-few", FEW_LINKS)
+        many = _cables_device("prefetch-cables-many", MANY_LINKS)
+        _cables_tab(superuser_client, _cables_device("prefetch-cables-warm", FEW_LINKS))
+
+        counts = [_query_count(lambda device=device: _cables_tab(superuser_client, device)) for device in (one, many)]
+
+        assert counts[0] == counts[1], counts
+
+
+def _ip_device(name, count):
+    """Return a device whose *count* interfaces in mixed mapping states each carry one IP row, with its snapshot."""
+    device = make_device(name, librenms_cf={SERVER_KEY: {"id": HOST_ID}})
+    ports = []
+    for index in range(count):
+        port_id = 1000 + index
+        _seed_port_mapping(make_interface(device, f"eth{index}", iface_type="1000base-t"), index, port_id)
+        ports.append({"port_id": port_id, "ifName": f"eth{index}", "ifDescr": f"eth{index}"})
+    addresses = [
+        {"ipv4_address": f"198.18.{index // 250}.{index % 250 + 1}", "ipv4_prefixlen": 24, "port_id": port["port_id"]}
+        for index, port in enumerate(ports)
+    ]
+    seed_ip_snapshot(device, addresses, ports, server_key=SERVER_KEY)
+    return device
+
+
+@pytest.mark.django_db
+class TestIPAddressesTab:
+    def test_every_interface_read_is_prefetched(self, superuser_client):
+        _ignore_rule()
+        device = _ip_device("prefetch-ip", 8)
+
+        with spy_mapping_reads() as spy:
+            _tab(superuser_client, device, "ipaddresses")
+
+        _assert_prefetched(spy, device)
+
+    def test_the_query_count_does_not_grow_with_the_addresses(self, superuser_client):
+        _ignore_rule()
+        one = _ip_device("prefetch-ip-one", 1)
+        many = _ip_device("prefetch-ip-many", MANY)
+        _tab(superuser_client, _ip_device("prefetch-ip-warm", 1), "ipaddresses")
+
+        counts = [
+            _query_count(lambda device=device: _tab(superuser_client, device, "ipaddresses")) for device in (one, many)
+        ]
+
+        assert counts[0] == counts[1], counts
+
+
+def _modules_device(name, count):
+    """Return a device whose *count* transceivers name interfaces in mixed mapping states, with its snapshot."""
+    device = make_device(name)
+    inventory, ports, transceivers = [], [], []
+    for index in range(count):
+        port_id = 1000 + index
+        _seed_port_mapping(make_interface(device, f"eth{index}", iface_type="1000base-t"), index, port_id)
+        inventory.append(
+            {
+                "entPhysicalIndex": 100 + index,
+                "entPhysicalName": f"Transceiver eth{index}",
+                "entPhysicalDescr": f"Transceiver eth{index}",
+                "entPhysicalModelName": "SFP-1G",
+                "entPhysicalClass": "port",
+                "entPhysicalContainedIn": 0,
+                "entPhysicalSerialNum": f"SN{index}",
+            }
+        )
+        ports.append({"port_id": port_id, "ifName": f"eth{index}", "ifDescr": f"eth{index}"})
+        transceivers.append(transceiver_row(100 + index, port_id=port_id, model="SFP-1G", serial=f"SN{index}"))
+    seed_mapped_modules(device, inventory, ports, transceivers, librenms_id=HOST_ID, server_key=SERVER_KEY)
+    return device
+
+
+@pytest.mark.django_db
+class TestModulesTab:
+    def test_every_interface_read_is_prefetched(self, superuser_client):
+        device = _modules_device("prefetch-modules", 8)
+
+        with spy_mapping_reads() as spy:
+            _tab(superuser_client, device, "modules")
+
+        _assert_prefetched(spy, device)
+
+    def test_the_query_count_does_not_grow_with_the_items(self, superuser_client):
+        one = _modules_device("prefetch-modules-one", 1)
+        many = _modules_device("prefetch-modules-many", MANY)
+        _tab(superuser_client, _modules_device("prefetch-modules-warm", 1), "modules")
+
+        counts = [
+            _query_count(lambda device=device: _tab(superuser_client, device, "modules")) for device in (one, many)
+        ]
+
+        assert counts[0] == counts[1], counts
+
+
+@pytest.mark.django_db
+class TestVirtualChassisInterfacesTab:
+    def test_every_member_and_interface_read_is_prefetched(self, superuser_client):
+        _chassis, members = make_virtual_chassis_members("prefetch-vc", count=3)
+        for position, member in enumerate(members):
+            _seed_device_mapping(member, position, HOST_ID + position)
+        ports = []
+        for index in range(6):
+            member = members[index % 3]
+            interface = make_interface(member, f"eth{index}", iface_type="1000base-t")
+            _seed_port_mapping(interface, index, 1000 + index)
+            ports.append(_port(1000 + index, f"eth{index}"))
+        seed_interfaces_snapshot(members[0], ports, server_key=SERVER_KEY)
+
+        with spy_mapping_reads() as spy:
+            _tab(superuser_client, members[0], "interfaces", interface_name_field="ifName")
+
+        _assert_prefetched(spy, members[0])
+
+
+def _status_devices(tag, count):
+    """Return the filter of a new device role whose *count* devices are in mixed mapping states."""
+    from dcim.models import DeviceRole
+
+    role = DeviceRole.objects.create(name=tag, slug=tag, color="00ff00")
+    for index in range(count):
+        device = make_device(f"{tag}-{index}")
+        device.role = role
+        device.save()
+        _seed_device_mapping(device, index, NEIGHBOUR_BASE + index)
+    return {"role": role.pk}
+
+
+def _status_vms(tag, count):
+    """Return the filter of a new cluster whose *count* virtual machines are in mixed mapping states."""
+    cluster = make_cluster(tag)
+    for index in range(count):
+        _seed_device_mapping(make_vm(f"{tag}-{index}", cluster), index, NEIGHBOUR_BASE + index)
+    return {"cluster": cluster.pk}
+
+
+def _status_list(client, url_name, filters):
+    response = client.get(reverse(f"plugins:netbox_librenms_plugin:{url_name}"), {**filters, "per_page": 1000})
+    assert response.status_code == 200
+    return response
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("url_name", "seed"),
+    [("device_status_list", _status_devices), ("vm_status_list", _status_vms)],
+    ids=["device", "vm"],
+)
+class TestStatusLists:
+    @pytest.fixture
+    def status_client(self, client, settings, librenms_server):
+        bind_librenms_server(settings, librenms_server, server_key=SERVER_KEY)
+        client.force_login(make_superuser("mapping-prefetch-status-user"))
+        return client
+
+    def test_every_listed_object_read_is_prefetched(self, status_client, url_name, seed):
+        filters = seed("prefetch-status", 10)
+
+        with spy_mapping_reads() as spy:
+            _status_list(status_client, url_name, filters)
+
+        _assert_prefetched(spy)
+
+    def test_the_query_count_does_not_grow_with_the_objects(self, status_client, url_name, seed):
+        few = seed("prefetch-status-few", FEW_LINKS)
+        many = seed("prefetch-status-many", MANY)
+        _status_list(status_client, url_name, seed("prefetch-status-warm", FEW_LINKS))
+
+        counts = [
+            _query_count(lambda filters=filters: _status_list(status_client, url_name, filters))
+            for filters in (few, many)
+        ]
+
+        assert counts[0] == counts[1], counts
+
+
+@pytest.mark.django_db
+class TestCableWrites:
+    """Each cable writer reads a few locked ends and owners; it prefetches them as one collection."""
+
+    def test_a_cable_sync_prefetches_its_ends_and_owners(self, client, live_librenms):
+        from dcim.models import Cable
+
+        from netbox_librenms_plugin.tests.test_cable_snapshot_read_actions import _pair, _sync
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        _ignore_rule()
+        subject, _neighbour, local, remote, *_rest = _pair(remote_interface=True)
+        client.force_login(make_superuser("mapping-prefetch-cable-sync"))
+        producers = [
+            (SyncCablesView, name)
+            for name in (
+                "_apply_cable_action",
+                "_rule_block",
+                "_snapshot_cable_port_records",
+                "_locked_ends_may_be_row_ports",
+            )
+        ]
+
+        with spy_mapping_reads(*producers) as spy:
+            response = _sync(client, subject, local, remote)
+
+        assert response.status_code == 302
+        assert Cable.objects.count() == 1
+        assert spy.reading_scopes() == {name for _owner, name in producers}
+        _assert_prefetched(spy)
+
+    def test_a_cable_replacement_prefetches_the_displaced_far_end(self, client, live_librenms):
+        """A forced replacement detaches the old cable's far end; the rule check reads that interface too."""
+        from dcim.models import Cable
+
+        from netbox_librenms_plugin.tests.test_cable_overwrite import _confirmed_intent
+        from netbox_librenms_plugin.tests.test_cable_snapshot_read_actions import LOCAL_PORT_ID, _pair, _sync
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        _ignore_rule()
+        subject, _neighbour, local, remote, *_rest = _pair(remote_interface=True)
+        # Unbound, so the rules have no port of it to decide; the check still reads its mapping.
+        displaced = make_interface(make_device("prefetch-cable-displaced-peer"), "eth9")
+        old_cable = cable_together(local, displaced)
+        client.force_login(make_superuser("mapping-prefetch-cable-replace"))
+        intent = _confirmed_intent(local, remote, old_cable)
+
+        with spy_mapping_reads((SyncCablesView, "_rule_block")) as spy:
+            response = _sync(
+                client, subject, local, remote, force="on", **{f"expected_cable_intent_{LOCAL_PORT_ID}": intent}
+            )
+
+        assert response.status_code == 302
+        assert not Cable.objects.filter(pk=old_cable.pk).exists()
+        assert displaced.pk in {obj.pk for obj in spy.saved_reads()}
+        _assert_prefetched(spy)
+
+    def test_a_cable_verify_prefetches_the_page_devices(self, client, live_librenms):
+        from netbox_librenms_plugin.tests.test_cable_snapshot_read_actions import LOCAL_PORT_ID, _pair
+        from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
+
+        subject, *_rest = _pair(remote_interface=True)
+        client.force_login(make_superuser("mapping-prefetch-cable-verify"))
+
+        with spy_mapping_reads((SingleCableVerifyView, "post")) as spy:
+            response = client.post(
+                reverse("plugins:netbox_librenms_plugin:verify_cable"),
+                {"device_id": subject.pk, "row_id": str(LOCAL_PORT_ID), "server_key": SERVER_KEY},
+                content_type="application/json",
+            )
+
+        assert response.status_code == 200
+        _assert_prefetched(spy)
+
+    def test_a_far_end_create_prefetches_the_page_devices(self, client, live_librenms):
+        from dcim.models import Cable
+
+        from netbox_librenms_plugin import utils
+        from netbox_librenms_plugin.tests.test_cable_snapshot_read_actions import LOCAL_PORT_ID, _pair
+
+        subject, _neighbour, local, *_rest = _pair()
+        client.force_login(make_superuser("mapping-prefetch-cable-create"))
+
+        with spy_mapping_reads((utils, "any_device_migrated")) as spy:
+            response = client.post(
+                reverse("plugins:netbox_librenms_plugin:cable_remote_create", args=[subject.pk]),
+                {"server_key": SERVER_KEY, "row_id": str(LOCAL_PORT_ID), "expected_local_id": local.pk},
+            )
+
+        assert response.status_code == 302
+        assert Cable.objects.count() == 1
+        _assert_prefetched(spy)
+
+    def test_a_cable_refresh_prefetches_the_neighbours_and_port_owners(self, client, live_librenms):
+        from netbox_librenms_plugin import cable_scope, source_cache
+        from netbox_librenms_plugin.acquisition import resources
+
+        subject = make_device("prefetch-refresh", librenms_cf={SERVER_KEY: {"id": HOST_ID}})
+        _chassis, chassis_members = make_virtual_chassis_members("prefetch-refresh-vc", count=2)
+        neighbours = [make_device(f"prefetch-refresh-peer{index}") for index in range(6)] + chassis_members
+        links, ports = [], []
+        server = live_librenms.server
+        for index, neighbour in enumerate(neighbours):
+            neighbour_id, local_port_id, remote_port_id = NEIGHBOUR_BASE + index, 1000 + index, REMOTE_PORT_BASE + index
+            held_ids = _seed_device_mapping(neighbour, index, neighbour_id)
+            local = make_interface(subject, f"eth{index}", iface_type="1000base-t")
+            _seed_port_mapping(local, index, local_port_id)
+            _seed_port_mapping(make_interface(neighbour, "eth-r", iface_type="1000base-t"), index, remote_port_id)
+            links.append(
+                link_row(
+                    local_port_id,
+                    "eth-r",
+                    local_port=f"eth{index}",
+                    remote_port_id=remote_port_id,
+                    remote_hostname=neighbour.name,
+                )
+            )
+            ports.append(port_row(local_port_id, f"eth{index}", device_id=HOST_ID))
+            for held_id in held_ids:
+                # The first neighbour's ports fail, so the tab names the failed source to the actor.
+                body = {"status": "ok", "ports": [port_row(remote_port_id, "eth-r", device_id=held_id)]}
+                server.register(f"/api/v0/devices/{held_id}/ports", body, status=500 if index == 0 else 200)
+        server.register(f"/api/v0/devices/{HOST_ID}/links", {"status": "ok", "links": links})
+        server.register(f"/api/v0/devices/{HOST_ID}/ports", {"status": "ok", "ports": ports})
+        client.force_login(make_superuser("mapping-prefetch-cable-refresh"))
+        producers = [
+            (resources, "_cable_parts"),
+            (cable_scope, "cable_port_owner_ids"),
+            (source_cache, "visible_cable_port_sources"),
+        ]
+
+        with spy_mapping_reads(*producers) as spy:
+            response = client.post(
+                reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[subject.pk]),
+                {"server_key": SERVER_KEY},
+                HTTP_HX_REQUEST="true",
+            )
+
+        assert response.status_code == 200
+        assert spy.reading_scopes() == {name for _owner, name in producers}
+        _assert_prefetched(spy)
+
+    def _refresh_two_chassis(self, client, server, tag, host_id, members):
+        """Refresh the cables of a chassis whose links reach another chassis by host name only; return the page, spy and count."""
+        _host_vc, hosts = make_virtual_chassis_members(f"{tag}-host", count=members)
+        _peer_vc, peers = make_virtual_chassis_members(f"{tag}-peer", count=members)
+        seed_mapping(hosts[0], SERVER_KEY, own=host_id)
+        seed_mapping(peers[0], SERVER_KEY, own=host_id + 1)
+        # Every member owns an interface, so every member is a port owner of the refresh scope.
+        for index, member in enumerate([*hosts, *peers]):
+            make_interface(member, f"eth{index}", iface_type="1000base-t")
+        links, ports = [], []
+        for index, peer in enumerate(peers[:2]):
+            port_id = host_id * 100 + index
+            local = make_interface(hosts[0], f"uplink{index}", iface_type="1000base-t")
+            seed_mapping(local, SERVER_KEY, own=port_id)
+            links.append(link_row(port_id, "eth-r", local_port=f"uplink{index}", remote_hostname=peer.name))
+            ports.append(port_row(port_id, f"uplink{index}", device_id=host_id))
+        server.register(f"/api/v0/devices/{host_id}/links", {"status": "ok", "links": links})
+        server.register(f"/api/v0/devices/{host_id}/ports", {"status": "ok", "ports": ports})
+        server.register(f"/api/v0/devices/{host_id + 1}/ports", {"status": "ok", "ports": []})
+        with spy_mapping_reads() as spy:
+            count = _query_count(
+                lambda: client.post(
+                    reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[hosts[0].pk]),
+                    {"server_key": SERVER_KEY},
+                    HTTP_HX_REQUEST="true",
+                )
+            )
+        return hosts[0], spy, count
+
+    def test_a_cable_refresh_loads_each_chassis_once(self, client, live_librenms):
+        """The port owners and the host-name neighbours of a chassis share one member load and one prefetch."""
+        client.force_login(make_superuser("mapping-prefetch-cable-refresh-vc"))
+        server = live_librenms.server
+        self._refresh_two_chassis(client, server, "prefetch-refresh-warm", 400, 2)
+
+        results = [
+            self._refresh_two_chassis(client, server, f"prefetch-refresh-{members}", host_id, members)
+            for members, host_id in ((2, 500), (6, 600))
+        ]
+
+        (_page, few_spy, few_count), (_page, many_spy, many_count) = results
+        assert few_spy.prefetch_calls == many_spy.prefetch_calls, (few_spy.prefetch_calls, many_spy.prefetch_calls)
+        assert few_count == many_count, (few_count, many_count)
+        for page, spy, _count in results:
+            _assert_prefetched(spy, page)
+
+
+@pytest.mark.django_db
+def test_a_module_install_bind_prefetches_its_candidate_interfaces(live_librenms):
+    """The bind writer reads the same-name and module interfaces of the item; it prefetches them first."""
+    from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_module_type
+    from netbox_librenms_plugin.tests.test_module_install_views import _item, _post_branch, _with_installable_child
+    from netbox_librenms_plugin.views.sync import modules
+
+    device = make_device_with_module_bays("prefetch-bind", ["Slot 1"])
+    seed_mapping(device, SERVER_KEY, own=65)
+    module_type = make_module_type("PREFETCH-BIND-CARD")
+    interface = make_interface(device, "Te1/1/1")
+    rows = _with_installable_child([_item(10, module_type.model, "Slot 1")], 10, "prefetch-bind")
+
+    with spy_mapping_reads((modules, "_select_bind_candidate")) as spy:
+        _post_branch(
+            device,
+            rows,
+            10,
+            65,
+            live_librenms,
+            ports=[{"port_id": 6501, "ifName": interface.name}],
+            transceivers=[transceiver_row(10, port_id=6501, model=module_type.model)],
+        )
+
+    interface.refresh_from_db()
+    assert read_mapping(interface).own_id(SERVER_KEY) == 6501
+    _assert_prefetched(spy)
+
+
+@pytest.mark.django_db
+def test_an_ip_sync_that_creates_interfaces_prefetches_the_existing_ones(client, settings, live_librenms):
+    """The writer indexes every interface of the owner by its bound port before it creates a missing one."""
+    from dcim.models import Interface
+
+    from netbox_librenms_plugin.tests.test_ip_address_sync_safety import _configure_test_server, _ip_row, _seed_ip_rows
+    from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
+
+    _configure_test_server(settings)
+    device = make_device("prefetch-ip-create", librenms_cf={SERVER_KEY: {"id": 42}})
+    for index in range(8):
+        _seed_port_mapping(make_interface(device, f"eth{index}", iface_type="1000base-t"), index, 1000 + index)
+    _seed_ip_rows(device, [_ip_row("198.18.12.10", 7001, "Ethernet1", ifType="ethernetCsmacd")])
+    client.force_login(make_superuser("mapping-prefetch-ip-create"))
+
+    with spy_mapping_reads((SyncIPAddressesView, "_build_interface_creation_state")) as spy:
+        response = client.post(
+            reverse(
+                "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
+                kwargs={"object_type": "device", "pk": device.pk},
+            ),
+            {"server_key": SERVER_KEY, "create-missing-interfaces-toggle": "on", "select": ["198.18.12.10/24"]},
+        )
+
+    assert response.status_code == 302
+    assert Interface.objects.filter(device=device, name="Ethernet1").exists()
+    _assert_prefetched(spy)
+
+
+def _merge_harness():
+    from netbox_librenms_plugin.tests.test_coverage_actions import _MergeViewHarness
+
+    return _MergeViewHarness
+
+
+class TestMergeView(_merge_harness()):
+    """The merge reads the winner and donor sync devices together; it prefetches the pair first."""
+
+    def test_the_merge_prefetches_the_winner_and_the_donor(self):
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.views.imports import actions
+
+        winner = make_device("prefetch-merge-winner", librenms_cf={self.server_key: {"id": 20}})
+        donor = make_device("prefetch-merge-donor", librenms_cf={self.server_key: {"id": 10}})
+
+        with spy_mapping_reads((actions, "_legacy_link_label")) as spy:
+            response = self._post_merge(winner, donor)
+
+        assert response.status_code == 200
+        assert read_mapping(Device.objects.get(pk=donor.pk)).migrated_to(self.server_key) is not None
+        assert {obj.pk for obj in spy.saved_reads()} == {winner.pk, donor.pk}
+        _assert_prefetched(spy)
+
+
+@pytest.mark.django_db
+def test_the_sync_page_of_a_chassis_member_prefetches_the_members(superuser_client):
+    """The sync owner and the mapped servers of a chassis come from the mappings of every member."""
+    from netbox_librenms_plugin import server_mappings, server_selection
+
+    _chassis, members = make_virtual_chassis_members("prefetch-page-vc", count=4)
+    for position, member in enumerate(members):
+        _seed_device_mapping(member, position + 2, HOST_ID + position)
+    producers = [(server_selection, "get_librenms_sync_device"), (server_mappings, "mapped_device_servers")]
+
+    with spy_mapping_reads(*producers) as spy:
+        response = superuser_client.get(
+            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[members[0].pk]),
+            {"server_key": SERVER_KEY},
+        )
+
+    assert response.status_code == 200
+    assert spy.reading_scopes() == {name for _owner, name in producers}
+    _assert_prefetched(spy)
+
+
+@pytest.mark.django_db
+def test_the_cables_tab_of_a_chassis_member_prefetches_the_local_owners(superuser_client):
+    """The migrated-owner check reads the page device, its sync owner and each row's local owner."""
+    from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
+
+    _chassis, members = make_virtual_chassis_members("prefetch-cables-vc", count=3)
+    seed_mapping(members[0], SERVER_KEY, own=HOST_ID)
+    links, ports = [], []
+    for index, member in enumerate(members):
+        port_id = 1000 + index
+        seed_mapping(make_interface(member, f"eth{index}", iface_type="1000base-t"), SERVER_KEY, own=port_id)
+        links.append(link_row(port_id, "eth-r", local_port=f"eth{index}", remote_hostname="prefetch-cables-vc-peer"))
+        ports.append(port_row(port_id, f"eth{index}", device_id=HOST_ID))
+    seed_cables_snapshot(members[1], links, ports, server_key=SERVER_KEY)
+
+    with spy_mapping_reads((BaseCableTableView, "_disable_actions_for_migrated_owners")) as spy:
+        _cables_tab(superuser_client, members[1])
+
+    assert len({obj.pk for obj in spy.saved_reads()}) == len(members)
+    _assert_prefetched(spy)
+
+
+@pytest.mark.django_db
+def test_the_interfaces_tab_of_a_virtual_machine_prefetches_its_interfaces(superuser_client):
+    from virtualization.models import VMInterface
+
+    vm = make_vm("prefetch-vm-interfaces")
+    seed_mapping(vm, SERVER_KEY, own=HOST_ID)
+    parent = VMInterface.objects.create(virtual_machine=vm, name="eth0")
+    seed_mapping(parent, SERVER_KEY, own=999)
+    ports = [_port(999, "eth0")]
+    for index in range(1, 8):
+        interface = VMInterface.objects.create(virtual_machine=vm, name=f"eth0.{index}", parent=parent)
+        _seed_port_mapping(interface, index, 1000 + index)
+        ports.append(_port(1000 + index, f"eth0.{index}"))
+    seed_interfaces_snapshot(vm, ports, [port_pair(1000 + index, 999) for index in range(1, 8)], server_key=SERVER_KEY)
+    url = reverse(
+        "plugins:netbox_librenms_plugin:sync_cache_fragment",
+        kwargs={"object_type": "virtualmachine", "pk": vm.pk, "tab": "interfaces"},
+    )
+
+    with spy_mapping_reads() as spy:
+        response = superuser_client.get(url, {"server_key": SERVER_KEY, "interface_name_field": "ifName"})
+
+    assert response.status_code == 200
+    _assert_prefetched(spy, vm)
+
+
+@pytest.mark.django_db
+def test_an_interface_verify_prefetches_the_relationship_index(superuser_client):
+    """The verify repaint indexes the owner's interfaces by bound port, then enriches and renders the row's LAG."""
+    device = _interfaces_device("prefetch-verify", 6)
+
+    with spy_mapping_reads() as spy:
+        response = superuser_client.post(
+            reverse("plugins:netbox_librenms_plugin:verify_interface"),
+            json.dumps(
+                {"device_id": device.pk, "port_id": 1001, "interface_name_field": "ifName", "server_key": SERVER_KEY}
+            ),
+            content_type="application/json",
+        )
+
+    assert response.status_code == 200
+    assert "ae0" in response.json()["formatted_row"]["parent"]
+    _assert_prefetched(spy, device)
+
+
+def _status_chassis(tag, chassis_count, members_per_chassis=3):
+    """Return the filter of a new device role whose chassis members are all listed, in mixed mapping states."""
+    from dcim.models import DeviceRole
+
+    role = DeviceRole.objects.create(name=tag, slug=tag, color="00ff00")
+    for chassis in range(chassis_count):
+        _vc, members = make_virtual_chassis_members(f"{tag}-{chassis}", count=members_per_chassis)
+        for position, member in enumerate(members):
+            member.role = role
+            member.save()
+            # The first member is unmapped, so each row points at a mapped sibling.
+            if position:
+                _seed_device_mapping(member, chassis + position, NEIGHBOUR_BASE + chassis * 10 + position)
+    return {"role": role.pk}
+
+
+@pytest.mark.django_db
+def test_the_device_status_list_loads_the_chassis_members_once(client, settings, librenms_server):
+    """Each chassis row links to its sync member; the members are loaded and prefetched once for the whole list."""
+    bind_librenms_server(settings, librenms_server, server_key=SERVER_KEY)
+    client.force_login(make_superuser("mapping-prefetch-status-vc-user"))
+    few = _status_chassis("prefetch-status-vc-few", 1)
+    many = _status_chassis("prefetch-status-vc-many", 6)
+    _status_list(client, "device_status_list", _status_chassis("prefetch-status-vc-warm", 1))
+
+    counts, prefetch_calls = [], []
+    for filters in (few, many):
+        with spy_mapping_reads() as spy:
+            counts.append(_query_count(lambda filters=filters: _status_list(client, "device_status_list", filters)))
+        prefetch_calls.append(spy.prefetch_calls)
+        _assert_prefetched(spy)
+
+    assert counts[0] == counts[1], counts
+    assert prefetch_calls[0] == prefetch_calls[1], prefetch_calls
+
+
+@pytest.mark.django_db
+def test_the_device_status_list_sql_names_each_listed_device_once(client, settings, librenms_server):
+    """The chassis links come from the loaded members, so the list SQL grows only by the status of each device."""
+    bind_librenms_server(settings, librenms_server, server_key=SERVER_KEY)
+    client.force_login(make_superuser("mapping-prefetch-status-sql-user"))
+    filters = _status_chassis("prefetch-status-vc-sql", 4)
+
+    with CaptureQueriesContext(connection) as queries:
+        response = _status_list(client, "device_status_list", filters)
+
+    assert response.content.decode().count("mdi-server-network") == 8
+    assert max(query["sql"].count(" WHEN ") for query in queries.captured_queries) <= 12
+
+
+@pytest.mark.django_db
+def test_the_import_list_prefetches_every_matched_object(live_librenms):
+    """Validation and the cached-row refresh read the mapping of each matched device; one preload serves both."""
+    from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
+    from netbox_librenms_plugin.tests.test_coverage_bulk_import import _libre_device
+
+    live_librenms.api.cache_timeout = 300
+    rows = []
+    for index in range(12):
+        device = make_device(f"import-prefetch-{index}", serial=f"IMPORT-SN-{index}")
+        state = index % 4
+        if state == 0:
+            seed_mapping(device, SERVER_KEY, own=7000 + index)
+        elif state == 1:
+            seed_mapping(device, SERVER_KEY, own=7000 + index, oob=8000 + index)
+        # State 2 matches by host name and state 3 by serial, so neither is mapped yet.
+        hostname = f"import-prefetch-other-{index}" if state == 3 else device.name
+        rows.append(_libre_device(7000 + index, hostname, serial=device.serial if state == 3 else ""))
+    live_librenms.server.register("/api/v0/devices", {"status": "ok", "devices": rows})
+
+    def validate(clear_cache):
+        with spy_mapping_reads() as spy:
+            validated = process_device_filters(
+                live_librenms.api,
+                {"hostname": "import-prefetch"},
+                vc_detection_enabled=False,
+                clear_cache=clear_cache,
+                show_disabled=True,
+            )
+        assert all(row["_validation"]["existing_device"] is not None for row in validated)
+        return spy
+
+    for clear_cache in (True, False):
+        spy = validate(clear_cache)
+        assert len({obj.pk for obj in spy.saved_reads()}) == len(rows)
+        assert spy.prefetch_calls == 1, "the list loads its matched objects in one batch, not one per row"
+        _assert_prefetched(spy)
+
+
+def _import_row(device_id, hostname, *, serial="", ip=None):
+    from netbox_librenms_plugin.tests.test_coverage_bulk_import import _libre_device
+
+    row = _libre_device(device_id, hostname, serial=serial)
+    row["sysName"] = hostname
+    row["ip"] = ip if ip is not None else f"198.19.{device_id % 250}.{device_id // 250 % 250}"
+    return row
+
+
+def _ip_only_rows(tag, base):
+    """Return import rows that match a Device and a VM only by management IP, a generated name and a padded serial."""
+    from dcim.models import Device
+    from virtualization.models import VMInterface
+
+    host = make_device(f"{tag}-ip-device")
+    make_ip(f"198.18.{base % 250}.1/24", assigned_object=make_interface(host, "mgmt0"))
+    vm = make_vm(f"{tag}-ip-vm")
+    make_ip(f"198.18.{base % 250}.2/24", assigned_object=VMInterface.objects.create(virtual_machine=vm, name="eth0"))
+    make_device(f"device-{base + 2}")
+    padded = make_device(f"{tag}-padded")
+    # Another tool can store padding, and a tab, that the serial lookup trims.
+    Device.objects.filter(pk=padded.pk).update(serial=f"\t{tag.upper()}-SN ")
+    return [
+        _import_row(base, f"{tag}-other-a", ip=f"198.18.{base % 250}.1"),
+        _import_row(base + 1, f"{tag}-other-b", ip=f"198.18.{base % 250}.2"),
+        _import_row(base + 2, ""),
+        _import_row(base + 3, f"{tag}-other-d", serial=f"{tag.upper()}-SN"),
+    ]
+
+
+@pytest.mark.django_db
+def test_the_import_list_prefetches_the_ip_name_and_serial_matches(live_librenms):
+    """IP-only, generated-name and padded-serial matches, and a cached row that gains a match, come from the one batch."""
+    from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
+
+    live_librenms.api.cache_timeout = 300
+    rows = [*_ip_only_rows("imp-batch", 7100), _import_row(7104, "imp-batch-late-row", ip="198.18.240.9")]
+    live_librenms.server.register("/api/v0/devices", {"status": "ok", "devices": rows})
+
+    def validate(clear_cache):
+        with spy_mapping_reads() as spy:
+            validated = process_device_filters(
+                live_librenms.api,
+                {"hostname": "imp-batch"},
+                vc_detection_enabled=False,
+                clear_cache=clear_cache,
+                show_disabled=True,
+            )
+        return {row["device_id"]: row["_validation"]["existing_device"] for row in validated}, spy
+
+    matched, spy = validate(clear_cache=True)
+    assert [device_id for device_id, existing in matched.items() if existing is None] == [7104]
+    assert spy.prefetch_calls == 1
+    _assert_prefetched(spy)
+
+    # The cached unmatched row gains a match by its management IP.
+    late = make_device("imp-batch-late")
+    make_ip("198.18.240.9/24", assigned_object=make_interface(late, "mgmt0"))
+    matched, spy = validate(clear_cache=False)
+    assert matched[7104] == late
+    assert all(existing is not None for existing in matched.values())
+    assert spy.prefetch_calls == 1
+    _assert_prefetched(spy)
+
+
+@pytest.mark.django_db
+def test_the_import_preload_skips_a_placeholder_serial():
+    """The serial lookups skip a placeholder serial, so the preload must not load the Devices that store one."""
+    from netbox_librenms_plugin.import_utils.device_operations import preload_import_objects
+
+    placeholder = make_device("imp-placeholder-stored", serial="N/A")
+    real = make_device("imp-real-stored", serial="IMP-REAL-SN")
+    rows = [
+        _import_row(7250, "imp-placeholder-row", serial=" N/A "),
+        _import_row(7251, "imp-real-row", serial="IMP-REAL-SN"),
+    ]
+
+    loaded = preload_import_objects(rows, SERVER_KEY)
+
+    assert (type(real), real.pk) in loaded
+    assert (type(placeholder), placeholder.pk) not in loaded
+
+
+@pytest.mark.django_db
+def test_the_import_preload_loads_the_devices_that_the_serial_rules_match():
+    """The validator resolves a serial under the serial rules, so the preload loads the Device that a rule matches."""
+    from netbox_librenms_plugin.import_utils.device_operations import preload_import_objects
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.serial_identity import SerialRules
+
+    NormalizationRule.objects.create(scope="serial", match_pattern=r"^S/N\s+(.+)$", replacement=r"\1")
+    ruled = make_device("imp-ruled-stored", serial="S/N IMP-RULED-SN")
+    other = make_device("imp-ruled-other", serial="IMP-OTHER-SN")
+
+    loaded = preload_import_objects(
+        [_import_row(7260, "imp-ruled-row", serial="IMP-RULED-SN")], SERVER_KEY, serial_rules=SerialRules.load()
+    )
+
+    assert (type(ruled), ruled.pk) in loaded
+    assert (type(other), other.pk) not in loaded
+
+
+@pytest.mark.django_db
+def test_the_import_preload_leaves_the_serial_matches_out_under_a_broken_serial_rule():
+    """The validator reports a broken serial rule on each row, so the preload must not raise it for the batch."""
+    from netbox_librenms_plugin.import_utils.device_operations import preload_import_objects
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.serial_identity import SerialRules
+
+    rule = NormalizationRule.objects.create(scope="serial", match_pattern=r"^S/N\s+(.+)$", replacement=r"\1")
+    # A QuerySet.update() skips clean(), so the stored rule can still be non-conforming.
+    NormalizationRule.objects.filter(pk=rule.pk).update(replacement=r"X\1")
+    named = make_device("imp-broken-rule-named", serial="IMP-BROKEN-SN")
+
+    loaded = preload_import_objects(
+        [_import_row(7270, named.name, serial="IMP-BROKEN-SN")], SERVER_KEY, serial_rules=SerialRules.load()
+    )
+
+    assert (type(named), named.pk) in loaded
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "serial",
+    [[], {}, ["IMP-LIST-SN"], "IMP-NUL\x00-SN", "IMP-SURROGATE-\ud800-SN"],
+    ids=["empty-list", "empty-dict", "list", "nul", "lone-surrogate"],
+)
+def test_the_import_preload_leaves_a_malformed_serial_to_the_row_validation(serial):
+    """A serial that no stored row can hold is an issue of its row, so the preload must not raise it for the batch."""
+    from netbox_librenms_plugin.import_utils.device_operations import preload_import_objects
+    from netbox_librenms_plugin.serial_identity import SerialRules
+
+    named = make_device("imp-malformed-serial-named")
+
+    loaded = preload_import_objects(
+        [_import_row(7280, named.name, serial=serial)], SERVER_KEY, serial_rules=SerialRules.load()
+    )
+
+    assert (type(named), named.pk) in loaded
+
+
+@pytest.mark.django_db
+def test_the_import_preload_runs_a_fixed_number_of_queries():
+    from netbox_librenms_plugin.import_utils.device_operations import preload_import_objects
+
+    few = _ip_only_rows("imp-few", 7200)
+    many = [row for index in range(8) for row in _ip_only_rows(f"imp-many{index}", 7300 + index * 10)]
+    preload_import_objects(few, SERVER_KEY)
+
+    counts = [_query_count(lambda rows=rows: preload_import_objects(rows, SERVER_KEY)) for rows in (few, many)]
+
+    assert counts[0] == counts[1], counts
+
+
+@pytest.mark.django_db
+def test_a_cached_row_that_gains_a_padded_name_match_reads_a_prefetched_device(live_librenms):
+    """The cached-row refresh matches the raw LibreNMS host name as stored, padding included."""
+    from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
+
+    live_librenms.api.cache_timeout = 300
+    live_librenms.server.register("/api/v0/devices", {"status": "ok", "devices": [_import_row(7400, " imp-pad-name ")]})
+
+    def validate(clear_cache):
+        with spy_mapping_reads() as spy:
+            (row,) = process_device_filters(
+                live_librenms.api,
+                {"hostname": "imp-pad-name"},
+                vc_detection_enabled=False,
+                clear_cache=clear_cache,
+                show_disabled=True,
+            )
+        return row["_validation"]["existing_device"], spy
+
+    assert validate(clear_cache=True)[0] is None
+    late = make_device(" imp-pad-name ")
+
+    existing, spy = validate(clear_cache=False)
+
+    assert existing == late
+    assert spy.prefetch_calls == 1
+    _assert_prefetched(spy)
+
+
+def _chassis_with_interfaces(tag, members):
+    """Return the members of a chassis whose members each own two interfaces in mixed mapping states."""
+    _vc, chassis = make_virtual_chassis_members(tag, count=members)
+    seed_mapping(chassis[0], SERVER_KEY, own=HOST_ID)
+    ports = []
+    for position, member in enumerate(chassis):
+        for slot in range(2):
+            index = position * 2 + slot
+            port_id = HOST_ID * 1000 + index
+            _seed_port_mapping(make_interface(member, f"eth{index}", iface_type="1000base-t"), index, port_id)
+            ports.append(_port(port_id, f"eth{index}"))
+    return chassis, ports
+
+
+def _chassis_tab(client, tag, members, tab):
+    chassis, ports = _chassis_with_interfaces(tag, members)
+    if tab == "interfaces":
+        seed_interfaces_snapshot(chassis[0], ports, server_key=SERVER_KEY)
+    else:
+        inventory = [
+            {
+                "entPhysicalIndex": 100 + index,
+                "entPhysicalName": f"Transceiver {port['ifName']}",
+                "entPhysicalDescr": f"Transceiver {port['ifName']}",
+                "entPhysicalModelName": "SFP-1G",
+                "entPhysicalClass": "port",
+                "entPhysicalContainedIn": 0,
+                "entPhysicalSerialNum": f"{tag}-SN{index}",
+            }
+            for index, port in enumerate(ports)
+        ]
+        transceivers = [
+            transceiver_row(100 + index, port_id=port["port_id"], model="SFP-1G", serial=f"{tag}-SN{index}")
+            for index, port in enumerate(ports)
+        ]
+        seed_mapped_modules(chassis[0], inventory, ports, transceivers, librenms_id=HOST_ID, server_key=SERVER_KEY)
+    with spy_mapping_reads() as spy:
+        count = _query_count(lambda: _tab(client, chassis[0], tab, interface_name_field="ifName"))
+    return chassis[0], spy, count
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("tab", ["interfaces", "modules"])
+def test_a_chassis_tab_loads_the_member_interfaces_once(superuser_client, tab):
+    """The tab indexes the interfaces of every member from one load and one prefetch, however many members."""
+    _chassis_tab(superuser_client, f"prefetch-{tab}-warm", 2, tab)
+
+    results = [_chassis_tab(superuser_client, f"prefetch-{tab}-{members}", members, tab) for members in (2, 6)]
+
+    # The query count still grows by one non-mapping query per member, so only the batches are compared.
+    (_page, few_spy, _few_count), (_page, many_spy, _many_count) = results
+    assert few_spy.prefetch_calls == many_spy.prefetch_calls, (few_spy.prefetch_calls, many_spy.prefetch_calls)
+    for page, spy, _count in results:
+        _assert_prefetched(spy, page)
+
+
+@pytest.mark.django_db
+def test_a_chassis_interface_verify_reads_the_member_identities_once(superuser_client):
+    """The verify repaint reads the bound port of every member's interfaces in one values query."""
+
+    def verify(tag, members):
+        chassis, ports = _chassis_with_interfaces(tag, members)
+        seed_interfaces_snapshot(chassis[0], ports, server_key=SERVER_KEY)
+        body = {"device_id": chassis[0].pk, "port_id": ports[0]["port_id"], "interface_name_field": "ifName"}
+        with CaptureQueriesContext(connection) as queries:
+            response = superuser_client.post(
+                reverse("plugins:netbox_librenms_plugin:verify_interface"),
+                json.dumps({**body, "server_key": SERVER_KEY}),
+                content_type="application/json",
+            )
+        assert response.status_code == 200
+        # A read of interface rows with their stored mapping; one per member before the batch.
+        return sum(
+            'FROM "dcim_interface"' in query["sql"] and "custom_field_data" in query["sql"]
+            for query in queries.captured_queries
+        )
+
+    verify("prefetch-verify-vc-warm", 2)
+
+    assert verify("prefetch-verify-vc-2", 2) == verify("prefetch-verify-vc-6", 6)

@@ -2181,3 +2181,46 @@ rules:
               from netbox_librenms_plugin.confirmation_intent import offer as $CALL
               ...
           - pattern: $CALL(...)
+  - id: mapping-read-loop-needs-prefetch
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This loop reads the mapping of each object it iterates, and its function never calls
+      prefetch_mappings(). After the mappings move to their own tables, each cold read costs three
+      queries. Call prefetch_mappings() once on the collection before the first read, and iterate
+      the list it returns. Limits: any prefetch_mappings() call in the function, also an unrelated
+      or a late one, hides this finding, and a read through a per-item helper or on a variable
+      derived from the loop variable is not seen.
+    metadata:
+      category: performance
+      references:
+        - "netbox_librenms_plugin/server_mappings.py"
+    paths:
+      exclude:
+        - "**/tests/**"
+        - "**/migrations/**"
+    patterns:
+      - pattern: read_mapping($X)
+      - pattern-either:
+          - pattern-inside: |
+              for $X in $ITER:
+                  ...
+          - pattern-inside: |
+              for ($X, ...) in $ITER:
+                  ...
+          - pattern-inside: |
+              for (..., $X) in $ITER:
+                  ...
+          - pattern-inside: "[$E for $X in $ITER]"
+          - pattern-inside: "[$E for $X in $ITER if $COND]"
+          - pattern-inside: "{$E for $X in $ITER}"
+          - pattern-inside: "{$E for $X in $ITER if $COND}"
+          - pattern-inside: "($E for $X in $ITER)"
+          - pattern-inside: "($E for $X in $ITER if $COND)"
+          - pattern-inside: "{$K: $V for $X in $ITER}"
+          - pattern-inside: "{$K: $V for $X in $ITER if $COND}"
+      - pattern-not-inside: |
+          def $FUNC(...):
+              ...
+              <... prefetch_mappings(...) ...>
+              ...

@@ -2,7 +2,7 @@
 
 import logging
 
-from dcim.models import Device, DeviceRole, DeviceType, Rack, Site, VirtualChassis
+from dcim.models import Device, DeviceRole, DeviceType, Interface, Rack, Site, VirtualChassis
 from django.core.cache import cache
 from django.db.models import Q
 from django.utils import timezone
@@ -31,6 +31,7 @@ from ..serial_identity import (
     is_identity,
     resolve_device,
     resolve_device_write,
+    resolve_devices,
     stored_form,
 )
 from ..transactions import atomic_with_events
@@ -57,7 +58,7 @@ from ..utils import (
     resolve_location_mapping,
 )
 from .cache import get_import_device_cache_key
-from .naming import _name_candidates, _resolve_device_name
+from .naming import _name_candidates, _resolve_device_name, import_name_variants
 from .virtual_chassis import (
     VCNumberingError,
     _member_name,
@@ -74,12 +75,17 @@ from netbox_librenms_plugin.server_mappings import (
     MappingRole,
     assign_own,
     find_mapping,
+    identity_q,
     lock_librenms_id_assignment,
     persist_mapping,
+    prefetch_mappings,
     read_mapping,
 )
 
 logger = logging.getLogger(__name__)
+
+# Each identity regex of the import preload holds at most this many identities; all regexes run in one query.
+PRELOAD_IDENTITY_CHUNK = 32
 
 # Prefix on the issue appended by validate_device_for_import()'s catch-all except branch when
 # validation aborts on an exception and returns only a PARTIAL result. Downstream fail-closed
@@ -198,6 +204,16 @@ def _describe_link_note(existing_link):
     return "not linked to LibreNMS"
 
 
+def host_address_ips(canonical_hosts):
+    """Return the ``IPAddress`` rows whose host address is one of *canonical_hosts*, in any prefix length."""
+    from ipam.models import IPAddress
+
+    match = Q(pk__in=[])
+    for host in canonical_hosts:
+        match |= Q(address__net_host=host)
+    return IPAddress.objects.filter(match)
+
+
 def resolve_device_by_host_ip(primary_ip):
     """
     Resolve the unique NetBox Device or VirtualMachine that carries a host address.
@@ -227,13 +243,12 @@ def resolve_device_by_host_ip(primary_ip):
 
     """
     from dcim.models import Device
-    from ipam.models import IPAddress
 
     canonical_host = str(parse_host_address(primary_ip))
 
     # prefetch_related on the assigned_object GenericForeignKey resolves every duplicate net_host
     # row's interface in one bulk pass instead of a per-row content-type lookup (small N, but free).
-    matching_ips = IPAddress.objects.filter(address__net_host=canonical_host).prefetch_related("assigned_object")
+    matching_ips = host_address_ips([canonical_host]).prefetch_related("assigned_object")
     candidates = {}
     matching_exists = False
     for existing_ip in matching_ips:
@@ -624,6 +639,102 @@ def _detect_serial_match_role(existing_by_serial, existing_link, hostname, seria
     }
 
 
+def _storable_serial(value) -> bool:
+    """Return whether *value* is a JSON scalar whose text a PostgreSQL text column can hold: no NUL, valid UTF-8."""
+    if not isinstance(value, (str, int, float)):
+        return False
+    text = str(value)
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return "\x00" not in text
+
+
+def preload_import_objects(
+    libre_devices, server_key: str, *, existing=(), resolved_names=(), serial_rules: SerialRules | None = None
+) -> dict:
+    """
+    Load the NetBox objects that the import rows can match, and prefetch their mappings.
+
+    The query is a superset of the matches that :func:`validate_device_for_import` and the cached
+    row refresh make, built from the predicates of their own lookups: the LibreNMS identities, every
+    name the importer can resolve and the raw names, the Devices that the serials resolve to, the
+    owners of the management IP addresses, and the *existing* objects of cached rows. Each model is
+    one query, and the serials one more. The cascade of the validator still chooses the match.
+
+    Args:
+        libre_devices (Iterable[dict]): The LibreNMS device rows of the import list.
+        server_key (str): The LibreNMS server key of the identities.
+        existing (Iterable[tuple[type, int]]): The ``(model, pk)`` of each cached row's matched object.
+        resolved_names (Iterable[str]): The resolved names of the cached rows.
+        serial_rules (SerialRules | None): The batch's serial rules, which the validator resolves the
+            serials with; None reads them when a row has a serial.
+
+    Returns:
+        dict: Each loaded object keyed by ``(model, pk)``.
+
+    """
+    from django.contrib.contenttypes.models import ContentType
+    from virtualization.models import VMInterface
+
+    libre_devices = list(libre_devices)
+    identities = sorted(
+        {librenms_id for row in libre_devices if (librenms_id := coerce_librenms_id(row.get("device_id"))) is not None}
+    )
+    names = {name for name in resolved_names if isinstance(name, str) and name}
+    for row in libre_devices:
+        names.update(name for name in _name_candidates(row) if name)
+        # The cached-row refresh also matches the raw values as LibreNMS stores them, padding included.
+        names.update(name for key in ("hostname", "sysName") if isinstance(name := row.get(key), str) and name)
+        names.update(variant["name"] for variant in import_name_variants(row).values() if variant["name"])
+    # The validator and the cached-row refresh resolve the LibreNMS text, so the preload resolves it too.
+    # A serial that no stored row can hold is an issue of its row in the validator, so the preload leaves it out.
+    serials = [row["serial"] for row in libre_devices if _storable_serial(row.get("serial"))]
+    try:
+        serial_resolutions = resolve_devices(serials, rules=serial_rules) if serials else {}
+    except RuleConfigurationError:
+        # The validator reports the broken rule on each row; the preload only leaves the serial matches out.
+        serial_resolutions = {}
+    serial_pks = {device.pk for resolution in serial_resolutions.values() for device in resolution.matches}
+    hosts = set()
+    for row in libre_devices:
+        if row.get("ip"):
+            try:
+                hosts.add(str(parse_host_address(row["ip"])))
+            except ValueError:
+                # The row validator refuses an address it cannot parse.
+                continue
+    ips = host_address_ips(sorted(hosts))
+    existing_pks = {}
+    for model, pk in existing:
+        existing_pks.setdefault(model, set()).add(pk)
+    objects = []
+    for model, interface_model, owner_field in (
+        (Device, Interface, "device_id"),
+        (VirtualMachine, VMInterface, "virtual_machine_id"),
+    ):
+        match = Q(pk__in=existing_pks.get(model, set()))
+        for name in sorted(names):
+            match |= Q(name__iexact=name)
+        assigned = ips.filter(assigned_object_type=ContentType.objects.get_for_model(interface_model))
+        match |= Q(
+            pk__in=interface_model.objects.filter(pk__in=assigned.values("assigned_object_id")).values(owner_field)
+        )
+        queryset = model.objects.all()
+        if model is Device:
+            match |= Q(oob_ip__in=ips) | Q(pk__in=serial_pks)
+        for offset in range(0, len(identities), PRELOAD_IDENTITY_CHUNK):
+            match |= identity_q(
+                model,
+                server=server_key,
+                identities=identities[offset : offset + PRELOAD_IDENTITY_CHUNK],
+                roles=(MappingRole.OWN, MappingRole.OOB),
+            )
+        objects.extend(queryset.filter(match))
+    return {(type(obj), obj.pk): obj for obj in prefetch_mappings(objects)}
+
+
 def validate_device_for_import(  # noqa: C901
     libre_device: dict,
     import_as_vm: bool = False,
@@ -638,6 +749,7 @@ def validate_device_for_import(  # noqa: C901
     preloaded_device_type_rules: dict | None = None,
     serial_rules: SerialRules | None = None,
     numbering_rules: tuple | None = None,
+    known_objects=None,
 ) -> dict:
     """
     Validate if a LibreNMS device can be imported to NetBox.
@@ -664,6 +776,7 @@ def validate_device_for_import(  # noqa: C901
         preloaded_device_type_rules: Optional device-type normalization rules keyed for lookup.
         serial_rules: The batch's :class:`SerialRules`; None reads them once for this device.
         numbering_rules: The batch's VC member numbering rules; None reads them for a stack.
+        known_objects: The :func:`preload_import_objects` of a batch; a matched object found there is that instance.
 
     Returns:
         dict: Validation result with structure (the key set is pinned by
@@ -840,6 +953,10 @@ def validate_device_for_import(  # noqa: C901
         "naming_criteria": None,  # Populated after resolved_name is set
     }
 
+    def known(obj):
+        # A batch reads the preloaded instance, whose mapping it prefetched.
+        return obj if obj is None or known_objects is None else known_objects.get((type(obj), obj.pk), obj)
+
     try:
         serial_rules = serial_rules or SerialRules.load()
         incoming_serial = libre_device.get("serial")
@@ -874,11 +991,13 @@ def validate_device_for_import(  # noqa: C901
         # and legacy bare-integer values so neither is missed. An ambiguous id
         # (matching multiple records) blocks the import — see _flag_ambiguous_librenms_id.
         try:
-            existing_vm = find_mapping(
-                VirtualMachine.objects.all(),
-                server=server_key,
-                identity=librenms_id,
-                roles=(MappingRole.OWN, MappingRole.OOB),
+            existing_vm = known(
+                find_mapping(
+                    VirtualMachine.objects.all(),
+                    server=server_key,
+                    identity=librenms_id,
+                    roles=(MappingRole.OWN, MappingRole.OOB),
+                )
             )
         except AmbiguousLibreNMSIdError as exc:
             existing_vm = None
@@ -933,11 +1052,13 @@ def validate_device_for_import(  # noqa: C901
         # (intra-model or cross-model) was already flagged — binding must fail closed.
         if not result["existing_device"] and not result["ambiguous_librenms_id"]:
             try:
-                existing_device = find_mapping(
-                    Device.objects.all(),
-                    server=server_key,
-                    identity=librenms_id,
-                    roles=(MappingRole.OWN, MappingRole.OOB),
+                existing_device = known(
+                    find_mapping(
+                        Device.objects.all(),
+                        server=server_key,
+                        identity=librenms_id,
+                        roles=(MappingRole.OWN, MappingRole.OOB),
+                    )
                 )
             except AmbiguousLibreNMSIdError as exc:
                 existing_device = None
@@ -1019,8 +1140,8 @@ def validate_device_for_import(  # noqa: C901
         # fail-closed ambiguity contract (mirrors the librenms_id block guard above).
         if not result["existing_device"] and not result["ambiguous_librenms_id"]:
             # Check by hostname/name - Check both VMs and Devices for conflicts
-            existing_vm = VirtualMachine.objects.filter(name__iexact=hostname).first()
-            existing_device = Device.objects.filter(name__iexact=hostname).first()
+            existing_vm = known(VirtualMachine.objects.filter(name__iexact=hostname).first())
+            existing_device = known(Device.objects.filter(name__iexact=hostname).first())
 
             # If BOTH exist with same hostname, it's ambiguous - don't match either
             if existing_vm and existing_device:
@@ -1129,7 +1250,7 @@ def validate_device_for_import(  # noqa: C901
                         )
                         existing_by_serial = None
                     else:
-                        existing_by_serial = discovery.object
+                        existing_by_serial = known(discovery.object)
                     if existing_by_serial:
                         logger.info(f"Found existing device by serial: {existing_by_serial.name} (serial={serial})")
                         result["existing_device"] = existing_by_serial
@@ -1295,8 +1416,8 @@ def validate_device_for_import(  # noqa: C901
                             )
 
                     if _hostname_match and _serial_match and _hostname_match.pk != _serial_match.pk:
-                        host_link = _describe_existing_librenms_link(_hostname_match, server_key)
-                        oob_link = _describe_existing_librenms_link(_serial_match, server_key)
+                        host_link = _describe_existing_librenms_link(known(_hostname_match), server_key)
+                        oob_link = _describe_existing_librenms_link(known(_serial_match), server_key)
                         # Conservative guard: at least one side must already be linked,
                         # otherwise this is more likely two unrelated devices that share
                         # serial data by coincidence (test fixtures, mis-keyed assets).
@@ -1338,6 +1459,7 @@ def validate_device_for_import(  # noqa: C901
                     # oob_ip-FK paths and fails closed on >1 distinct device (mirrors
                     # _refresh_existing_device in bulk_import.py via the same helper).
                     matched_object, ip_ambiguous, matching_ips = resolve_device_by_host_ip(primary_ip)
+                    matched_object = known(matched_object)
                     if ip_ambiguous:
                         # Duplicate net_host rows point at >1 distinct NetBox device — binding to
                         # an arbitrary one could re-home the import to the wrong device, so fail

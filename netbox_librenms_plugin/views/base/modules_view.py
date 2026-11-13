@@ -40,6 +40,7 @@ from netbox_librenms_plugin.serial_identity import (
 from netbox_librenms_plugin.server_mappings import (
     name_match_may_be_port,
     port_holders,
+    prefetch_mappings,
     read_mapping,
 )
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
@@ -1565,12 +1566,16 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         viewable_member_ids = set(
             self.restricted_queryset(Device).filter(pk__in=member_ids).values_list("pk", flat=True)
         )
+        # One load and one prefetch serve the interfaces of every visible member.
+        interfaces_by_member = {member_id: [] for member_id in viewable_member_ids}
+        for interface in prefetch_mappings(Interface.objects.filter(device_id__in=viewable_member_ids)):
+            interfaces_by_member[interface.device_id].append(interface)
         for member in context_members:
             # A member the user may not view contributes no bay, module or interface to its rows.
             withheld = member.pk not in viewable_member_ids
             device_bays, module_scoped_bays = ({}, {}) if withheld else self._get_module_bays(member)
             interfaces_by_pk, interfaces_by_name, interfaces_by_module = (
-                ({}, {}, {}) if withheld else self._build_interface_indexes(member)
+                ({}, {}, {}) if withheld else self._build_interface_indexes(interfaces_by_member[member.pk])
             )
             member_contexts[member.id] = {
                 "device": member,
@@ -1592,18 +1597,15 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             }
         return member_contexts
 
-    def _build_interface_indexes(self, member):
-        """Build the member's interface indexes keyed by primary key, by unique name and by module."""
+    @staticmethod
+    def _build_interface_indexes(interfaces):
+        """Build one member's interface indexes, from its prefetched *interfaces*, keyed by primary key, unique name and module."""
         interfaces_by_pk = {}
         interfaces_by_name = {}
         interfaces_by_module = {}
         duplicate_names = set()
 
-        interface_manager = getattr(member, "interfaces", None)
-        if interface_manager is None or not hasattr(interface_manager, "all"):
-            return interfaces_by_pk, interfaces_by_name, interfaces_by_module
-
-        for interface in interface_manager.all():
+        for interface in interfaces:
             interfaces_by_pk[interface.pk] = interface
             interfaces_by_module.setdefault(interface.module_id, []).append(interface)
             name = (getattr(interface, "name", "") or "").strip()

@@ -287,7 +287,7 @@ class TestInterfaceViewWithRealObjects:
         _set_librenms_id(second, 101)
         view = _view(DeviceInterfaceTableView, live_librenms)
 
-        maps = view._build_interface_lookup_maps(device)
+        maps = view._build_interface_lookup_maps([device])[device.pk]
 
         assert maps["by_name"] == {"Ethernet1": first, "Ethernet2": second}
         assert 101 not in maps["by_librenms_id"]

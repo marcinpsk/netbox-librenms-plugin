@@ -41,6 +41,7 @@ from .device_operations import (
     _describe_existing_librenms_link,
     effective_import_device_type,
     import_single_device,
+    preload_import_objects,
     resolve_device_by_host_ip,
     validate_device_for_import,
 )
@@ -888,8 +889,23 @@ def _reassert_new_import_blockers(validation: dict) -> None:
                 validation["issues"].append(msg)
 
 
+def _cached_existing_key(validation: dict):
+    """Return the ``(model, pk)`` of the cached row's matched object, or None."""
+    from virtualization.models import VirtualMachine
+
+    existing = validation.get("existing_device")
+    if not existing or not hasattr(existing, "pk"):
+        return None
+    return (VirtualMachine if validation.get("import_as_vm") else Device), existing.pk
+
+
 def _refresh_existing_device(  # noqa: C901
-    validation: dict, libre_device: dict = None, server_key: str = "default", *, serial_rules=None
+    validation: dict,
+    libre_device: dict = None,
+    server_key: str = "default",
+    known_objects: dict | None = None,
+    *,
+    serial_rules=None,
 ) -> None:
     """
     Refresh existing_device from DB to pick up changes made in NetBox since caching.
@@ -902,18 +918,20 @@ def _refresh_existing_device(  # noqa: C901
         libre_device (dict | None): The LibreNMS device data used to re-evaluate the match.
         server_key (str): The active LibreNMS server key.
         serial_rules (SerialRules | None): The batch's serial rules; None reads them when the serial re-check runs.
+        known_objects (dict | None): The :func:`preload_import_objects` of a batch, which holds
+            the cached row's matched object. Without it, the row loads its own matched object, and
+            a new match is read as one object.
 
     """
+    existing_key = _cached_existing_key(validation)
     existing = validation.get("existing_device")
-    if existing and hasattr(existing, "pk"):
+    if existing_key is not None:
         try:
-            from dcim.models import Device
-            from virtualization.models import VirtualMachine
-
-            if validation.get("import_as_vm"):
-                refreshed = VirtualMachine.objects.filter(pk=existing.pk).first()
-            else:
-                refreshed = Device.objects.filter(pk=existing.pk).first()
+            if known_objects is None:
+                known_objects = preload_import_objects(
+                    [], server_key, existing=[existing_key], serial_rules=serial_rules
+                )
+            refreshed = known_objects.get(existing_key)
 
             if refreshed:
                 validation["existing_device"] = refreshed
@@ -1267,6 +1285,8 @@ def _refresh_existing_device(  # noqa: C901
                 validation["warnings"] = [
                     m for m in msgs if not (isinstance(m, str) and _CROSS_MODEL_HOSTNAME_MARKER in m)
                 ]
+            # A batch reads the preloaded instance, whose mapping it prefetched.
+            new_device = (known_objects or {}).get((type(new_device), new_device.pk), new_device)
             validation["existing_device"] = new_device
             validation["existing_match_type"] = match_type
             # Re-derive linkage so a librenms_id match is correctly shown as the
@@ -1484,6 +1504,29 @@ def process_device_filters(  # noqa: C901
     else:
         logger.info(f"Validating {total} devices")
 
+    def validated_cache_key(device):
+        return get_validated_device_cache_key(
+            server_key=api.server_key,
+            filters=filters,
+            device_id=device["device_id"],
+            vc_enabled=vc_detection_enabled,
+            use_sysname=use_sysname,
+            strip_domain=strip_domain,
+            serial_rules=serial_rules,
+            generation=generation,
+        )
+
+    cached_by_key = {} if clear_cache else cache.get_many([validated_cache_key(device) for device in libre_devices])
+    # One load serves every row: the matched objects of the cached rows and every object a row can match.
+    cached_validations = [cached_device["_validation"] for cached_device in cached_by_key.values() if cached_device]
+    known_objects = preload_import_objects(
+        libre_devices,
+        api.server_key,
+        existing=[key for validation in cached_validations if (key := _cached_existing_key(validation)) is not None],
+        resolved_names=[validation.get("resolved_name") for validation in cached_validations],
+        serial_rules=serial_rules,
+    )
+
     for idx, device in enumerate(libre_devices, 1):
         # Check for job termination periodically
         if (idx % 5 == 0 or idx == 1) and job and _is_job_cancelled(job):
@@ -1495,21 +1538,12 @@ def process_device_filters(  # noqa: C901
 
         # Generate shared cache key for this validated device
         device_id = device["device_id"]
-        cache_key = get_validated_device_cache_key(
-            server_key=api.server_key,
-            filters=filters,
-            device_id=device_id,
-            vc_enabled=vc_detection_enabled,
-            use_sysname=use_sysname,
-            strip_domain=strip_domain,
-            serial_rules=serial_rules,
-            generation=generation,
-        )
+        cache_key = validated_cache_key(device)
 
         # Check if we already have cached validation for this device
         # (only if not forcing refresh)
         if not clear_cache:
-            cached_device = cache.get(cache_key)
+            cached_device = cached_by_key.get(cache_key)
             if cached_device:
                 # Use cached validation
                 device["_validation"] = cached_device["_validation"]
@@ -1517,7 +1551,11 @@ def process_device_filters(  # noqa: C901
                 # Refresh existing_device from DB to avoid stale data
                 # (user may have changed role, name, etc. in NetBox)
                 _refresh_existing_device(
-                    device["_validation"], libre_device=device, server_key=api.server_key, serial_rules=serial_rules
+                    device["_validation"],
+                    libre_device=device,
+                    server_key=api.server_key,
+                    known_objects=known_objects,
+                    serial_rules=serial_rules,
                 )
 
                 # Apply exclude_existing filter if enabled
@@ -1540,6 +1578,7 @@ def process_device_filters(  # noqa: C901
             strip_domain=strip_domain,
             serial_rules=serial_rules,
             numbering_rules=numbering_rules,
+            known_objects=known_objects,
         )
 
         # Set VC detection metadata

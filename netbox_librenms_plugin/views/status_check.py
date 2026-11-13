@@ -11,6 +11,8 @@ from netbox_librenms_plugin.forms import (
     DeviceStatusFilterForm,
     VirtualMachineStatusFilterForm,
 )
+from netbox_librenms_plugin.server_mappings import prefetch_mappings
+from netbox_librenms_plugin.server_selection import chassis_sync_devices
 from netbox_librenms_plugin.tables.device_status import DeviceStatusTable
 from netbox_librenms_plugin.tables.VM_status import VMStatusTable
 from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE, TransactionConflict, classify_conflict
@@ -52,6 +54,7 @@ class DeviceStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gen
 
     def get_queryset(self, request):
         """Override get_queryset to return filtered devices and check LibreNMS status."""
+        self.sync_by_chassis = {}
         # Only get devices if filters are applied
         if self.request.GET:
             queryset = (
@@ -73,7 +76,8 @@ class DeviceStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gen
             queryset = self.filterset(self.request.GET, queryset=queryset).qs
 
             # Check LibreNMS status for each device
-            for device in queryset:
+            devices = prefetch_mappings(queryset)
+            for device in devices:
                 try:
                     librenms_id, lookup_error = self.resolve_librenms_id(device)
                     if lookup_error is not None:
@@ -101,6 +105,8 @@ class DeviceStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gen
             for device_id, status in device_status_map.items():
                 case_when.append(When(pk=device_id, then=Value(status)))
 
+            # A chassis row links to its sync member; one member query serves every listed chassis.
+            self.sync_by_chassis = chassis_sync_devices(devices)
             queryset = queryset.annotate(
                 librenms_status=Case(*case_when, default=Value(None), output_field=BooleanField())
             )
@@ -108,6 +114,12 @@ class DeviceStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gen
             return queryset
 
         return Device.objects.none()
+
+    def get_table(self, data, request, bulk_actions=True):
+        """Return the status table with the sync member of each listed chassis."""
+        table = super().get_table(data, request, bulk_actions)
+        table.sync_by_chassis = self.sync_by_chassis
+        return table
 
 
 class VMStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, generic.ObjectListView):
@@ -141,7 +153,7 @@ class VMStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, generic
             queryset = self.filterset(self.request.GET, queryset=queryset).qs
 
             # Check LibreNMS status for each VM
-            for vm in queryset:
+            for vm in prefetch_mappings(queryset):
                 try:
                     librenms_id, lookup_error = self.resolve_librenms_id(vm)
                     if lookup_error is not None:
