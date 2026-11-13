@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 from dcim.models import Interface
+from django.urls import reverse
 from ipam.models import IPAddress
 
 from netbox_librenms_plugin.tests.conftest import (
@@ -21,14 +22,16 @@ from netbox_librenms_plugin.tests.conftest import (
 )
 from netbox_librenms_plugin.tests.interface_sync_post_helpers import SERVER_KEY
 from netbox_librenms_plugin.tests.lock_conflict_helpers import lock_row, lock_timeout, second_connection
-from netbox_librenms_plugin.tests.test_interface_late_write import post_ip_sync, seed_ip_rows
-from netbox_librenms_plugin.tests.view_test_helpers import messages_on
+from netbox_librenms_plugin.tests.test_interface_late_write import seed_ip_rows
+from netbox_librenms_plugin.tests.test_ip_selection_draft import _checked
+from netbox_librenms_plugin.tests.view_test_helpers import ip_tab, messages_on, select_ip_rows
 from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE
 from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
 
 # Long enough for a blocked statement to be a real lock wait, short enough for two attempts.
 LOCK_TIMEOUT_MS = 200
 ROWS = [("198.18.30.10", 7031, "Ethernet1"), ("198.18.31.10", 7032, "Ethernet2")]
+ROW_IDS = [f"{address}/24" for address, _, _ in ROWS]
 
 
 @pytest.fixture(autouse=True)
@@ -52,6 +55,14 @@ def attempts(monkeypatch):
     return state
 
 
+def _post(client, device, draft):
+    """Post the bulk IP sync of the user's draft, with the missing interfaces created."""
+    url = reverse(
+        "plugins:netbox_librenms_plugin:sync_device_ip_addresses", kwargs={"object_type": "device", "pk": device.pk}
+    )
+    return client.post(url, {"server_key": SERVER_KEY, "create-missing-interfaces-toggle": "on", **draft})
+
+
 def _two_rows(name):
     """A device with two interfaces and one cached IP row for each; the second row's interface is returned too."""
     device = make_device(name, librenms_cf={SERVER_KEY: {"id": 44}})
@@ -65,12 +76,13 @@ def _two_rows(name):
 def test_a_lock_conflict_in_one_row_rolls_back_the_batch_and_the_retry_syncs_every_row(client, attempts):
     device, first, second = _two_rows("ip-retry-once")
     client.force_login(make_superuser("ip-retry-once-user"))
+    draft = select_ip_rows(client, device, ROW_IDS, server_key=SERVER_KEY)
 
     with second_connection() as other:
         lock_row(other, Interface, second.pk)
         attempts.before_retry = other.rollback
         with lock_timeout(LOCK_TIMEOUT_MS):
-            response = post_ip_sync(client, device, [address for address, _, _ in ROWS])
+            response = _post(client, device, draft)
 
     assert attempts.count == 2
     assert response.status_code == 302
@@ -83,13 +95,17 @@ def test_a_lock_conflict_in_one_row_rolls_back_the_batch_and_the_retry_syncs_eve
 def test_lock_conflicts_on_both_attempts_give_the_try_again_answer_and_commit_no_row(client, attempts):
     device, _first, second = _two_rows("ip-retry-exhausted")
     client.force_login(make_superuser("ip-retry-exhausted-user"))
+    draft = select_ip_rows(client, device, ROW_IDS, server_key=SERVER_KEY)
 
     with second_connection() as other:
         lock_row(other, Interface, second.pk)
         with lock_timeout(LOCK_TIMEOUT_MS):
-            response = post_ip_sync(client, device, [address for address, _, _ in ROWS])
+            response = _post(client, device, draft)
 
     assert attempts.count == 2
     assert response.status_code == 302
     assert messages_on(response.wsgi_request) == [("error", TRY_AGAIN_MESSAGE)]
     assert not IPAddress.objects.filter(address__in=[f"{address}/24" for address, _, _ in ROWS]).exists()
+    # Nothing committed, so the claimed rows are selected again for the next try.
+    tab = ip_tab(client, device, server_key=SERVER_KEY)
+    assert all(_checked(tab, row_id) for row_id in ROW_IDS)

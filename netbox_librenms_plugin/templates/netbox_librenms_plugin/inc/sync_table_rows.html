@@ -1,0 +1,11 @@
+{% comment %}
+The rows of a converted sync table, as the body of NetBox's inc/table.html renders them. The row read of a tab answers here, so it is the row the table shows.
+Takes: rows (BoundRows).
+{% endcomment %}
+{% for row in rows %}
+      <tr {{ row.attrs.as_html }}>
+        {% for column, cell in row.items %}
+          <td {{ column.attrs.td.as_html }}>{{ cell }}</td>
+        {% endfor %}
+      </tr>
+{% endfor %}

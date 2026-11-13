@@ -1,12 +1,9 @@
 """The interface and IP "Sync options" menus save the user's choice as preferences and keep it across a stale tab swap."""
 
 import json
-import re
 from pathlib import Path
-from urllib.parse import parse_qs
 
 import pytest
-from playwright.sync_api import expect
 
 SCRIPT_PATH = Path(__file__).parents[2] / "static" / "netbox_librenms_plugin" / "js" / "librenms_sync.js"
 TEMPLATE_DIR = Path(__file__).parents[2] / "templates" / "netbox_librenms_plugin"
@@ -303,10 +300,10 @@ def _tab_markup(**menu_state):
     )
 
 
-# The management IP row, which "Set Primary IP" ticks, and another row.
+# Two rows of the IP tab, whose selection the server draft keeps.
 IP_ROWS = (
-    '<tr data-mgmt-ip="true"><td data-col="selection">'
-    '<input type="checkbox" name="select" value="198.18.0.1/24" id="ip-mgmt"></td><td>198.18.0.1/24</td></tr>'
+    '<tr><td data-col="selection">'
+    '<input type="checkbox" name="select" value="198.18.0.1/24" id="ip-first"></td><td>198.18.0.1/24</td></tr>'
     '<tr><td data-col="selection">'
     '<input type="checkbox" name="select" value="198.18.0.2/24" id="ip-other"></td><td>198.18.0.2/24</td></tr>'
 )
@@ -385,13 +382,12 @@ def test_a_stale_swap_keeps_the_parent_after_reset_turned_auto_select_on(page, s
     assert _selected(page) == {"4301", "4302"}
 
 
-def test_a_stale_ip_swap_keeps_the_switches_and_the_management_row(page, swap_page):
+def test_a_stale_ip_swap_keeps_the_switches(page, swap_page):
     load, swap = swap_page
     saved = load(_ip_tab_markup())
     page.check("#set-primary-ip-toggle-cb")
     page.check("#create-missing-interfaces-toggle-cb")
     _settle(page)
-    assert _checked(page, "#ip-mgmt")
 
     # The swap renders the stored preferences from before these saves: both off.
     swap(_ip_tab_markup(), "ip-sync-options")
@@ -399,8 +395,6 @@ def test_a_stale_ip_swap_keeps_the_switches_and_the_management_row(page, swap_pa
 
     assert _checked(page, "#set-primary-ip-toggle-cb")
     assert _checked(page, "#create-missing-interfaces-toggle-cb")
-    assert _checked(page, "#ip-mgmt")
-    assert not _checked(page, "#ip-other")
     assert page.locator("#ip-sync-options-count").inner_text() == "2"
     assert len(saved) == 2
 
@@ -408,10 +402,8 @@ def test_a_stale_ip_swap_keeps_the_switches_and_the_management_row(page, swap_pa
 def test_a_stale_ip_swap_after_reset_keeps_the_switches_off(page, swap_page):
     load, swap = swap_page
     saved = load(_ip_tab_markup(set_primary=True, create_missing=True))
-    assert _checked(page, "#ip-mgmt")
     page.click("#reset-ip-sync-options")
     _settle(page)
-    assert not _checked(page, "#ip-mgmt")
 
     # The swap renders the stored preferences from before the Reset: both on.
     swap(_ip_tab_markup(set_primary=True, create_missing=True), "ip-sync-options")
@@ -419,129 +411,10 @@ def test_a_stale_ip_swap_after_reset_keeps_the_switches_off(page, swap_page):
 
     assert not _checked(page, "#set-primary-ip-toggle-cb")
     assert not _checked(page, "#create-missing-interfaces-toggle-cb")
-    assert not _checked(page, "#ip-mgmt")
     assert page.locator("#ip-sync-options-count").inner_text() == "0"
     assert len(saved) == 2
 
 
-IP_SUBMIT_PATH = "/browser-sync-ip/"
-# A second page of the IP table: no management row on it.
-IP_PAGE_TWO_ROWS = (
-    '<tr><td data-col="selection">'
-    '<input type="checkbox" name="select" value="198.18.0.3/24" id="ip-third"></td><td>198.18.0.3/24</td></tr>'
-)
-
-
-def _ip_form_markup(rows, mgmt_vrf="5", **menu_state):
-    """One page of the IP tab, with the table inside the form that submits the selection."""
-    return (
-        f"{_ip_menu_markup(**menu_state)}"
-        f'<form id="ip-sync-form" method="post" action="{IP_SUBMIT_PATH}">'
-        # The server names the management row on every page, also where the row is not rendered.
-        """<table id="librenms-ipaddress-table" data-mgmt-rows='["198.18.0.1/24"]'"""
-        f""" data-mgmt-row-vrfs='{{"198.18.0.1/24": "{mgmt_vrf}"}}'>"""
-        '<thead><tr><th><input type="checkbox" class="toggle"></th>'
-        f'<th>Address</th></tr></thead><tbody>{rows}</tbody></table><button type="submit" id="ip-submit">Sync</button>'
-        "</form>"
-    )
-
-
-def _submitted_fields(page):
-    """Submit the IP form and return every posted field."""
-    posted = []
-    page.route(
-        f"**{IP_SUBMIT_PATH}",
-        lambda route: (posted.append(route.request.post_data), route.fulfill(status=200, body="ok")),
-    )
-    page.click("#ip-submit")
-    page.wait_for_function("document.body.textContent.trim() === 'ok'")
-    return parse_qs(posted[0], keep_blank_values=True)
-
-
-def _submitted_selection(page):
-    """Submit the IP form and return the posted ``select`` values."""
-    return sorted(_submitted_fields(page)["select"])
-
-
-def test_turning_set_primary_ip_off_drops_the_off_page_management_row(page, swap_page):
-    load, swap = swap_page
-    load(_ip_form_markup(IP_ROWS, set_primary=True))
-    assert _checked(page, "#ip-mgmt")
-    page.check("#ip-other")
-
-    swap(_ip_form_markup(IP_PAGE_TWO_ROWS, set_primary=True), "ip-sync-options")
-    page.check("#ip-third")
-    page.uncheck("#set-primary-ip-toggle-cb")
-
-    assert _submitted_selection(page) == ["198.18.0.2/24", "198.18.0.3/24"]
-
-
-def test_turning_set_primary_ip_off_drops_every_row_the_server_names_as_management(page, swap_page):
-    load, _swap = swap_page
-    load(_ip_form_markup(IP_PAGE_TWO_ROWS, set_primary=True))
-    # A stored entry carries no management mark, for example one that an earlier plugin version wrote.
-    page.evaluate(
-        """() => writeStoredSelection(document.getElementById('librenms-ipaddress-table'),
-            {'198.18.0.1/24': {inputs: {}, auto: ''}})"""
-    )
-    page.check("#ip-third")
-    page.uncheck("#set-primary-ip-toggle-cb")
-
-    assert _submitted_selection(page) == ["198.18.0.3/24"]
-
-
-def test_turning_set_primary_ip_on_selects_the_off_page_management_row(page, swap_page):
-    load, swap = swap_page
-    load(_ip_form_markup(IP_ROWS))
-    assert not _checked(page, "#ip-mgmt")
-
-    swap(_ip_form_markup(IP_PAGE_TWO_ROWS), "ip-sync-options")
-    page.check("#ip-third")
-    page.check("#set-primary-ip-toggle-cb")
-
-    # The notice counts the selected rows this page does not show.
-    expect(page.locator("#librenms-ipaddress-table-offpage-selection span")).to_have_text(re.compile(r"^1\b"))
-    assert _submitted_selection(page) == ["198.18.0.1/24", "198.18.0.3/24"]
-
-
-def test_a_saved_set_primary_ip_selects_the_management_row_from_another_page(page, swap_page):
-    load, _swap = swap_page
-    load(_ip_form_markup(IP_PAGE_TWO_ROWS, set_primary=True))
-    page.check("#ip-third")
-
-    assert _submitted_selection(page) == ["198.18.0.1/24", "198.18.0.3/24"]
-
-
-def test_an_off_page_management_row_posts_the_vrf_its_row_shows(page, swap_page):
-    load, _swap = swap_page
-    load(_ip_form_markup(IP_PAGE_TWO_ROWS, set_primary=True))
-    page.check("#ip-third")
-
-    posted = _submitted_fields(page)
-
-    assert sorted(posted["select"]) == ["198.18.0.1/24", "198.18.0.3/24"]
-    assert posted["vrf_198.18.0.1/24"] == ["5"]
-
-
-def test_a_selected_row_on_another_page_posts_the_vrf_the_user_chose(page, swap_page):
-    load, swap = swap_page
-    row = (
-        '<tr><td data-col="selection"><input type="checkbox" name="select" value="198.18.0.2/24" id="ip-other"></td>'
-        '<td><select name="vrf_198.18.0.2/24" id="vrf-other"><option value="">Global</option>'
-        '<option value="7">blue</option></select></td></tr>'
-    )
-    load(_ip_form_markup(row))
-    page.select_option("#vrf-other", "7")
-    page.check("#ip-other")
-
-    swap(_ip_form_markup(IP_PAGE_TWO_ROWS), "ip-sync-options")
-    posted = _submitted_fields(page)
-
-    assert posted["select"] == ["198.18.0.2/24"]
-    assert posted["vrf_198.18.0.2/24"] == ["7"]
-
-
-# The browser cancels a plain fetch when the page unloads; a keepalive fetch completes.
 RECORD_FETCH_OPTIONS = """() => {
     window.fetchKeepalive = [];
     const send = window.fetch;
@@ -561,75 +434,6 @@ def test_a_sync_option_save_outlives_a_page_change(page, menu_page):
 
     assert len(saved) == 1
     assert page.evaluate("window.fetchKeepalive") == [[SAVE_PREF_PATH, True]]
-
-
-VRF_CHOICES = (("", "Global"), ("5", "red"), ("7", "blue"), ("9", "green"))
-
-
-def _ip_row(address, *, checkbox_id, mgmt=False, vrf="", choices=VRF_CHOICES):
-    """One IP row with its VRF select, the way the IP table renders it."""
-    options = "".join(
-        f'<option value="{value}"{" selected" if value == vrf else ""}>{label}</option>' for value, label in choices
-    )
-    mgmt_attribute = ' data-mgmt-ip="true"' if mgmt else ""
-    return (
-        f'<tr{mgmt_attribute}><td data-col="selection">'
-        f'<input type="checkbox" name="select" value="{address}" id="{checkbox_id}"></td>'
-        f'<td><select class="vrf-select" name="vrf_{address}" id="vrf-{checkbox_id}">{options}</select></td></tr>'
-    )
-
-
-def test_a_management_row_the_user_cleared_stays_cleared_on_another_page(page, swap_page):
-    load, swap = swap_page
-    load(_ip_form_markup(IP_ROWS, set_primary=True))
-    page.uncheck("#ip-mgmt")
-
-    swap(_ip_form_markup(IP_PAGE_TWO_ROWS, set_primary=True), "ip-sync-options")
-    page.check("#ip-third")
-
-    assert _submitted_selection(page) == ["198.18.0.3/24"]
-
-
-def test_an_off_page_management_row_keeps_the_vrf_the_user_chose(page, swap_page):
-    load, swap = swap_page
-    load(_ip_form_markup(_ip_row("198.18.0.1/24", checkbox_id="ip-mgmt", mgmt=True, vrf="5"), set_primary=True))
-    page.wait_for_selector(".vrf-select[data-vrf-select-initialized]", state="attached")
-    page.select_option("#vrf-ip-mgmt", "9")
-
-    swap(_ip_form_markup(IP_PAGE_TWO_ROWS, set_primary=True), "ip-sync-options")
-    posted = _submitted_fields(page)
-
-    assert posted["select"] == ["198.18.0.1/24"]
-    assert posted["vrf_198.18.0.1/24"] == ["9"]
-
-
-def test_a_vrf_change_on_a_selected_row_reaches_the_stored_selection(page, swap_page):
-    load, swap = swap_page
-    load(_ip_form_markup(_ip_row("198.18.0.2/24", checkbox_id="ip-other")))
-    page.wait_for_selector(".vrf-select[data-vrf-select-initialized]", state="attached")
-    page.check("#ip-other")
-    page.select_option("#vrf-ip-other", "7")
-
-    swap(_ip_form_markup(IP_PAGE_TWO_ROWS), "ip-sync-options")
-    posted = _submitted_fields(page)
-
-    assert posted["vrf_198.18.0.2/24"] == ["7"]
-
-
-def test_a_selected_row_shows_its_chosen_vrf_again_when_it_returns(page, swap_page):
-    load, swap = swap_page
-    page_one = _ip_form_markup(_ip_row("198.18.0.2/24", checkbox_id="ip-other"))
-    load(page_one)
-    page.wait_for_selector(".vrf-select[data-vrf-select-initialized]", state="attached")
-    page.select_option("#vrf-ip-other", "7")
-    page.check("#ip-other")
-
-    swap(_ip_form_markup(IP_PAGE_TWO_ROWS), "ip-sync-options")
-    swap(page_one, "ip-sync-options")
-
-    assert page.locator("#ip-other").is_checked()
-    assert page.locator("#vrf-ip-other").input_value() == "7"
-    assert _submitted_fields(page)["vrf_198.18.0.2/24"] == ["7"]
 
 
 def test_a_queued_preference_save_is_sent_when_the_page_unloads(page):
@@ -659,134 +463,3 @@ def test_a_queued_preference_save_is_sent_when_the_page_unloads(page):
         route.fulfill(status=200, content_type="application/json", body='{"status": "ok"}')
     page.evaluate("syncOptionSaving")
     assert len(held) == 2
-
-
-def test_a_selected_row_whose_vrf_is_gone_is_cleared_not_moved_to_global(page, swap_page):
-    load, swap = swap_page
-    load(_ip_form_markup(_ip_row("198.18.0.2/24", checkbox_id="ip-other")))
-    page.wait_for_selector(".vrf-select[data-vrf-select-initialized]", state="attached")
-    page.select_option("#vrf-ip-other", "7")
-    page.check("#ip-other")
-
-    swap(_ip_form_markup(IP_PAGE_TWO_ROWS), "ip-sync-options")
-    # The user lost access to VRF 7 meanwhile, so the page renders the row without it.
-    without_blue = tuple(choice for choice in VRF_CHOICES if choice[0] != "7")
-    swap(_ip_form_markup(_ip_row("198.18.0.2/24", checkbox_id="ip-other", choices=without_blue)), "ip-sync-options")
-
-    assert not page.locator("#ip-other").is_checked()
-    assert "select" not in _submitted_fields(page)
-
-
-def test_a_failed_sync_keeps_the_management_row_the_user_cleared(page, swap_page):
-    load, swap = swap_page
-    answers = [500, 200]
-    posted = []
-
-    def answer(route):
-        posted.append(parse_qs(route.request.post_data, keep_blank_values=True))
-        route.fulfill(status=answers.pop(0), body="")
-
-    page.route(f"**{IP_SUBMIT_PATH}", answer)
-
-    def htmx_form(rows):
-        markup = _ip_form_markup(rows, set_primary=True)
-        return markup.replace(
-            f'<form id="ip-sync-form" method="post" action="{IP_SUBMIT_PATH}">',
-            f'<form id="ip-sync-form" hx-post="{IP_SUBMIT_PATH}" hx-swap="none">',
-        )
-
-    load(htmx_form(IP_ROWS))
-    page.evaluate("htmxTest.process(document.body)")
-    page.uncheck("#ip-mgmt")
-    swap(htmx_form(IP_PAGE_TWO_ROWS), "ip-sync-options")
-    page.check("#ip-third")
-
-    page.click("#ip-submit")
-    page.wait_for_function("() => !document.querySelector('#ip-sync-form.htmx-request')")
-    page.wait_for_timeout(200)
-    swap(htmx_form(IP_PAGE_TWO_ROWS), "ip-sync-options")
-    page.check("#ip-third")
-    page.click("#ip-submit")
-    page.wait_for_timeout(500)
-
-    assert len(posted) == 2
-    assert sorted(posted[1]["select"]) == ["198.18.0.3/24"]
-
-
-def test_a_failed_sync_keeps_the_selected_management_row_of_the_page(page, swap_page):
-    load, swap = swap_page
-    answers = [500, 200]
-    posted = []
-
-    def answer(route):
-        posted.append(parse_qs(route.request.post_data, keep_blank_values=True))
-        route.fulfill(status=answers.pop(0), body="")
-
-    page.route(f"**{IP_SUBMIT_PATH}", answer)
-
-    def htmx_form(rows):
-        return _ip_form_markup(rows, set_primary=True).replace(
-            f'<form id="ip-sync-form" method="post" action="{IP_SUBMIT_PATH}">',
-            f'<form id="ip-sync-form" hx-post="{IP_SUBMIT_PATH}" hx-swap="none">',
-        )
-
-    load(htmx_form(IP_ROWS))
-    page.evaluate("htmxTest.process(document.body)")
-    assert page.locator("#ip-mgmt").is_checked()
-    page.click("#ip-submit")
-    page.wait_for_function("() => !document.querySelector('#ip-sync-form.htmx-request')")
-    page.wait_for_timeout(200)
-
-    swap(htmx_form(IP_PAGE_TWO_ROWS), "ip-sync-options")
-    page.check("#ip-third")
-    page.click("#ip-submit")
-    page.wait_for_timeout(500)
-
-    assert len(posted) == 2
-    assert sorted(posted[1]["select"]) == ["198.18.0.1/24", "198.18.0.3/24"]
-
-
-def test_a_management_row_whose_vrf_is_gone_is_cleared_after_set_primary_ip_selects_it(page, swap_page):
-    load, swap = swap_page
-    load(_ip_form_markup(_ip_row("198.18.0.1/24", checkbox_id="ip-mgmt", mgmt=True)))
-    page.wait_for_selector(".vrf-select[data-vrf-select-initialized]", state="attached")
-    page.select_option("#vrf-ip-mgmt", "7")
-    page.check("#ip-mgmt")
-    swap(_ip_form_markup(IP_PAGE_TWO_ROWS), "ip-sync-options")
-
-    # Set Primary IP was turned on elsewhere, and the user lost access to VRF 7 meanwhile.
-    without_blue = tuple(choice for choice in VRF_CHOICES if choice[0] != "7")
-    swap(
-        _ip_form_markup(
-            _ip_row("198.18.0.1/24", checkbox_id="ip-mgmt", mgmt=True, choices=without_blue), set_primary=True
-        ),
-        "ip-sync-options",
-    )
-
-    assert not page.locator("#ip-mgmt").is_checked()
-    assert "select" not in _submitted_fields(page)
-
-
-def test_a_vrf_the_user_did_not_choose_follows_the_page(page, swap_page):
-    """A new suggestion, for example after Create VRF, replaces the VRF stored for an off-page management row."""
-    load, swap = swap_page
-    load(_ip_form_markup(IP_PAGE_TWO_ROWS, mgmt_vrf="", set_primary=True))
-
-    swap(
-        _ip_form_markup(_ip_row("198.18.0.1/24", checkbox_id="ip-mgmt", mgmt=True, vrf="5"), set_primary=True),
-        "ip-sync-options",
-    )
-
-    assert page.locator("#ip-mgmt").is_checked()
-    assert page.locator("#vrf-ip-mgmt").input_value() == "5"
-    assert _submitted_fields(page)["vrf_198.18.0.1/24"] == ["5"]
-
-
-def test_an_off_page_management_row_follows_the_vrf_the_page_shows_now(page, swap_page):
-    load, swap = swap_page
-    load(_ip_form_markup(IP_PAGE_TWO_ROWS, mgmt_vrf="", set_primary=True))
-
-    # Create VRF on another row made the management row's VRF exist; the row stays on another page.
-    swap(_ip_form_markup(IP_PAGE_TWO_ROWS, mgmt_vrf="5", set_primary=True), "ip-sync-options")
-
-    assert _submitted_fields(page)["vrf_198.18.0.1/24"] == ["5"]

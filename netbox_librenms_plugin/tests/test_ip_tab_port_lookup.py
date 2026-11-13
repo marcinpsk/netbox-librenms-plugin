@@ -20,7 +20,7 @@ from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_superuser
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_ip_snapshot
-from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view
+from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view, read_ip_row
 
 SERVER_KEY = "default"
 DEVICE_ID = 6100
@@ -62,7 +62,7 @@ def _ip_view(request):
 
 def _assess(device, request=None):
     """Assess the stored snapshot of *device* as a superuser, through the IP table's own entry point."""
-    from netbox_librenms_plugin.views.base.ip_addresses_view import read_ip_assessment
+    from netbox_librenms_plugin.sync_rows import read_ip_assessment
 
     snapshot = source_cache.read(device, Resource.IP_ADDRESSES, SERVER_KEY)
     assert snapshot is not None
@@ -358,22 +358,20 @@ class TestIpRowVrfSuggestions:
         assert tagged.get("suggested_vrf_id") is None
         assert "vrf_suggested_from" not in tagged
 
-    def test_a_suggestion_never_reaches_the_verify_path_as_a_netbox_vrf(self, live_librenms):
+    def test_a_suggestion_never_reaches_a_vrf_choice_as_a_netbox_vrf(self, client, live_librenms):
         """A suggestion preselects a dropdown. Read as the row's VRF it would report "Synced"."""
-        from netbox_librenms_plugin.views.base.ip_addresses_view import SingleIPAddressVerifyView
-
         target = VRF.objects.create(name="Suggested only", rd=_RD_VRF_RD)
         device = _acquired(live_librenms, "iosxe-subinterfaces")
-        rows = _assess(device).rows
+        tagged = _row_on(_assess(device).rows, _RD_PORT_ID)
+        client.force_login(make_superuser("ip-vrf-suggestion-user"))
 
-        assert _row_on(rows, _RD_PORT_ID)["suggested_vrf_id"] == target.pk
-        # NetBox holds no IPAddress for this row, so the verify path must still offer to create it.
-        verify = SingleIPAddressVerifyView()
-        _row, original_vrf_id, _port_id = verify._find_row(
-            rows, _RD_ADDRESS["ipv4_address"], _RD_ADDRESS["ipv4_prefixlen"]
-        )
-        assert original_vrf_id is None
-        assert verify._determine_status(False, False, original_vrf_id, target.pk) == "sync"
+        assert tagged["suggested_vrf_id"] == target.pk
+        # NetBox holds no IPAddress for this row, so it is not synced, also once the user chooses the VRF.
+        for vrf in (None, str(target.pk)):
+            row = read_ip_row(client, device, tagged["row_id"], vrf=vrf)
+            assert row.shown_vrf == str(target.pk)
+            assert "Synced" not in row.status
+            assert "text-success" not in row.status
 
     def test_unique_route_distinguisher_suggests_a_vrf(self, live_librenms):
         """A unique RD match takes precedence over the different VRF names."""
@@ -396,7 +394,7 @@ class TestIpRowVrfSuggestions:
         device = _acquired(live_librenms, "iosxe-subinterfaces")
         tagged = _row_on(_assess(device).rows, _RD_PORT_ID)
 
-        html = IPAddressTable([tagged], mgmt_row_vrfs={}).as_html(_request())
+        html = IPAddressTable([tagged]).as_html(_request())
 
         label = f"Suggested from LibreNMS VRF {_RD_VRF_NAME} by route distinguisher match"
         assert f'title="{label}"' in html

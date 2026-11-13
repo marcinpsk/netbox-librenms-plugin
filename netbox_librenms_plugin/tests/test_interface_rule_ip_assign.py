@@ -23,8 +23,10 @@ from netbox_librenms_plugin.tests.conftest import make_device, make_interface, m
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, seed_ip_snapshot
 from netbox_librenms_plugin.tests.test_interface_rule_writes import _platform, _port
+from netbox_librenms_plugin.tests.view_test_helpers import ip_tab, submit_ip_selection, write_ip_rows
 
 SERVER_KEY = "default"
+HTMX = {"HTTP_HX_REQUEST": "true"}
 IGNORE = InterfaceTypeMapping.ACTION_IGNORE
 DEVICE_ID = 4310
 
@@ -57,14 +59,15 @@ def _seed(device, rows, ports, management_ip=""):
 
 
 def _sync(client, device, rows, **extra):
-    data = {"server_key": SERVER_KEY, "select": [_row_id(row) for row in rows], **extra}
-    data.update({f"vrf_{_row_id(row)}": "" for row in rows})
+    """Select *rows* through the tab's draft and submit them; with no rows, post *extra* alone (a confirmation)."""
+    if rows:
+        return submit_ip_selection(client, device, [_row_id(row) for row in rows], headers=HTMX, **extra)
     return client.post(
         reverse(
             "plugins:netbox_librenms_plugin:sync_device_ip_addresses", kwargs={"object_type": "device", "pk": device.pk}
         ),
-        data,
-        HTTP_HX_REQUEST="true",
+        {"server_key": SERVER_KEY, **extra},
+        **HTMX,
     )
 
 
@@ -227,7 +230,7 @@ def test_a_refresh_keeps_the_record_of_the_port_bound_to_the_target_interface(cl
     The one IP row is on 7101. NetBox eth0 has its name but is bound to 7100, so the row has no
     target until the interfaces are synced. The record of 7100 is evidence only: it is not an IP row.
     """
-    from netbox_librenms_plugin.views.base.ip_addresses_view import read_ip_assessment
+    from netbox_librenms_plugin.sync_rows import read_ip_assessment
 
     InterfaceTypeMapping.objects.create(action=IGNORE, name_pattern="^Vlan")
     device = make_device("ip-assign-refresh", librenms_cf={SERVER_KEY: {"id": DEVICE_ID}})
@@ -373,12 +376,14 @@ def test_a_source_port_bound_on_a_hidden_member_is_not_named(live_librenms):
     client.force_login(user)
 
     cell = _status_cell(client, member_a, "198.18.83.10/24")
-    response = _sync(client, member_a, rows)
-    texts = " ".join(_messages(response))
+    assert "data-evidence" not in ip_tab(client, member_a).rows["198.18.83.10/24"]
+    # The tab offers no selection of the withheld row, so the writer's own refusal is driven directly.
+    refused = write_ip_rows(member_a, user, {"198.18.83.10/24": None}).messages
+    texts = " ".join(refused)
 
     assert 'name="sync_one"' not in cell
     assert not IPAddress.objects.filter(address="198.18.83.10/24").exists()
-    assert any(VIEW_SCOPE_REFUSAL in text for text in _messages(response))
+    assert any(VIEW_SCOPE_REFUSAL in text for text in refused)
     for secret in (
         "port 7101",
         str(rule),

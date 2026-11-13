@@ -2,11 +2,9 @@
 Boundary paths of ``views/base/ip_addresses_view.py`` and ``ip_addressing.py``.
 
 The primary home for these modules is ``test_coverage_base_views.py`` (render pipeline) and
-``test_ip_verify.py`` (verify endpoint). These cases live in their own file because both sit on a
+``test_ip_verify.py`` (row read and VRF choice). These cases live in their own file because both sit on a
 lower branch of the PR stack, where appending to their tails conflicts on every restack.
 """
-
-import json
 
 import pytest
 
@@ -17,11 +15,10 @@ from netbox_librenms_plugin.tests.conftest import (
     make_interface,
     make_ip,
     make_superuser,
-    make_vm,
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, seed_ip_snapshot
-from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view
+from netbox_librenms_plugin.tests.view_test_helpers import ip_tab, make_request, make_view
 
 
 SERVER_KEY = "default"
@@ -57,7 +54,7 @@ def _ip_view(request):
 
 def _stored_rows(device):
     """Assess the stored IP snapshot of *device* as a superuser and return its rows."""
-    from netbox_librenms_plugin.views.base.ip_addresses_view import read_ip_assessment
+    from netbox_librenms_plugin.sync_rows import read_ip_assessment
 
     snapshot = source_cache.read(device, Resource.IP_ADDRESSES, SERVER_KEY)
     assert snapshot is not None
@@ -104,7 +101,7 @@ class TestManagementIPResolution:
 
     def test_a_device_record_without_a_string_ip_flags_no_row(self, client, live_librenms):
         """A refresh whose device record carries no string IP stores a snapshot with an empty management IP."""
-        from netbox_librenms_plugin.views.base.ip_addresses_view import read_ip_assessment
+        from netbox_librenms_plugin.sync_rows import read_ip_assessment
 
         device = make_device("ip-render-mgmt-missing", librenms_cf={SERVER_KEY: {"id": 4302}})
         interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
@@ -235,60 +232,24 @@ class TestRefreshWithAnUnknownServer:
 
 
 @pytest.mark.django_db
-class TestSingleIPAddressVerify:
-    """The verify endpoint validates its own JSON payload before touching the cache."""
+class TestTheVrfChoiceRowKey:
+    """The VRF choice command validates the posted row key before it reads the snapshot."""
 
-    def _post(self, client, payload):
-        """POST one verify payload as JSON."""
-        from django.urls import reverse
+    def test_an_address_without_a_prefix_is_rejected(self, client):
+        """A bare host address carries no prefix evidence and names no row."""
+        _login(client, "ip-verify-no-prefix-user")
+        device = make_device("ip-verify-no-prefix", librenms_cf={SERVER_KEY: {"id": 5203}})
+        seed_ip_snapshot(device, [ip_address_row("198.18.52.30", 5204)], [{"port_id": 5204, "ifName": "eth0"}])
+        table = ip_tab(client, device).table
 
-        return client.post(
-            reverse("plugins:netbox_librenms_plugin:verify_ipaddress"),
-            data=json.dumps(payload),
-            content_type="application/json",
+        response = client.post(
+            table["data-choice-url"],
+            {
+                "draft_id": table["data-draft-id"],
+                "expected_revision": table["data-draft-revision"],
+                "row": "198.18.52.30",
+                "value": "",
+            },
         )
 
-    def test_virtual_machine_is_resolved_without_an_object_type(self, client):
-        """With no object_type the endpoint falls back to a VirtualMachine lookup."""
-        from dcim.models import Device
-
-        _login(client, "ip-verify-vm-user")
-        vm = make_vm("ip-verify-vm")
-        while Device.objects.filter(pk=vm.pk).exists():
-            vm = make_vm(f"ip-verify-vm-{vm.pk + 1}")
-        _set_librenms_id(vm, 5201)
-        seed_ip_snapshot(vm, [ip_address_row("198.18.52.10", 5202)], [{"port_id": 5202, "ifName": "eth0"}])
-
-        response = self._post(client, {"device_id": vm.pk, "ip_address": "198.18.52.10/24"})
-
-        assert response.status_code == 200
-        assert response.json()["status"] == "success"
-
-    def test_blank_object_id_is_rejected(self, client):
-        """A blank object id is reported as missing, not as invalid."""
-        _login(client, "ip-verify-blank-id-user")
-
-        response = self._post(client, {"device_id": "", "ip_address": "198.18.52.20/24"})
-
         assert response.status_code == 400
-        assert response.json()["message"] == "No object ID provided"
-
-    def test_address_without_a_prefix_is_rejected(self, client):
-        """A bare host address carries no prefix evidence and is rejected."""
-        _login(client, "ip-verify-no-prefix-user")
-        device = make_device("ip-verify-no-prefix")
-
-        response = self._post(client, {"device_id": device.pk, "ip_address": "198.18.52.30"})
-
-        assert response.status_code == 400
-        assert response.json()["message"] == "Invalid IP address or source row identity"
-
-    def test_non_string_address_is_rejected(self, client):
-        """A JSON number in the address field is rejected rather than parsed."""
-        _login(client, "ip-verify-non-string-user")
-        device = make_device("ip-verify-non-string")
-
-        response = self._post(client, {"device_id": device.pk, "ip_address": 19821852})
-
-        assert response.status_code == 400
-        assert response.json()["message"] == "Invalid IP address or source row identity"
