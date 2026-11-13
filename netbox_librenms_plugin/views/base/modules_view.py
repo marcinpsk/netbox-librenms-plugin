@@ -844,10 +844,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 )
                 snapshot_cached = False
             page, context = final, {"object": final, "table": None, "cache_expiry": None, "server_key": server_key}
-        if snapshot_cached:
-            messages.success(request, "Inventory data refreshed successfully.")
-        else:
+        # A rule or numbering refusal comes after a complete read: the snapshot and the ready state stay.
+        refused = bool(context.get("vc_numbering_error") or context.get("inventory_rule_error"))
+        if not snapshot_cached:
             messages.error(request, "Inventory data could not be cached. Refresh Modules before syncing.")
+        elif not refused:
+            messages.success(request, "Inventory data refreshed successfully.")
         return self.render_sync_partial(request, page, server_key, {"module_sync": context})
 
     def _page_policy(self, pk):
