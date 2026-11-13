@@ -63,6 +63,7 @@ def _assess_inventory(view, inventory):
     from netbox_librenms_plugin.assessment.modules import assess
     from netbox_librenms_plugin.tests.conftest import make_device
     from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import module_serial_context
 
     server = view._test_librenms_server
     device_id = view.librenms_id
@@ -73,7 +74,7 @@ def _assess_inventory(view, inventory):
             server.register(f"/api/v0/devices/{device_id}/{suffix}", {"status": "ok", field: []})
     subject = seed_mapping(make_device(f"assess-inventory-{device_id}"), "test-server", own=device_id)
     snapshot = acquire(subject, server_key="test-server", resources=[Resource.MODULES])
-    result = assess(snapshot, subject=subject)
+    result = assess(snapshot, subject=subject, serial_context=module_serial_context(subject))
     return result["inventory"], result["blocked"] or None
 
 

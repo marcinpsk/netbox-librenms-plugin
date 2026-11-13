@@ -411,11 +411,18 @@ def seed_modules_snapshot(subject, inventory, ports=(), transceivers=(), *, oob_
     )
 
 
+def module_serial_context(subject):
+    """Return the chassis serial context that the module readers merge the inventory of *subject* under."""
+    from netbox_librenms_plugin.serial_identity import SerialRules
+
+    return SerialRules.load().for_device(subject)
+
+
 def module_inventory(subject, server_key="default"):
     """Read the current module assessment through the bound source transport."""
     from netbox_librenms_plugin.views.base.modules_view import read_module_assessment
 
-    assessed = read_module_assessment(subject, server_key)
+    assessed = read_module_assessment(subject, server_key, serial_context=module_serial_context(subject))
     return assessed["inventory"] if assessed is not None else None
 
 

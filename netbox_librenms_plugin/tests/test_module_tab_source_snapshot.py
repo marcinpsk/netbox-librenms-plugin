@@ -12,6 +12,7 @@ from netbox_librenms_plugin.constants import MAIN_INVENTORY_SOURCE, OOB_INVENTOR
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency
 from netbox_librenms_plugin.tests.conftest import make_superuser
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
+from netbox_librenms_plugin.tests.source_snapshot_helpers import module_serial_context
 from netbox_librenms_plugin.tests.test_acquisition_modules import HOST_ID, OOB_ID, device, serve
 
 INVENTORY = [
@@ -80,7 +81,7 @@ def test_offsets_and_transceiver_synthesis_exist_only_in_the_assessment(client, 
     snapshot = SourceSnapshot.from_payload(payload)
     assert snapshot.value(Resource.MODULES, "inventory") == INVENTORY
     assert "_source" not in snapshot.value(Resource.MODULES, "inventory")[0]
-    assessed = assess(snapshot, subject=subject)["inventory"]
+    assessed = assess(snapshot, subject=subject, serial_context=module_serial_context(subject))["inventory"]
     host = [row for row in assessed if row["_source"] == MAIN_INVENTORY_SOURCE]
     oob = [row for row in assessed if row["_source"] == OOB_INVENTORY_SOURCE]
     assert {row["entPhysicalIndex"] for row in host} == {1, 2, 9001}
@@ -365,7 +366,8 @@ def test_numeric_inventory_names_render_through_refresh_and_cached_get(client, l
     assert response.context["module_sync"]["table"] is not None
     snapshot = source_cache.read(subject, Resource.MODULES, "default")
     assert snapshot.value(Resource.MODULES, "inventory")[1]["entPhysicalName"] == name
-    assert read_module_assessment(subject, "default")["inventory"][1]["entPhysicalName"] == str(name)
+    assessed = read_module_assessment(subject, "default", serial_context=module_serial_context(subject))
+    assert assessed["inventory"][1]["entPhysicalName"] == str(name)
     requests = list(live_librenms.server.requests)
     assert fragment(client, subject).context["module_sync"]["table"] is not None
     assert live_librenms.server.requests == requests
@@ -392,3 +394,82 @@ def test_a_librenms_without_the_transceiver_route_still_shows_the_module_rows(cl
     assert snapshot.record(Resource.MODULES, "transceivers").outcome is Outcome.NOT_APPLICABLE
     assert not any(f"devices/{HOST_ID}/transceivers" in str(message) for message in response.context["messages"])
     assert fragment(client, subject).context["module_sync"]["table"] is not None
+
+
+def _read_inventory_indices(subject):
+    """Return the entity indices that the cached Modules render reads for *subject*."""
+    from netbox_librenms_plugin.tests.view_test_helpers import make_request
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+    request = make_request("get", {"server_key": "default"}, user=make_superuser(f"{subject.name}-reader"))
+    view = DeviceModuleTableView()
+    view.setup(request, pk=subject.pk)
+    view.cache_only = True
+    _server, _owner, inventory, _policy, empty = view._read_render_inventory(request, subject, "default")
+    assert empty is None, empty
+    return [item["entPhysicalIndex"] for item in inventory]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("change", ["rule-deleted", "device-type-changed"])
+def test_a_cached_read_merges_transceivers_under_the_current_serial_context(client, live_librenms, change):
+    """A serial rule edit or a DeviceType change after the refresh changes the transceiver merge of the next read."""
+    from dcim.models import Device, DeviceType, Manufacturer
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import transceiver_row
+
+    subject = device(f"module-tab-serial-context-{change}")
+    client.force_login(make_superuser(f"module-tab-serial-context-{change}-user"))
+    NormalizationRule.objects.filter(scope=NormalizationRule.SCOPE_SERIAL).delete()
+    NormalizationRule.objects.create(
+        scope="serial",
+        match_pattern=r"^S/N\s+(.+)$",
+        replacement=r"\1",
+        manufacturer=subject.device_type.manufacturer,
+    )
+    # Under the rule the transceiver's "S/N CARD-SERIAL" is the card's "CARD-SERIAL", so the merge drops it.
+    transceivers = [transceiver_row(20, model="SFP-RULE", serial="S/N CARD-SERIAL", kind="sfp")]
+    serve(live_librenms.server, inventory=INVENTORY, transceivers=transceivers)
+    assert refresh(client, subject).context["module_sync"]["table"] is not None
+    assert _read_inventory_indices(subject) == [1, 2]
+
+    if change == "rule-deleted":
+        NormalizationRule.objects.filter(scope=NormalizationRule.SCOPE_SERIAL).delete()
+    else:
+        other_maker = Manufacturer.objects.create(name="Context change maker", slug="context-change-maker")
+        other_type = DeviceType.objects.create(manufacturer=other_maker, model="Context change", slug="context-change")
+        Device.objects.filter(pk=subject.pk).update(device_type=other_type)
+
+    assert _read_inventory_indices(subject) == [1, 2, 20]
+
+
+@pytest.mark.django_db
+def test_a_member_page_merges_transceivers_under_the_serial_rules_of_the_chassis_master(live_librenms):
+    from dcim.models import DeviceType, Manufacturer
+    from netbox_librenms_plugin.acquisition.coordinator import acquire
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members, map_device_to_librenms
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import inventory_row, transceiver_row
+
+    _chassis, (master, member) = make_virtual_chassis_members("module-tab-master-rules", count=2)
+    NormalizationRule.objects.create(
+        scope="serial", manufacturer=master.device_type.manufacturer, match_pattern=r"^TAG (.+)$", replacement=r"\1"
+    )
+    # The member's own type has no serial rules; the chassis master's rules decide the merge.
+    other_maker = Manufacturer.objects.create(name="Member type maker", slug="member-type-maker")
+    member.device_type = DeviceType.objects.create(manufacturer=other_maker, model="Member type", slug="member-type")
+    member.save()
+    map_device_to_librenms(member, HOST_ID, server_key="default")
+    serve(
+        live_librenms.server,
+        inventory=[
+            inventory_row(300, "Existing optic", model="SFP-10G-LR", serial="TAG OPTIC-7", physical_class="port")
+        ],
+        transceivers=[transceiver_row(400, port_id=42, model="SFP-10G-LR", serial="OPTIC-7", kind="SFP+")],
+        ports=[{"port_id": 42, "ifName": "xe-0/0/0"}],
+    )
+    assert source_cache.store(
+        member, Resource.MODULES, acquire(member, server_key="default", resources=[Resource.MODULES])
+    )
+
+    assert _read_inventory_indices(member) == [300]

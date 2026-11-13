@@ -79,14 +79,18 @@ from netbox_librenms_plugin.assessment.modules import (
 logger = logging.getLogger(__name__)
 
 
-def read_module_assessment(subject, server_key, snapshot=None):
-    """Return assessed rows and blockers of *snapshot*, or of the currently bound source when it is None."""
+def read_module_assessment(subject, server_key, snapshot=None, *, serial_context):
+    """
+    Return assessed rows and blockers of *snapshot*, or of the currently bound source when it is None.
+
+    *serial_context* is the chassis context of the inventory policy that the caller builds its table with.
+    """
     if snapshot is None:
         snapshot = source_cache.read(subject, Resource.MODULES, server_key)
     if snapshot is None:
         return None
     return {
-        **assess(snapshot, subject=subject),
+        **assess(snapshot, subject=subject, serial_context=serial_context),
         "snapshot_id": snapshot.snapshot_id,
         "last_fetched": snapshot.finished_at,
     }
@@ -873,31 +877,42 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         chassis = page.virtual_chassis
         return page.virtual_chassis_id, chassis.master_id if chassis is not None else None
 
-    def _read_render_inventory(self, request, obj, server_key=None, *, notify=True, snapshot=None):
-        """Assess *snapshot*, or read the source, without discovery or HTTP; *notify* queues a notice per blocked scope."""
+    def _read_render_inventory(self, request, obj, server_key=None, *, notify=True, snapshot=None, policy=None):
+        """
+        Assess *snapshot*, or read the source, without discovery or HTTP; *notify* queues a notice per blocked scope.
+
+        Return ``(server key, sync device, inventory, policy, None)``, or an empty context as the last item. The
+        assessment merges under the chassis serial context of *policy*, loaded here when None, so the table that
+        the caller builds with that policy compares serials as the merge did.
+        """
         scoped_server, unresolved = self.resolve_get_render_server_key(request, server_key)
         empty = {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}
         if unresolved or self._render_server_key() is None:
-            return None, None, None, empty
+            return None, None, None, None, empty
         from dcim.models import Device
 
         from netbox_librenms_plugin.models import RuleConfigurationError
 
         try:
-            assessed = read_module_assessment(obj, scoped_server, snapshot)
+            if policy is None:
+                policy = load_inventory_policy(obj.pk)
+            assessed = read_module_assessment(
+                obj, scoped_server, snapshot, serial_context=policy.chassis_serial_context()
+            )
         except Device.DoesNotExist:
-            return None, None, None, empty
+            return None, None, None, None, empty
         except RuleConfigurationError as exc:
-            return None, None, None, {**empty, "inventory_rule_error": exc.shown_to(request.user)}
+            logger.error("Module table for %s not built: %s", obj, exc)
+            return None, None, None, None, {**empty, "inventory_rule_error": exc.shown_to(request.user)}
         if assessed is None:
-            return None, None, None, empty
+            return None, None, None, None, empty
         if notify:
             for blockers in assessed["blocked"].values():
                 messages.warning(request, source_cache.blocker_notice(blockers))
         if "host" in assessed["blocked"]:
-            return None, None, None, empty
+            return None, None, None, None, empty
         owner = self._get_sync_device(obj, server_key=scoped_server)
-        return scoped_server, owner, assessed["inventory"], None
+        return scoped_server, owner, assessed["inventory"], policy, None
 
     def get_context_data(self, request, obj, server_key=None, *, snapshot=None, policy=None):
         """
@@ -905,8 +920,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
         A refresh passes the *snapshot* and the *policy* it read, so the table makes no read of its own.
         """
-        scoped_server, sync_device, inventory, empty = self._read_render_inventory(
-            request, obj, server_key, snapshot=snapshot
+        scoped_server, sync_device, inventory, policy, empty = self._read_render_inventory(
+            request, obj, server_key, snapshot=snapshot, policy=policy
         )
         if empty is not None:
             return empty
@@ -922,33 +937,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
         The page table is not built again: the verify grant carries what it showed for the row.
         """
-        from dcim.models import Device
-
-        from netbox_librenms_plugin.models import RuleConfigurationError
-
         # The verify answer is JSON, so a queued notice would show on a later page.
-        scoped_server, sync_device, inventory, empty = self._read_render_inventory(
+        scoped_server, sync_device, inventory, policy, empty = self._read_render_inventory(
             request, page_device, server_key, notify=False
         )
         if empty is not None:
             return empty
-        try:
-            policy = load_inventory_policy(page_device.pk)
-        except Device.DoesNotExist:
-            return {
-                "table": None,
-                "object": page_device,
-                "cache_expiry": None,
-                "server_key": scoped_server,
-            }
-        except RuleConfigurationError as exc:
-            logger.error("Module table for %s not built: %s", page_device, exc)
-            return {
-                "table": None,
-                "object": page_device,
-                "server_key": scoped_server,
-                "inventory_rule_error": exc.shown_to(request.user),
-            }
         if policy.member(member.pk) is None:
             return {"table": None, "object": page_device, "server_key": scoped_server}
         return self._build_context(
