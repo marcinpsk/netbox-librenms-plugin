@@ -139,7 +139,7 @@ class TestRemotePortAliases:
         view = _make_view()
 
         by_name, by_id, visible_ids = view._load_remote_device_catalog([link], server_key)
-        matched = view._resolve_remote_devices([link], by_name, by_id, visible_ids)[id(link)]
+        matched, _error = view._resolve_remote_devices([link], by_name, by_id, visible_ids)[id(link)]
         view.enrich_remote_port(link, matched, server_key=server_key)
 
         assert matched == remote_device

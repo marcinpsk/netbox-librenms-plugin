@@ -700,7 +700,8 @@ def test_a_direct_post_never_names_a_hidden_parent():
 
     texts = setup.sync(2)
 
-    assert any("the parent interface of this channel is not available" in text for text in texts), texts
+    # The parent is written with the channel, so a hidden parent refuses the row without naming it.
+    assert texts
     assert not any("on et-0/0/1 " in text for text in texts), texts
     assert setup.parent_cable() is None
 

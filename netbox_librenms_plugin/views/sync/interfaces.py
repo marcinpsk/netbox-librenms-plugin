@@ -62,6 +62,7 @@ from netbox_librenms_plugin.sync_cache import (
     schedule_request_cache_mutation,
 )
 from netbox_librenms_plugin.sync_query import page_query_url
+from netbox_librenms_plugin.sync_view_scope import Withheld
 from netbox_librenms_plugin.transactions import CommittedFollowUpError, classify_conflict, run_transaction
 from netbox_librenms_plugin.utils import (
     build_migrated_context,
@@ -601,7 +602,7 @@ class SyncInterfacesView(
 
         locked_members = {member.pk: member for member in members or ()}
         members = (
-            [locked_members.get(member.pk, member) for member in obj.virtual_chassis.members.all()]
+            [locked_members.get(member.pk, member) for member in self.sync_view_scope(obj).chassis.attribution_members]
             if obj.virtual_chassis_id is not None
             else [locked_members.get(obj.pk, obj)]
         )
@@ -2246,6 +2247,10 @@ class DeleteNetBoxInterfacesView(
             )
         return apply_request_cache_transition(request, JsonResponse(response_data))
 
+    def _deletable_interface(self, model, interface_id):
+        """Return the *model* interface *interface_id* that the user may delete and view."""
+        return self.viewable_restricted_queryset(model, "delete").get(id=interface_id)
+
     def _delete_attempt(self, obj, object_type, interface_ids):
         """
         Delete the selected interfaces of *obj*; return the deleted count and the per-row errors.
@@ -2257,22 +2262,27 @@ class DeleteNetBoxInterfacesView(
         for interface_id in interface_ids:
             try:
                 if object_type == "device":
-                    # Scoped by "delete": the ownership checks below prove where the
-                    # interface sits, not that the grant covers it.
-                    interface = self.restricted_queryset(Interface, "delete").get(id=interface_id)
-                    if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-                        valid_device_ids = [member.id for member in obj.virtual_chassis.members.all()]
-                        if interface.device_id not in valid_device_ids:
-                            errors.append(
-                                f"Interface {interface.name} does not belong to this device or its virtual chassis"
-                            )
-                            continue
-                    elif interface.device_id != obj.id:
-                        errors.append(f"Interface {interface.name} does not belong to this device")
+                    # Scoped by "delete" and "view": an interface the user cannot view reads as missing.
+                    interface = self._deletable_interface(Interface, interface_id)
+                    scope = self.sync_view_scope(obj)
+                    if interface.device_id not in scope.chassis.visible_ids:
+                        # An interface on a device the user cannot view reads as missing.
+                        if isinstance(scope.owner(Device, interface.device_id), Withheld):
+                            raise Interface.DoesNotExist
+                        errors.append(
+                            f"Interface {interface.name} does not belong to this device or its virtual chassis"
+                            if obj.virtual_chassis_id
+                            else f"Interface {interface.name} does not belong to this device"
+                        )
                         continue
                 else:
-                    interface = self.restricted_queryset(VMInterface, "delete").get(id=interface_id)
+                    interface = self._deletable_interface(VMInterface, interface_id)
                     if interface.virtual_machine_id != obj.id:
+                        # An interface on a virtual machine the user cannot view reads as missing.
+                        if isinstance(
+                            self.sync_view_scope(obj).owner(VirtualMachine, interface.virtual_machine_id), Withheld
+                        ):
+                            raise VMInterface.DoesNotExist
                         errors.append(f"Interface {interface.name} does not belong to this virtual machine")
                         continue
             except (Interface.DoesNotExist, VMInterface.DoesNotExist):

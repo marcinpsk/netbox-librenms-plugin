@@ -81,7 +81,7 @@ def _enriched_rows(cached_data=None, interface_name_field="ifName"):
     for row in rows:
         row["netbox_interface"] = None
         row["exists_in_netbox"] = False
-        enrich_port_relationships(row, maps, interface_name_field, SERVER_KEY)
+        enrich_port_relationships(row, maps, interface_name_field, SERVER_KEY, viewable_interface_ids=set())
         stamp_rule_decision(row)
     return rows
 

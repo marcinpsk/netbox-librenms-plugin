@@ -256,6 +256,8 @@ class TestSingleIPAddressVerify:
         vm = make_vm("ip-verify-vm")
         while Device.objects.filter(pk=vm.pk).exists():
             vm = make_vm(f"ip-verify-vm-{vm.pk + 1}")
+        _set_librenms_id(vm, 5201)
+        seed_ip_snapshot(vm, [ip_address_row("198.18.52.10", 5202)], [{"port_id": 5202, "ifName": "eth0"}])
 
         response = self._post(client, {"device_id": vm.pk, "ip_address": "198.18.52.10/24"})
 

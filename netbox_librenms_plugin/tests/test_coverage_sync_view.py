@@ -17,7 +17,7 @@ from netbox_librenms_plugin.tests.conftest import (
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
-from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms, superuser_chassis
 
 
 SERVER_KEY = "default"
@@ -256,9 +256,10 @@ class TestSyncPageRouting:
         response = client.get(_sync_url(viewed))
 
         assert response.status_code == 200
-        assert response.context["librenms_sync_device"] == sync_device
-        assert response.context["sync_device_has_librenms_id"] is (banner == "managed")
-        assert response.context["sync_device_has_primary_ip"] is (banner == "configure")
+        assert response.context["librenms_sync_device"] == (sync_device if sync_device_visible else None)
+        assert response.context["sync_device_withheld"] is (not sync_device_visible)
+        assert response.context["sync_device_has_librenms_id"] is (sync_device_visible and banner == "managed")
+        assert response.context["sync_device_has_primary_ip"] is (sync_device_visible and banner == "configure")
         html = response.content.decode()
         assert (f'href="{sync_device.get_absolute_url()}"' in html) is sync_device_visible
         assert (sync_device.get_absolute_url() in html) is sync_device_visible
@@ -493,7 +494,9 @@ class TestLibreNMSDeviceInfo:
         view = _device_view()
         view.librenms_id = 6633
 
-        result = view.get_librenms_device_info(device)
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+
+        result = view.get_librenms_device_info(device, _request_for(make_superuser("dns-identity-user")))
 
         assert result["mismatched_device"] is False
         assert result["librenms_device_details"]["netbox_dns_names"] == ["dns-identity.example.test"]
@@ -590,7 +593,7 @@ class TestVirtualChassisInventory:
         view = _device_view()
         view.librenms_id = 6648
 
-        result = view._get_vc_inventory_serials(members[0])
+        result = view._get_vc_inventory_serials(members[0], superuser_chassis(members[0]))
 
         assert [(item["serial"], item["assigned_member"]) for item in result] == [("VC-DUP", None), ("VC-OTHER", None)]
 
@@ -616,7 +619,7 @@ class TestVirtualChassisInventory:
         view = _device_view()
         view.librenms_id = 6641
 
-        result = view._get_vc_inventory_serials(members[0])
+        result = view._get_vc_inventory_serials(members[0], superuser_chassis(members[0]))
 
         assert len(result) == 2
         assert result[0]["assigned_member"] == members[0]
@@ -641,7 +644,7 @@ class TestVirtualChassisInventory:
         view = _device_view()
         view.librenms_id = 6644
 
-        result = view._get_vc_inventory_serials(members[0])
+        result = view._get_vc_inventory_serials(members[0], superuser_chassis(members[0]))
 
         assert len(result) == 2
         assert result[0]["serial"] == "S/N BCFB9793"
@@ -678,7 +681,7 @@ class TestVirtualChassisInventory:
         view = _device_view()
         view.librenms_id = 6646
 
-        result = view._get_vc_inventory_serials(member)
+        result = view._get_vc_inventory_serials(member, superuser_chassis(member))
 
         assert result[0]["serial"] == "VENDOR:MEMBER-SERIAL"
         assert result[0]["assigned_member"] == member
@@ -704,7 +707,7 @@ class TestVirtualChassisInventory:
         view.librenms_id = 6645
 
         with CaptureQueriesContext(connection) as captured:
-            result = view._get_vc_inventory_serials(members[0])
+            result = view._get_vc_inventory_serials(members[0], superuser_chassis(members[0]))
 
         assert len(result) == 5
         rule_queries = [q for q in captured.captured_queries if "normalizationrule" in q["sql"].lower()]
@@ -717,7 +720,7 @@ class TestVirtualChassisInventory:
         view = _device_view()
         view.librenms_id = 6642
 
-        assert view._get_vc_inventory_serials(members[0]) == []
+        assert view._get_vc_inventory_serials(members[0], superuser_chassis(members[0])) == []
 
     def test_the_dialog_stores_the_raw_serial_and_shows_the_member_as_assigned(self, logged_in_client, librenms_server):
         """The dialog posts and shows the LibreNMS serial, and finds the member on the next render."""
@@ -954,3 +957,11 @@ class TestDualStackDiscovery:
         assert read_mapping(type(device).objects.get(pk=device.pk)).own_id(SERVER_KEY) == 6697
         paths = [request["path"] for request in librenms_server.requests]
         assert paths[:2] == ["/api/v0/devices/192.0.2.8", "/api/v0/devices/2001:db8::8"]
+
+
+def _request_for(user):
+    from django.test import RequestFactory
+
+    request = RequestFactory().get("/")
+    request.user = user
+    return request
