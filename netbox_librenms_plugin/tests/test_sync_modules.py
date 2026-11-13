@@ -1950,12 +1950,16 @@ def _leave_world(tag):
     make_virtual_chassis(f"{tag}-vc", page, member)
     outsider = make_device_with_module_bays(f"{tag}-outsider", ["Old Bay"])
     card_type = make_module_type(f"{tag.upper()}-CARD")
-    rows = [
-        _inventory_item(1, "", "Member chassis", serial=member.serial, phys_class="chassis"),
-        _inventory_item(2, card_type.model, "Card", parent=1, serial=f"{tag}-SN"),
-        # The child gives the card its branch button; it fits no bay.
-        _inventory_item(3, make_module_type(f"{tag.upper()}-OPTIC").model, "Optic", parent=2),
-    ]
+    # The stack names both members, and the member's chassis row holds the card.
+    rows = stack_inventory(
+        [
+            _inventory_item(1, "", "Member chassis", serial=member.serial, phys_class="chassis"),
+            _inventory_item(2, card_type.model, "Card", parent=1, serial=f"{tag}-SN"),
+            # The child gives the card its branch button; it fits no bay.
+            _inventory_item(3, make_module_type(f"{tag.upper()}-OPTIC").model, "Optic", parent=2),
+        ],
+        [page, member],
+    )
     return {
         "serial": f"{tag}-SN",
         # A module write clears the cached inventory on commit, so a form seeds it after its own writes.
@@ -2140,11 +2144,14 @@ def _moved_module_world(tag, user):
 
     world = _leave_world(tag)
     page = Device.objects.get(pk=world["page"].pk)
-    rows = [
-        _inventory_item(1, "", "Member chassis", serial=world["member"].serial, phys_class="chassis"),
-        _inventory_item(2, world["card_type"].model, "Card", parent=1, serial=world["serial"]),
-        _inventory_item(3, f"{tag.upper()}-OPTIC", "Optic", parent=2),
-    ]
+    rows = stack_inventory(
+        [
+            _inventory_item(1, "", "Member chassis", serial=world["member"].serial, phys_class="chassis"),
+            _inventory_item(2, world["card_type"].model, "Card", parent=1, serial=world["serial"]),
+            _inventory_item(3, f"{tag.upper()}-OPTIC", "Optic", parent=2),
+        ],
+        [page, world["member"]],
+    )
 
     def seed():
         seed_mapped_modules(
