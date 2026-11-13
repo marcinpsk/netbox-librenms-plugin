@@ -639,6 +639,18 @@ def _detect_serial_match_role(existing_by_serial, existing_link, hostname, seria
     }
 
 
+def _storable_serial(value) -> bool:
+    """Return whether *value* is a JSON scalar whose text a PostgreSQL text column can hold: no NUL, valid UTF-8."""
+    if not isinstance(value, (str, int, float)):
+        return False
+    text = str(value)
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return "\x00" not in text
+
+
 def preload_import_objects(
     libre_devices, server_key: str, *, existing=(), resolved_names=(), serial_rules: SerialRules | None = None
 ) -> dict:
@@ -677,8 +689,8 @@ def preload_import_objects(
         names.update(name for key in ("hostname", "sysName") if isinstance(name := row.get(key), str) and name)
         names.update(variant["name"] for variant in import_name_variants(row).values() if variant["name"])
     # The validator and the cached-row refresh resolve the LibreNMS text, so the preload resolves it too.
-    # A serial that is no JSON scalar is an issue of its row in the validator, so the preload leaves it out.
-    serials = [serial for row in libre_devices if isinstance(serial := row.get("serial"), (str, int, float))]
+    # A serial that no stored row can hold is an issue of its row in the validator, so the preload leaves it out.
+    serials = [row["serial"] for row in libre_devices if _storable_serial(row.get("serial"))]
     try:
         serial_resolutions = resolve_devices(serials, rules=serial_rules) if serials else {}
     except RuleConfigurationError:
