@@ -211,7 +211,7 @@ def test_an_import_type_change_reads_the_device_serial_again_under_its_locks(lib
     from netbox_librenms_plugin.tests.view_test_helpers import post as post_view
     from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
 
-    target = make_device("retype-race-target", serial="DEF456", librenms_cf={SERVER_KEY: 9811})
+    target = seed_mapping(make_device("retype-race-target", serial="DEF456"), SERVER_KEY, own=9811)
     make_device("retype-race-holder", serial="ABC")
     new_maker = Manufacturer.objects.create(name="Retype race maker", slug="retype-race-maker")
     NormalizationRule.objects.create(

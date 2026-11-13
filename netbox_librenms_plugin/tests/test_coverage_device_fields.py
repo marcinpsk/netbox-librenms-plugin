@@ -1170,7 +1170,7 @@ class TestUpdateDeviceTypeSerialIdentity:
 
         from netbox_librenms_plugin.models import NormalizationRule
 
-        device = make_device("retype-sync-target", serial="XABC", librenms_cf={SERVER_KEY: 6571})
+        device = seed_mapping(make_device("retype-sync-target", serial="XABC"), SERVER_KEY, own=6571)
         NormalizationRule.objects.create(
             scope="serial", match_pattern=r"^X(AB)C$", replacement=r"\1", manufacturer=device.device_type.manufacturer
         )
@@ -1199,7 +1199,7 @@ class TestUpdateDeviceTypeSerialIdentity:
     ):
         from dcim.models import Device, DeviceType, Manufacturer
 
-        device = make_device(f"retype-sync-{shape}", librenms_cf={SERVER_KEY: 6572})
+        device = seed_mapping(make_device(f"retype-sync-{shape}"), SERVER_KEY, own=6572)
         new_maker = Manufacturer.objects.create(name=f"Retype sync {shape}", slug=f"retype-sync-{shape}-maker")
         _retype_shape(device, shape, new_maker)
         new_type = DeviceType.objects.create(
@@ -1222,7 +1222,7 @@ class TestUpdateDeviceTypeSerialIdentity:
 
         from netbox_librenms_plugin.models import NormalizationRule
 
-        device = make_device("retype-masked-a", serial="XABC", librenms_cf={SERVER_KEY: 6574})
+        device = seed_mapping(make_device("retype-masked-a", serial="XABC"), SERVER_KEY, own=6574)
         make_device("retype-masked-b", serial="XABC")
         make_device("retype-masked-c", serial="ABC")
         new_maker = Manufacturer.objects.create(name="Retype masked maker", slug="retype-masked-maker")
@@ -1246,7 +1246,7 @@ class TestUpdateDeviceTypeSerialIdentity:
         from netbox_librenms_plugin.models import NormalizationRule
         from netbox_librenms_plugin.tests.conftest import install_module, make_module_bay
 
-        device = make_device("retype-sync-clean", librenms_cf={SERVER_KEY: 6573})
+        device = seed_mapping(make_device("retype-sync-clean"), SERVER_KEY, own=6573)
         for number, serial in ((1, "XDEF"), (2, "ABC")):
             make_module_bay(device, f"Slot {number}", position=str(number))
             install_module(device, f"Slot {number}", f"RETYPE-CLEAN-CARD-{number}", serial=serial)
