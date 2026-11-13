@@ -137,6 +137,25 @@ def test_oob_binding_changes_refuse_every_reader_without_deleting_the_snapshot(c
 
 
 @pytest.mark.django_db
+def test_a_refresh_that_a_broken_rule_refuses_stays_ready_without_a_success_message(client, live_librenms):
+    from netbox_librenms_plugin.models import InventoryIgnoreRule
+
+    subject = device("module-tab-rule-refusal")
+    client.force_login(make_superuser("module-tab-rule-refusal-user"))
+    serve(live_librenms.server, inventory=INVENTORY, transceivers=[])
+    rule = InventoryIgnoreRule.objects.create(
+        name="Refusing rule", match_type="regex", pattern="^skip$", require_serial_match_parent=False
+    )
+    InventoryIgnoreRule.objects.filter(pk=rule.pk).update(pattern="[")
+
+    response = refresh(client, subject)
+
+    assert response.context["module_sync"]["inventory_rule_error"]
+    assert SyncCacheConsistency(subject).status("default")["modules"]["state"] == "ready"
+    assert [message for message in response.context["messages"] if message.level == messages.SUCCESS] == []
+
+
+@pytest.mark.django_db
 def test_a_rule_edit_recovers_the_table_from_the_same_ready_source(client, live_librenms):
     from netbox_librenms_plugin.models import InventoryIgnoreRule
 
