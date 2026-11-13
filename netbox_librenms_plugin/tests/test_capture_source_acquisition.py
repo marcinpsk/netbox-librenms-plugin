@@ -12,6 +12,7 @@ from netbox_librenms_plugin.data_shapes.recordings_store import SERIAL_SENSORS_M
 from netbox_librenms_plugin.models import PortStackLagPattern
 from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis_members
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+from netbox_librenms_plugin.tests.source_snapshot_helpers import module_serial_context
 
 RESOURCES = [Resource.INTERFACES, Resource.IP_ADDRESSES, Resource.CABLES, Resource.MODULES]
 ROOT = {"entPhysicalIndex": 10, "entPhysicalContainedIn": 0, "entPhysicalClass": "stack"}
@@ -81,7 +82,9 @@ def test_capture_replays_source_acquisition_including_a_vc_member(
         {"default": {"librenms_url": replay.url, "api_token": replay_api.headers["X-Auth-Token"], "verify_ssl": False}}
     )
     after = acquire(subject, server_key="default", resources=RESOURCES, include_serial=True, inventory_probes=True)
-    assert assess_modules(after, subject=subject) == assess_modules(before, subject=subject)
+    assert assess_modules(after, subject=subject, serial_context=module_serial_context(subject)) == assess_modules(
+        before, subject=subject, serial_context=module_serial_context(subject)
+    )
     assert assess_interfaces(after, "ifName") == assess_interfaces(before, "ifName")
     assert assess_cables(after, subject=subject) == assess_cables(before, subject=subject)
     assert after.value(Resource.IP_ADDRESSES, "addresses") == before.value(Resource.IP_ADDRESSES, "addresses")
@@ -285,7 +288,11 @@ def test_a_missing_transceiver_route_is_captured_and_replays_the_same_modules(
     serve(live_librenms.server)
     missing = {"status": "error", "message": "Not Found"}
     live_librenms.server.register("/api/v0/devices/5501/transceivers", missing, status=404)
-    before = assess_modules(acquire(subject, server_key="default", resources=RESOURCES), subject=subject)
+    before = assess_modules(
+        acquire(subject, server_key="default", resources=RESOURCES),
+        subject=subject,
+        serial_context=module_serial_context(subject),
+    )
 
     recording = capture(subject)
     replay, replay_api = recording_server(recording)
@@ -295,4 +302,11 @@ def test_a_missing_transceiver_route_is_captured_and_replays_the_same_modules(
 
     assert unwrap_response(recording["responses"]["GET /api/v0/devices/5501/transceivers"]) == (404, missing)
     assert before["inventory"]
-    assert assess_modules(acquire(subject, server_key="default", resources=RESOURCES), subject=subject) == before
+    assert (
+        assess_modules(
+            acquire(subject, server_key="default", resources=RESOURCES),
+            subject=subject,
+            serial_context=module_serial_context(subject),
+        )
+        == before
+    )

@@ -6,10 +6,10 @@ from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.acquisition.resources import blocked_scopes
 from netbox_librenms_plugin.acquisition.snapshot import Outcome
 from netbox_librenms_plugin.constants import MAIN_INVENTORY_SOURCE, OOB_INVENTORY_SOURCE, is_librenms_placeholder
-from netbox_librenms_plugin.inventory_identity import vc_serial_key
 from netbox_librenms_plugin.inventory_tree import repair_dangling_parents
+from netbox_librenms_plugin.serial_identity import Comparison, SerialContext, compare, group, is_identity
 from netbox_librenms_plugin.server_mappings import MappingRole
-from netbox_librenms_plugin.utils import normalize_serial
+from netbox_librenms_plugin.utils import librenms_text
 
 _SKIP_TRANSCEIVER_TYPES = {"Port Container", "Port", ""}
 TRANSCEIVER_API_MATCH = "_transceiver_api_match"
@@ -24,13 +24,19 @@ def _normalize_inventory_indices(rows):
                 item[field] = int(value)
 
 
-def assess(snapshot, *, subject):
-    """Return the assessed inventory and its blocked scopes for the synchronization subject."""
+def assess(snapshot, *, subject, serial_context: SerialContext):
+    """
+    Return the assessed inventory and its blocked scopes for the synchronization subject.
+
+    The transceiver merge compares serials under *serial_context*, the chassis context of the page's
+    inventory policy, so each read decides under the current rules and DeviceType.
+    """
     resource = Resource.MODULES
     blocked = blocked_scopes(snapshot, resource)
     if "host" in blocked:
         return {"inventory": [], "blocked": blocked}
-    owner = Device.objects.select_related("device_type__manufacturer").get(pk=snapshot.resources[resource].owner.pk)
+    # A deleted source owner makes the snapshot unusable; the readers refuse it.
+    Device.objects.get(pk=snapshot.resources[resource].owner.pk)
     inventory = snapshot.value(resource, "inventory")
     _normalize_inventory_indices(inventory)
     repair_dangling_parents(inventory)
@@ -40,7 +46,7 @@ def assess(snapshot, *, subject):
         inventory,
         snapshot.value(resource, "transceivers") if transceivers.outcome is not Outcome.NOT_APPLICABLE else [],
         ports,
-        manufacturer=owner.device_type.manufacturer,
+        serial_context=serial_context,
     )
     for item in inventory:
         item["_source"] = MAIN_INVENTORY_SOURCE
@@ -64,41 +70,35 @@ def assess(snapshot, *, subject):
         for field in ("entPhysicalName", "entPhysicalModelName"):
             value = item.get(field)
             if value is not None and not isinstance(value, str):
-                item[field] = normalize_serial(value)
+                item[field] = librenms_text(value)
     return {"inventory": inventory, "blocked": blocked}
 
 
 def clean_librenms_value(value) -> str:
     """Return trimmed text with LibreNMS placeholders removed."""
-    text = normalize_serial(value)
+    text = librenms_text(value)
     return "" if is_librenms_placeholder(text) else text
 
 
-def _names_another_part(item: dict, transceiver: dict, serial_key) -> bool:
+def _names_another_part(item: dict, transceiver: dict, context: SerialContext) -> bool:
     """Return whether an entity and a transceiver both have a real serial and the serials differ."""
-    item_serial = serial_key(item.get("entPhysicalSerialNum"))
-    transceiver_serial = serial_key(transceiver.get("serial"))
-    return bool(item_serial and transceiver_serial and item_serial != transceiver_serial)
+    return compare(item.get("entPhysicalSerialNum"), transceiver.get("serial"), context) is Comparison.DIFFERENT
 
 
-def _ifindex_entity_is_the_optic(item: dict, transceiver: dict, serial_key) -> bool:
+def _ifindex_entity_is_the_optic(item: dict, transceiver: dict, context: SerialContext) -> bool:
     """Return whether an entity matched only by port ifIndex has the optic's serial, or neither model nor serial."""
-    if _names_another_part(item, transceiver, serial_key):
-        return False
-    item_serial = serial_key(item.get("entPhysicalSerialNum"))
-    if item_serial:
-        return item_serial == serial_key(transceiver.get("serial"))
+    if is_identity(item.get("entPhysicalSerialNum"), context):
+        return compare(item.get("entPhysicalSerialNum"), transceiver.get("serial"), context) is Comparison.SAME
     return not clean_librenms_value(item.get("entPhysicalModelName"))
 
 
-def _merge_transceiver_data(inventory_data, transceivers, ports, *, manufacturer):  # noqa: C901
+def _merge_transceiver_data(inventory_data, transceivers, ports, *, serial_context: SerialContext):  # noqa: C901
     """Merge transceiver facts into copied entity inventory."""
     if not transceivers:
         return inventory_data
 
     inv_by_index = {idx: item for item in inventory_data if (idx := item.get("entPhysicalIndex")) is not None}
-    serial_key = vc_serial_key(manufacturer)
-    inv_serials = {s for item in inventory_data if (s := serial_key(item.get("entPhysicalSerialNum")))}
+    inv_serials = group(inventory_data, serial_context, serial=lambda item: item.get("entPhysicalSerialNum"))
     inv_by_ifindex = {}
     for item in inventory_data:
         if (if_index := int(item["ifIndex"]) if item.get("ifIndex") is not None else None) is not None:
@@ -117,7 +117,7 @@ def _merge_transceiver_data(inventory_data, transceivers, ports, *, manufacturer
         existing = inv_by_index.get(ent_idx)
         index_taken = existing is not None
         if existing is not None and (
-            _names_another_part(existing, txr, serial_key)
+            _names_another_part(existing, txr, serial_context)
             or (
                 port_ifindex is not None
                 and (int(existing["ifIndex"]) if existing.get("ifIndex") is not None else None)
@@ -127,14 +127,13 @@ def _merge_transceiver_data(inventory_data, transceivers, ports, *, manufacturer
             existing = None
         if existing is None and port_ifindex is not None:
             by_ifindex = inv_by_ifindex.get(port_ifindex)
-            if by_ifindex is not None and _ifindex_entity_is_the_optic(by_ifindex, txr, serial_key):
+            if by_ifindex is not None and _ifindex_entity_is_the_optic(by_ifindex, txr, serial_context):
                 existing = by_ifindex
         if existing is None and index_taken:
             continue
 
         model = clean_librenms_value(txr.get("model"))
         serial = clean_librenms_value(txr.get("serial"))
-        serial_identity = serial_key(serial)
         txr_type = clean_librenms_value(txr.get("type"))
 
         if txr_type in _SKIP_TRANSCEIVER_TYPES and not model and not serial:
@@ -150,8 +149,7 @@ def _merge_transceiver_data(inventory_data, transceivers, ports, *, manufacturer
             existing_serial = clean_librenms_value(existing.get("entPhysicalSerialNum"))
             if not existing_serial and serial:
                 existing["entPhysicalSerialNum"] = serial
-                if serial_identity:
-                    inv_serials.add(serial_identity)
+                inv_serials.add(serial, existing)
             if port_id:
                 existing["_librenms_port_id"] = port_id
             if ifname:
@@ -159,7 +157,7 @@ def _merge_transceiver_data(inventory_data, transceivers, ports, *, manufacturer
             if ifdescr:
                 existing["_librenms_ifdescr"] = ifdescr
         else:
-            if serial_identity and serial_identity in inv_serials:
+            if inv_serials.find(serial):
                 continue
             if ifname:
                 name = ifname
@@ -185,8 +183,7 @@ def _merge_transceiver_data(inventory_data, transceivers, ports, *, manufacturer
             }
             inventory_data.append(synthetic)
             inv_by_index[ent_idx] = synthetic
-            if serial_identity:
-                inv_serials.add(serial_identity)
+            inv_serials.add(serial, synthetic)
 
     _nest_synthetic_transceivers(inventory_data)
 
@@ -197,7 +194,7 @@ def _nest_synthetic_transceivers(inventory_data):
     """Set synthetic transceiver parents from their interface path."""
     name_to_index = {}
     for it in inventory_data:
-        nm = normalize_serial(it.get("entPhysicalName"))
+        nm = librenms_text(it.get("entPhysicalName"))
         if nm:
             name_to_index.setdefault(nm, it.get("entPhysicalIndex"))
 
@@ -206,7 +203,7 @@ def _nest_synthetic_transceivers(inventory_data):
             continue
         if it.get("entPhysicalContainedIn"):
             continue
-        name = normalize_serial(it.get("entPhysicalName"))
+        name = librenms_text(it.get("entPhysicalName"))
         if not name or "/" not in name:
             continue
         parts = name.split("/")
@@ -248,7 +245,7 @@ def _enrich_inventory_port_identity(inventory_data, ports):
         label_to_port_id.pop(label, None)
 
     for item in inventory_data:
-        if normalize_serial(item.get("entPhysicalClass")).lower() != "port":
+        if librenms_text(item.get("entPhysicalClass")).lower() != "port":
             continue
 
         port_id = item.get("_librenms_port_id")
@@ -295,7 +292,7 @@ def interface_name_candidates(item):
         item.get("entPhysicalName"),
         item.get("entPhysicalDescr"),
     ]:
-        label = normalize_serial(value)
+        label = librenms_text(value)
         if label and label not in candidates:
             candidates.append(label)
     return candidates
