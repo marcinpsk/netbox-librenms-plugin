@@ -9,6 +9,7 @@ from netbox_librenms_plugin.acquisition.snapshot import IncompleteSource, Mappin
 from netbox_librenms_plugin.server_mappings import MappingRole
 from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis_members, map_device_to_librenms
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+from netbox_librenms_plugin.tests.source_snapshot_helpers import module_serial_context
 
 HOST_ID = 5301
 OOB_ID = 5302
@@ -215,7 +216,7 @@ def test_string_inventory_indices_assess_host_and_oob_without_changing_source(li
     assert snapshot.value(Resource.MODULES, "inventory_root") == host[:1]
     assert snapshot.value(Resource.MODULES, "inventory_children") == host[:1]
     original = snapshot.to_payload()
-    result = assess(snapshot, subject=subject)
+    result = assess(snapshot, subject=subject, serial_context=module_serial_context(subject))
     assert result["blocked"] == {}
     assert {row["entPhysicalIndex"]: row["entPhysicalContainedIn"] for row in result["inventory"]} == {
         1: 0,
@@ -229,7 +230,7 @@ def test_string_inventory_indices_assess_host_and_oob_without_changing_source(li
     }
     assert next(row for row in result["inventory"] if row["entPhysicalIndex"] == 300)["entPhysicalModelName"] == "SFP"
     assert snapshot.to_payload() == original
-    assert assess(snapshot, subject=subject) == result
+    assert assess(snapshot, subject=subject, serial_context=module_serial_context(subject)) == result
 
 
 @pytest.mark.django_db
@@ -365,7 +366,7 @@ def _assessed_optics(subject):
 
     snapshot = acquire_modules(subject)
     original = snapshot.to_payload()
-    result = assess(snapshot, subject=subject)
+    result = assess(snapshot, subject=subject, serial_context=module_serial_context(subject))
     assert snapshot.to_payload() == original
     assert result["blocked"] == {}
     return result["inventory"]
@@ -444,7 +445,7 @@ def test_recorded_optic_serials_and_their_ports_survive_assessment(recording_ser
     _server, api = recording_server(recording)
     snapshot, subject = acquire_recording(api, recording, [Resource.MODULES])
     original = snapshot.to_payload()
-    result = assess(snapshot, subject=subject)
+    result = assess(snapshot, subject=subject, serial_context=module_serial_context(subject))
     assert result["blocked"] == {}
     inventory = result["inventory"]
     transceivers = snapshot.value(Resource.MODULES, "transceivers")
@@ -568,8 +569,8 @@ def test_nesting_preserves_entity_parents_and_repeats_from_source_facts(live_lib
     )
     snapshot = acquire_modules(subject)
 
-    first = assess(snapshot, subject=subject)
-    second = assess(snapshot, subject=subject)
+    first = assess(snapshot, subject=subject, serial_context=module_serial_context(subject))
+    second = assess(snapshot, subject=subject, serial_context=module_serial_context(subject))
 
     assert first == second
     assert {row["entPhysicalIndex"]: row["entPhysicalContainedIn"] for row in first["inventory"]} == {
@@ -594,4 +595,6 @@ def test_numeric_inventory_names_remain_raw_and_assess_without_a_type_error(live
 
     assert snapshot.record(Resource.MODULES, "inventory").outcome is Outcome.OBTAINED
     assert snapshot.value(Resource.MODULES, "inventory")[0]["entPhysicalName"] == name
-    assert assess(snapshot, subject=subject)["inventory"][0]["entPhysicalName"] == str(name)
+    assert assess(snapshot, subject=subject, serial_context=module_serial_context(subject))["inventory"][0][
+        "entPhysicalName"
+    ] == str(name)
