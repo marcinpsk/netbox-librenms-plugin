@@ -983,6 +983,25 @@ def test_the_import_preload_loads_the_devices_that_the_serial_rules_match():
 
 
 @pytest.mark.django_db
+def test_the_import_preload_leaves_the_serial_matches_out_under_a_broken_serial_rule():
+    """The validator reports a broken serial rule on each row, so the preload must not raise it for the batch."""
+    from netbox_librenms_plugin.import_utils.device_operations import preload_import_objects
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.serial_identity import SerialRules
+
+    rule = NormalizationRule.objects.create(scope="serial", match_pattern=r"^S/N\s+(.+)$", replacement=r"\1")
+    # A QuerySet.update() skips clean(), so the stored rule can still be non-conforming.
+    NormalizationRule.objects.filter(pk=rule.pk).update(replacement=r"X\1")
+    named = make_device("imp-broken-rule-named", serial="IMP-BROKEN-SN")
+
+    loaded = preload_import_objects(
+        [_import_row(7270, named.name, serial="IMP-BROKEN-SN")], SERVER_KEY, serial_rules=SerialRules.load()
+    )
+
+    assert (type(named), named.pk) in loaded
+
+
+@pytest.mark.django_db
 def test_the_import_preload_runs_a_fixed_number_of_queries():
     from netbox_librenms_plugin.import_utils.device_operations import preload_import_objects
 
