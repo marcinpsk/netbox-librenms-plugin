@@ -308,20 +308,47 @@ def test_corrupt_oob_mapping_keeps_the_host_table_and_warns(client, live_librenm
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("failure", ["missing-owner", "blocked-host"])
-def test_module_grant_reports_an_unusable_source_as_a_snapshot_refusal(live_librenms, failure):
+@pytest.mark.parametrize("broken_rule", [False, True], ids=["valid-rules", "broken-rule"])
+@pytest.mark.parametrize("failure", ["missing-owner", "missing-member-owner", "blocked-host"])
+def test_module_grant_reports_an_unusable_source_as_a_snapshot_refusal(
+    live_librenms, monkeypatch, failure, broken_rule
+):
+    """An unusable source refuses as the snapshot, also when the page's policy would refuse for a broken rule."""
     from dcim.models import Device
     from django.core.cache import cache
     from netbox_librenms_plugin.acquisition.coordinator import acquire
+    from netbox_librenms_plugin.models import InventoryIgnoreRule
     from netbox_librenms_plugin.module_grants import ACTION_INSTALL_SELECTED, GrantRefused, GrantRefusal
+    from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members, map_device_to_librenms
     from netbox_librenms_plugin.views.sync.modules import _authorize_module_grant
 
-    subject = device("module-grant-source-refusal")
+    if failure == "missing-member-owner":
+        # The chassis page holds no mapping; its mapped member owns the source.
+        _chassis, (subject, owner) = make_virtual_chassis_members("module-grant-member-owner", count=2)
+        map_device_to_librenms(owner, HOST_ID, server_key="default")
+    else:
+        subject = owner = device("module-grant-source-refusal")
     serve(live_librenms.server, inventory=INVENTORY, transceivers=[])
     snapshot = acquire(subject, server_key="default", resources=[Resource.MODULES])
+    assert snapshot.resources[Resource.MODULES].owner.pk == owner.pk
     assert source_cache.store(subject, Resource.MODULES, snapshot)
+    if broken_rule:
+        rule = InventoryIgnoreRule.objects.create(
+            name="Broken grant rule", match_type="regex", pattern="^skip$", require_serial_match_parent=False
+        )
+        InventoryIgnoreRule.objects.filter(pk=rule.pk).update(pattern="[")
     if failure == "missing-owner":
         Device.objects.filter(pk=subject.pk).delete()
+    elif failure == "missing-member-owner":
+        read = source_cache.read
+
+        def read_then_delete_owner(subject_, resource, server_key):
+            found = read(subject_, resource, server_key)
+            # The owner goes in the window between the cache read and the policy read.
+            Device.objects.filter(pk=owner.pk).delete()
+            return found
+
+        monkeypatch.setattr(source_cache, "read", read_then_delete_owner)
     else:
         live_librenms.server.register(f"/api/v0/inventory/{HOST_ID}/all", {"status": "error"}, status=500)
         snapshot = acquire(subject, server_key="default", resources=[Resource.MODULES])
