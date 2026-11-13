@@ -10,7 +10,7 @@ from copy import deepcopy
 import pytest
 
 from netbox_librenms_plugin.serial_identity import SerialRules
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping, stored_mapping_for_test
+from netbox_librenms_plugin.tests.mapping_fixtures import mapping_summary, seed_mapping, stored_mapping_for_test
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 
 
@@ -847,7 +847,7 @@ class TestSerialNumberMatching:
         """librenms_id match with matching serial shows confirmation."""
         from netbox_librenms_plugin.tests.conftest import make_device
 
-        make_device("switch-01", serial="ABC123", librenms_cf={"default": {"id": 1}})
+        seed_mapping(make_device("switch-01", serial="ABC123"), "default", own=1)
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
 
@@ -863,7 +863,7 @@ class TestSerialNumberMatching:
         """librenms_id match with different serial warns about drift."""
         from netbox_librenms_plugin.tests.conftest import make_device
 
-        make_device("switch-01", serial="OLD_SERIAL", librenms_cf={"default": {"id": 1}})
+        seed_mapping(make_device("switch-01", serial="OLD_SERIAL"), "default", own=1)
 
         from netbox_librenms_plugin.import_utils import validate_device_for_import
 
@@ -880,7 +880,7 @@ class TestSerialNumberMatching:
 
         from netbox_librenms_plugin.tests.conftest import make_device
 
-        make_device("switch-01", serial="", librenms_cf={"default": {"id": 1}})
+        seed_mapping(make_device("switch-01", serial=""), "default", own=1)
         site, _ = Site.objects.get_or_create(name="DC1", slug="dc1")
         manufacturer, _ = Manufacturer.objects.get_or_create(name="Validation Mfr", slug="validation-mfr")
         device_type, _ = DeviceType.objects.get_or_create(
@@ -992,7 +992,7 @@ class TestNameMatchesWithNamingPreferences:
         from netbox_librenms_plugin.import_utils import validate_device_for_import
         from netbox_librenms_plugin.tests.conftest import make_device
 
-        existing = make_device(expected_name, serial="NAMING-SERIAL", librenms_cf={"default": {"id": 42}})
+        existing = seed_mapping(make_device(expected_name, serial="NAMING-SERIAL"), "default", own=42)
         device_data.update({"device_id": 42, "serial": existing.serial})
 
         result = validate_device_for_import(device_data, include_vc_detection=False, **options)
@@ -1006,7 +1006,7 @@ class TestNameMatchesWithNamingPreferences:
         from netbox_librenms_plugin.import_utils import validate_device_for_import
         from netbox_librenms_plugin.tests.conftest import make_device
 
-        existing = make_device("old-name", serial="RENAME-SERIAL", librenms_cf={"default": {"id": 43}})
+        existing = seed_mapping(make_device("old-name", serial="RENAME-SERIAL"), "default", own=43)
 
         result = validate_device_for_import(
             {
@@ -1036,7 +1036,7 @@ class TestNameMatchesWithNamingPreferences:
         expected_name = _generate_vc_member_name(resolved_master_name, existing.vc_position, serial="VC-NAMING")
         existing.name = expected_name if existing_name_matches else "wrong-name"
         existing.serial = "VC-NAMING"
-        seed_stored_mapping(existing, {"default": {"id": 44}})
+        seed_mapping(existing, "default", own=44, save=False)
         existing.save()
 
         result = validate_device_for_import(
@@ -1066,7 +1066,7 @@ class TestNameMatchesWithNamingPreferences:
         existing.vc_position = 0
         existing.name = _generate_vc_member_name("stack-zero", 0, serial="VC-NAMING-ZERO")
         existing.serial = "VC-NAMING-ZERO"
-        seed_stored_mapping(existing, {"default": {"id": 45}})
+        seed_mapping(existing, "default", own=45, save=False)
         existing.save()
 
         result = validate_device_for_import(
@@ -1109,18 +1109,21 @@ class TestLegacyLibreNMSIdMigration:
     """Exercise legacy identity detection and migration with real devices."""
 
     @pytest.mark.parametrize(
-        ("stored_value", "serial", "expected_migration", "expected_confirmed"),
+        ("legacy", "serial", "expected_migration", "expected_confirmed"),
         [
-            (42, "LEGACY-SERIAL", True, True),
-            (42, "", True, False),
-            ({"default": {"id": 42}}, "LEGACY-SERIAL", False, True),
+            (True, "LEGACY-SERIAL", True, True),
+            (True, "", True, False),
+            (False, "LEGACY-SERIAL", False, True),
         ],
     )
-    def test_validation_reports_identity_format(self, stored_value, serial, expected_migration, expected_confirmed):
+    def test_validation_reports_identity_format(self, legacy, serial, expected_migration, expected_confirmed):
         from netbox_librenms_plugin.import_utils import validate_device_for_import
         from netbox_librenms_plugin.tests.conftest import make_device
 
-        existing = make_device("legacy-device", serial=serial, librenms_cf=stored_value)
+        if legacy:
+            existing = make_device("legacy-device", serial=serial, librenms_cf=42)
+        else:
+            existing = seed_mapping(make_device("legacy-device", serial=serial), own=42)
 
         result = validate_device_for_import(
             {"device_id": 42, "hostname": existing.name, "serial": serial},
@@ -1824,29 +1827,36 @@ class TestSyncModuleBayCounter:
 class TestBuildIdServerInfo:
     """Test DeviceValidationDetailsView._build_id_server_info method on real Device rows."""
 
-    def _make_device(self, librenms_id_value):
+    def _make_device(self, server=None, own=None):
         from netbox_librenms_plugin.tests.conftest import make_device
 
-        return make_device("build-id-server-info", librenms_cf=librenms_id_value)
+        device = make_device("build-id-server-info")
+        return device if server is None else seed_mapping(device, server, own=own)
+
+    def _make_raw_device(self, stored):
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        # Storage shape: a legacy bare value or an empty container.
+        return make_device("build-id-server-info", librenms_cf=stored)
 
     def test_returns_none_for_legacy_int(self):
         from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
 
-        device = self._make_device(42)
+        device = self._make_raw_device(42)
         result = DeviceValidationDetailsView._build_id_server_info(device)
         assert result is None
 
     def test_returns_none_for_missing_cf(self):
         from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
 
-        device = self._make_device(None)
+        device = self._make_device()
         result = DeviceValidationDetailsView._build_id_server_info(device)
         assert result is None
 
     def test_single_server_resolves_display_name(self, settings):
         from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
 
-        device = self._make_device({"production": 42})
+        device = self._make_device("production", 42)
         plugins_cfg = {
             "netbox_librenms_plugin": {
                 "servers": {
@@ -1866,7 +1876,7 @@ class TestBuildIdServerInfo:
     def test_unconfigured_server_uses_key_as_display_name(self, settings):
         from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
 
-        device = self._make_device({"deleted-server": 77})
+        device = self._make_device("deleted-server", 77)
         plugins_cfg = {"netbox_librenms_plugin": {"servers": {}}}
         settings.PLUGINS_CONFIG = plugins_cfg
         result = DeviceValidationDetailsView._build_id_server_info(device)
@@ -1877,7 +1887,7 @@ class TestBuildIdServerInfo:
     def test_empty_dict_returns_none(self):
         from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
 
-        device = self._make_device({})
+        device = self._make_raw_device({})
         result = DeviceValidationDetailsView._build_id_server_info(device)
         assert result is None
 
@@ -2545,7 +2555,7 @@ def test_device_and_vm_imports_serialize_one_librenms_id_claim(settings):
     assert len(set(claim_keys)) == 1
     assert sorted(outcomes) == [False, True]
     assert len(owners) == 1
-    assert stored_mapping_for_test(owners[0])["primary"] == librenms_id
+    assert mapping_summary(owners[0])["primary"] == {"own": librenms_id}
     # The claim does not wait: the loser is busy while the winner holds it, else it finds the owner.
     assert len(refusals) == 1
     assert refusals[0] == IDENTITY_BUSY_MESSAGE or "already assigned" in refusals[0]

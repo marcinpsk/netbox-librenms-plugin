@@ -19,7 +19,7 @@ import pytest
 from netbox_librenms_plugin.tests.source_snapshot_helpers import link_row, port_row, seed_cables_snapshot
 
 from netbox_librenms_plugin.tests.conftest import configured_server_key
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, stored_mapping_for_test
+from netbox_librenms_plugin.tests.mapping_fixtures import mapping_summary, seed_mapping
 
 
 class TestSlashlessRouteAliases:
@@ -443,7 +443,7 @@ class TestStatusListsShowABusyClaimAsUnknown:
             "Another operation is linking some of these objects. Refresh to see their status."
         ]
         busy.refresh_from_db()
-        assert stored_mapping_for_test(busy) is None
+        assert mapping_summary(busy) == {}
 
 
 class TestRequiredObjectPermissionsWiring:
@@ -1964,7 +1964,7 @@ class TestInstallRefusesADuplicateSerial:
         )
         from netbox_librenms_plugin.views.sync.modules import InstallSelectedView
 
-        device = make_device("bulkdup", librenms_cf={"default": 77})
+        device = seed_mapping(make_device("bulkdup"), "default", own=77)
         module_type = make_module_type("MT-bulkdup")
         installed = Module.objects.create(
             device=device,
@@ -2030,7 +2030,7 @@ class TestIdentityIsNotGatedOnBayMapping:
         from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser, make_view
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
-        device = make_device(prefix, librenms_cf={"default": 91})
+        device = seed_mapping(make_device(prefix), "default", own=91)
         module_type = make_module_type(f"MT-{prefix}")
         installed = Module.objects.create(
             device=device,

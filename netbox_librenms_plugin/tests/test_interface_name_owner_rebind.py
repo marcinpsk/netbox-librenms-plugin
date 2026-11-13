@@ -27,7 +27,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
 )
 from netbox_librenms_plugin.tests.interface_sync_post_helpers import seed_ports
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_unmapped
 from netbox_librenms_plugin.tests.source_snapshot_helpers import Failed
 from netbox_librenms_plugin.utils import reported_name_owners, synced_interface_names
 
@@ -78,7 +78,7 @@ def _binding(interface):
 
 
 def _device(name):
-    return make_device(name, librenms_cf={SERVER_KEY: {"id": 71}})
+    return seed_mapping(make_device(name), SERVER_KEY, own=71)
 
 
 def _rebind(client, owner, port_id, *, expected=STALE_PORT, object_type="device", extra=None):
@@ -358,7 +358,10 @@ class TestRebind:
         client.force_login(make_superuser("name-owner-rebind-changed-user"))
         row = _row_html(device, client, HOST_PORT)
         assert f'name="rebind_expected_port_{HOST_PORT}" value="{STALE_PORT}"' in row
-        seed_stored_mapping(interface, {} if new_binding is None else {SERVER_KEY: new_binding}, save=True)
+        if new_binding is None:
+            seed_unmapped(interface)
+        else:
+            seed_mapping(interface, SERVER_KEY, own=new_binding)
 
         response = _rebind(client, device, HOST_PORT, expected=STALE_PORT)
 

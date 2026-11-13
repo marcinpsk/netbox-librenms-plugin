@@ -636,8 +636,10 @@ class TestEquivalentFormsAcrossDecisions:
     """S1: a stored "S/N X" and an incoming "X" name one device in every decision that looks a serial up."""
 
     def test_the_drift_check_of_a_linked_device_names_the_equivalent_holder(self):
+        from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+
         _rules_only((SEEDED, r"\1", None))
-        make_device("drift-linked", serial="OLD-DRIFT-SN", librenms_cf={"default": {"id": 7801}})
+        seed_mapping(make_device("drift-linked", serial="OLD-DRIFT-SN"), "default", own=7801)
         holder = make_device("drift-holder", serial="S/N DRIFT-SN1")
 
         result = _validate({"device_id": 7801, "hostname": "drift-linked", "serial": "DRIFT-SN1"})
@@ -646,9 +648,11 @@ class TestEquivalentFormsAcrossDecisions:
         assert result["serial_conflict"]["pk"] == holder.pk
 
     def test_the_merge_peer_is_found_in_its_other_form(self):
+        from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+
         _rules_only((SEEDED, r"\1", None))
-        host = make_device("merge-forms-host", serial="MERGE-SN1", librenms_cf={"default": {"id": 42}})
-        oob = make_device("merge-forms-oob", serial="S/N MERGE-SN1", librenms_cf={"default": {"id": 99}})
+        host = seed_mapping(make_device("merge-forms-host", serial="MERGE-SN1"), "default", own=42)
+        oob = seed_mapping(make_device("merge-forms-oob", serial="S/N MERGE-SN1"), "default", own=99)
 
         result = _validate({"device_id": 7804, "hostname": host.name, "sysName": host.name, "serial": "MERGE-SN1"})
 

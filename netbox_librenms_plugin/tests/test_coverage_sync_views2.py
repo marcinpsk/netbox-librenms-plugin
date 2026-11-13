@@ -19,7 +19,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_vm,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, seed_ip_snapshot, seed_source_snapshot
 from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 from netbox_librenms_plugin.tests.vlan_intent_helpers import reassess, sync, tab_tokens
@@ -73,7 +73,7 @@ def _seed_ip(obj, address, port_id, interface):
 @pytest.mark.django_db
 class TestCableWriteFailures:
     def test_cache_miss_reports_an_error_without_creating_a_cable(self, client, live_librenms):
-        device = make_device("cable-cache-miss", librenms_cf={SERVER_KEY: {"id": 101}})
+        device = seed_mapping(make_device("cable-cache-miss"), SERVER_KEY, own=101)
         _login(client, "cable-cache-miss-user")
 
         response = client.post(
@@ -88,7 +88,7 @@ class TestCableWriteFailures:
         ]
 
     def test_empty_selection_reports_an_error_without_mutation(self, client, live_librenms):
-        device = make_device("cable-no-selection", librenms_cf={SERVER_KEY: {"id": 102}})
+        device = seed_mapping(make_device("cable-no-selection"), SERVER_KEY, own=102)
         interface = make_interface(device, "Ethernet1")
         seed_cables_snapshot(
             device,
@@ -106,8 +106,8 @@ class TestCableWriteFailures:
         assert _response_messages(response, "error") == ["No interfaces selected for synchronization."]
 
     def test_user_without_cable_permissions_cannot_write(self, client, live_librenms):
-        device = make_device("cable-denied", librenms_cf={SERVER_KEY: {"id": 103}})
-        remote_device = make_device("cable-denied-remote", librenms_cf={SERVER_KEY: {"id": 104}})
+        device = seed_mapping(make_device("cable-denied"), SERVER_KEY, own=103)
+        remote_device = seed_mapping(make_device("cable-denied-remote"), SERVER_KEY, own=104)
         local = make_interface(device, "Ethernet1")
         remote = make_interface(remote_device, "Ethernet2")
         _set_id(local, 7301)
@@ -144,8 +144,8 @@ class TestCableWriteFailures:
     def test_matching_existing_cable_is_not_duplicated(self, client, live_librenms):
         from extras.models import Tag
 
-        device = make_device("cable-existing", librenms_cf={SERVER_KEY: {"id": 105}})
-        remote_device = make_device("cable-existing-remote", librenms_cf={SERVER_KEY: {"id": 106}})
+        device = seed_mapping(make_device("cable-existing"), SERVER_KEY, own=105)
+        remote_device = seed_mapping(make_device("cable-existing-remote"), SERVER_KEY, own=106)
         local = make_interface(device, "Ethernet1")
         remote = make_interface(remote_device, "Ethernet2")
         _set_id(local, 7311)
@@ -220,7 +220,7 @@ class TestDeviceHTTPWriteFailures:
         assert any(text.startswith("community:") for text in errors)
 
     def test_location_update_with_unknown_server_stops_before_http(self, client, live_librenms):
-        device = make_device("device-location-stale-server", librenms_cf={SERVER_KEY: {"id": 111}})
+        device = seed_mapping(make_device("device-location-stale-server"), SERVER_KEY, own=111)
         _login(client, "device-location-stale-server-user")
 
         response = client.post(
@@ -236,7 +236,7 @@ class TestDeviceHTTPWriteFailures:
 @pytest.mark.django_db
 class TestIPAddressWriteFailures:
     def test_unknown_server_key_fails_closed(self, client, live_librenms):
-        device = make_device("ip-unknown-server", librenms_cf={SERVER_KEY: {"id": 121}})
+        device = seed_mapping(make_device("ip-unknown-server"), SERVER_KEY, own=121)
         _login(client, "ip-unknown-server-user")
 
         response = client.post(
@@ -249,7 +249,7 @@ class TestIPAddressWriteFailures:
         assert _response_messages(response, "error") == ["Selected LibreNMS server is no longer configured."]
 
     def test_empty_selection_does_not_create_an_address(self, client, live_librenms):
-        device = make_device("ip-no-selection", librenms_cf={SERVER_KEY: {"id": 122}})
+        device = seed_mapping(make_device("ip-no-selection"), SERVER_KEY, own=122)
         interface = make_interface(device, "Ethernet1")
         _seed_ip(device, "198.18.122.10", 8321, interface)
         _login(client, "ip-no-selection-user")
@@ -261,7 +261,7 @@ class TestIPAddressWriteFailures:
         assert _response_messages(response, "error") == ["No IP addresses selected for synchronization."]
 
     def test_existing_address_on_another_interface_requires_confirmation(self, client, live_librenms):
-        device = make_device("ip-conflict", librenms_cf={SERVER_KEY: {"id": 123}})
+        device = seed_mapping(make_device("ip-conflict"), SERVER_KEY, own=123)
         intended = make_interface(device, "Ethernet1")
         current = make_interface(device, "Ethernet2")
         _set_id(intended, 8331)
@@ -282,7 +282,7 @@ class TestIPAddressWriteFailures:
         assert address.assigned_object == current
 
     def test_selected_vrf_is_persisted_with_the_address(self, client, live_librenms):
-        device = make_device("ip-vrf", librenms_cf={SERVER_KEY: {"id": 124}})
+        device = seed_mapping(make_device("ip-vrf"), SERVER_KEY, own=124)
         interface = make_interface(device, "Ethernet1")
         _set_id(interface, 8341)
         vrf = VRF.objects.create(name="Application VRF", rd="64512:124")
@@ -301,7 +301,7 @@ class TestIPAddressWriteFailures:
 
     def test_vm_address_is_assigned_to_a_real_vm_interface(self, client, live_librenms):
         vm = make_vm("ip-vm")
-        seed_stored_mapping(vm, {SERVER_KEY: {"id": 125}}, save=True)
+        seed_mapping(vm, SERVER_KEY, own=125)
         interface = VMInterface.objects.create(virtual_machine=vm, name="eth0")
         _set_id(interface, 8351)
         row_id = "198.18.125.10/24"
@@ -321,7 +321,7 @@ class TestIPAddressWriteFailures:
 class TestVLANWriteFailures:
     @pytest.mark.parametrize("posted_keys", [["bad__key"], ["removed", SERVER_KEY]], ids=["malformed", "ambiguous"])
     def test_an_unusable_server_key_fails_closed(self, client, live_librenms, posted_keys):
-        device = make_device("vlan-unusable-server", librenms_cf={SERVER_KEY: {"id": 132}})
+        device = seed_mapping(make_device("vlan-unusable-server"), SERVER_KEY, own=132)
         seed_source_snapshot(
             device, Resource.VLANS, SERVER_KEY, vlans=[{"vlan_vlan": 3132, "vlan_name": "Application"}]
         )
@@ -338,7 +338,7 @@ class TestVLANWriteFailures:
         assert live_librenms.server.requests == []
 
     def test_grouped_vlan_is_created_in_the_selected_scope(self, client, live_librenms):
-        device = make_device("vlan-group", librenms_cf={SERVER_KEY: {"id": 131}})
+        device = seed_mapping(make_device("vlan-group"), SERVER_KEY, own=131)
         group = VLANGroup.objects.create(name="Application Group", slug="application-group")
         seed_source_snapshot(
             device, Resource.VLANS, SERVER_KEY, vlans=[{"vlan_vlan": 3131, "vlan_name": "Application"}]
@@ -356,7 +356,7 @@ class TestVLANWriteFailures:
 
         from netbox_librenms_plugin.tests.view_test_helpers import grant
 
-        device = make_device("vlan-add-scope", librenms_cf={SERVER_KEY: {"id": 135}})
+        device = seed_mapping(make_device("vlan-add-scope"), SERVER_KEY, own=135)
         seed_source_snapshot(
             device, Resource.VLANS, SERVER_KEY, vlans=[{"vlan_vlan": 3136, "vlan_name": "Outside add scope"}]
         )
@@ -378,7 +378,7 @@ class TestVLANWriteFailures:
         ]
 
     def test_missing_group_fails_closed_instead_of_creating_global_vlan(self, client, live_librenms):
-        device = make_device("vlan-group-missing", librenms_cf={SERVER_KEY: {"id": 132}})
+        device = seed_mapping(make_device("vlan-group-missing"), SERVER_KEY, own=132)
         group = VLANGroup.objects.create(name="Removed Group", slug="removed-group")
         seed_source_snapshot(
             device, Resource.VLANS, SERVER_KEY, vlans=[{"vlan_vlan": 3132, "vlan_name": "Application"}]
@@ -394,7 +394,7 @@ class TestVLANWriteFailures:
         assert any("target.group" in text for text in _response_messages(response, "error"))
 
     def test_invalid_rows_do_not_abort_a_valid_vlan_in_the_batch(self, client, live_librenms):
-        device = make_device("vlan-invalid-batch", librenms_cf={SERVER_KEY: {"id": 133}})
+        device = seed_mapping(make_device("vlan-invalid-batch"), SERVER_KEY, own=133)
         too_long = "x" * (VLAN._meta.get_field("name").max_length + 1)
         seed_source_snapshot(
             device,
@@ -420,7 +420,7 @@ class TestVLANWriteFailures:
         assert "VLAN 3133: the LibreNMS name is invalid; skipped." in errors
 
     def test_unchanged_vlan_is_not_rewritten(self, client, live_librenms):
-        device = make_device("vlan-unchanged", librenms_cf={SERVER_KEY: {"id": 134}})
+        device = seed_mapping(make_device("vlan-unchanged"), SERVER_KEY, own=134)
         vlan = VLAN.objects.create(vid=3135, name="Stable VLAN", status="active")
         before = vlan.last_updated
         seed_source_snapshot(

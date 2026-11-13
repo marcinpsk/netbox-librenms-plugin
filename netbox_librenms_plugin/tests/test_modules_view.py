@@ -5870,9 +5870,9 @@ def test_included_numeric_inventory_class_renders_on_the_sync_page(client, setti
     ("ifname_binding", "ifdescr_binding", "expected"),
     [
         (None, None, "Ethernet1/1"),
-        ({"default": 8999}, None, "Uplink1"),
-        ({"default": 8999}, {"default": 8998}, None),
-        ({"secondary": 8999}, None, "Ethernet1/1"),
+        (("default", 8999), None, "Uplink1"),
+        (("default", 8999), ("default", 8998), None),
+        (("secondary", 8999), None, "Ethernet1/1"),
     ],
 )
 def test_a_name_match_bound_to_another_port_is_not_shown(client, settings, ifname_binding, ifdescr_binding, expected):
@@ -5881,7 +5881,7 @@ def test_a_name_match_bound_to_another_port_is_not_shown(client, settings, ifnam
     from django.urls import reverse
 
     from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_superuser
-    from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
     configure_servers(
         settings, {"default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}}
@@ -5891,7 +5891,8 @@ def test_a_name_match_bound_to_another_port_is_not_shown(client, settings, ifnam
     for name, binding in (("Ethernet1/1", ifname_binding), ("Uplink1", ifdescr_binding)):
         interfaces[name] = make_interface(device, name)
         if binding is not None:
-            seed_stored_mapping(interfaces[name], binding, save=True)
+            server, port_id = binding
+            seed_mapping(interfaces[name], server, own=port_id)
     item = {
         "entPhysicalIndex": 82,
         "entPhysicalClass": "module",

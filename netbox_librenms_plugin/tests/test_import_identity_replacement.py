@@ -14,8 +14,9 @@ from netbox_librenms_plugin.identity_replacement import (
 from netbox_librenms_plugin.tests.conftest import make_device, make_superuser, make_vm
 from netbox_librenms_plugin.tests.import_server_helpers import librenms_device
 from netbox_librenms_plugin.tests.mapping_fixtures import (
-    seed_stored_mapping,
-    seed_stored_mapping_row,
+    mapping_summary,
+    seed_mapping,
+    seed_mapping_row,
     stored_mapping_for_test,
 )
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
@@ -122,7 +123,7 @@ def _offered_token(response):
 @pytest.mark.parametrize("action", ["link", "update", "update_serial"])
 def test_a_blocked_action_offers_a_bound_replacement_confirmation(client, secondary_server, action):
     """Every mapping action blocked by a same-server identity offers a bound confirmation."""
-    device = make_device(f"replace-offer-{action}", librenms_cf={"secondary": 51301})
+    device = seed_mapping(make_device(f"replace-offer-{action}"), "secondary", own=51301)
     user = make_superuser("identity-replacement-offer")
     client.force_login(user)
 
@@ -153,13 +154,13 @@ def test_a_blocked_action_offers_a_bound_replacement_confirmation(client, second
         proposed_host_id=51401,
     )
     device.refresh_from_db()
-    assert stored_mapping_for_test(device) == {"secondary": 51301}
+    assert mapping_summary(device) == {"secondary": {"own": 51301}}
 
 
 @pytest.mark.django_db
 def test_the_confirmation_offers_a_cancel_control_that_writes_nothing(client, secondary_server):
     """Cancelling dismisses the dialog without a request, and re-asking never mutates."""
-    device = make_device("replace-cancelled", librenms_cf={"secondary": 51501})
+    device = seed_mapping(make_device("replace-cancelled"), "secondary", own=51501)
     client.force_login(make_superuser("identity-replacement-cancel"))
 
     for _ in range(2):
@@ -173,7 +174,7 @@ def test_the_confirmation_offers_a_cancel_control_that_writes_nothing(client, se
         assert cancel, "the confirmation offers no Cancel control"
         assert "hx-" not in cancel.group(0)
         device.refresh_from_db()
-        assert stored_mapping_for_test(device) == {"secondary": 51501}
+        assert mapping_summary(device) == {"secondary": {"own": 51501}}
 
 
 @pytest.mark.django_db
@@ -213,50 +214,43 @@ def test_a_confirmed_replacement_changes_only_the_active_server_identity(client,
 def test_a_vm_replacement_follows_the_same_confirmation_contract(client, secondary_server, action):
     """A Virtual Machine is blocked, offered, and replaced exactly like a Device."""
     vm = make_vm(f"replace-confirmed-vm-{action}")
-    seed_stored_mapping(
-        vm,
-        {
-            "primary": 51901,
-            "secondary": {"id": 51902, "oob": {"id": 51903, "type": "bmc"}},
-            "_preferred_server": "primary",
-        },
-        save=True,
-    )
+    seed_mapping(vm, "primary", own=51901, preferred=True, save=False)
+    seed_mapping(vm, "secondary", own=51902, oob=51903, oob_type="bmc")
     client.force_login(make_superuser("identity-replacement-vm"))
     server = _serve_secondary(secondary_server, 52001, vm.name)
 
     blocked = _post_action(client, 52001, vm, action, server=server, object_type="virtualmachine")
     assert load_identity_replacement_intent(_offered_token(blocked)).object_type == "virtualmachine"
     vm.refresh_from_db()
-    assert stored_mapping_for_test(vm)["secondary"] == {"id": 51902, "oob": {"id": 51903, "type": "bmc"}}
+    assert mapping_summary(vm)["secondary"] == {"own": 51902, "oob": 51903, "oob_type": "bmc"}
 
     confirmed = _post_confirmation(client, 52001, _offered_token(blocked), server=server)
 
     assert confirmed.status_code == 200
     vm.refresh_from_db()
-    assert stored_mapping_for_test(vm) == {
-        "primary": 51901,
-        "secondary": {"id": 52001, "oob": {"id": 51903, "type": "bmc"}},
-        "_preferred_server": "primary",
+    assert mapping_summary(vm) == {
+        "primary": {"own": 51901},
+        "secondary": {"own": 52001, "oob": 51903, "oob_type": "bmc"},
+        "preferred": "primary",
     }
 
 
 @pytest.mark.django_db
 def test_a_stale_confirmation_fails_closed_against_a_concurrent_change(client, secondary_server):
     """A mapping changed after the confirmation was issued blocks the replacement."""
-    device = make_device("replace-stale-device", librenms_cf={"secondary": 52101})
+    device = seed_mapping(make_device("replace-stale-device"), "secondary", own=52101)
     client.force_login(make_superuser("identity-replacement-stale"))
     server = _serve_secondary(secondary_server, 52201, device.name)
 
     token = _offered_token(_post_action(client, 52201, device, "link", server=server))
-    seed_stored_mapping_row(device, {"secondary": 52102})
+    seed_mapping_row(device, seed_mapping(type(device)(), "secondary", own=52102, save=False))
 
     response = _post_confirmation(client, 52201, token, server=server)
 
     assert response.status_code == 200
     assert b"no longer matches" in response.content
     device.refresh_from_db()
-    assert stored_mapping_for_test(device) == {"secondary": 52102}
+    assert mapping_summary(device) == {"secondary": {"own": 52102}}
 
 
 @pytest.mark.django_db
@@ -264,7 +258,7 @@ def test_a_stale_confirmation_is_detected_on_the_locked_row(client, secondary_se
     """The confirmed host ID is compared after the target row is locked, not before."""
     from django.db import connection
 
-    device = make_device("replace-locked-stale-device", librenms_cf={"secondary": 52151})
+    device = seed_mapping(make_device("replace-locked-stale-device"), "secondary", own=52151)
     client.force_login(make_superuser("identity-replacement-locked-stale"))
     server = _serve_secondary(secondary_server, 52251, device.name)
     token = _offered_token(_post_action(client, 52251, device, "link", server=server))
@@ -274,7 +268,7 @@ def test_a_stale_confirmation_is_detected_on_the_locked_row(client, secondary_se
         nonlocal changed_under_lock
         if not changed_under_lock and 'FROM "dcim_device"' in sql and "FOR UPDATE" in sql:
             changed_under_lock = True
-            seed_stored_mapping_row(device, {"secondary": 52152})
+            seed_mapping_row(device, seed_mapping(type(device)(), "secondary", own=52152, save=False))
         return execute(sql, params, many, context)
 
     with connection.execute_wrapper(change_mapping_at_the_target_lock):
@@ -284,27 +278,27 @@ def test_a_stale_confirmation_is_detected_on_the_locked_row(client, secondary_se
     assert response.status_code == 200
     assert b"no longer matches" in response.content
     device.refresh_from_db()
-    assert stored_mapping_for_test(device) == {"secondary": 52152}
+    assert mapping_summary(device) == {"secondary": {"own": 52152}}
 
 
 @pytest.mark.django_db
 def test_a_confirmation_cannot_be_replayed_after_it_has_been_applied(client, secondary_server):
     """Re-posting an applied confirmation is refused instead of rewriting the mapping."""
-    device = make_device("replace-replay-device", librenms_cf={"secondary": 52301})
+    device = seed_mapping(make_device("replace-replay-device"), "secondary", own=52301)
     client.force_login(make_superuser("identity-replacement-replay"))
     server = _serve_secondary(secondary_server, 52401, device.name)
 
     token = _offered_token(_post_action(client, 52401, device, "link", server=server))
     assert _post_confirmation(client, 52401, token, server=server).status_code == 200
     device.refresh_from_db()
-    assert stored_mapping_for_test(device) == {"secondary": 52401}
+    assert mapping_summary(device) == {"secondary": {"own": 52401}}
 
     replay = _post_confirmation(client, 52401, token, server=server)
 
     assert replay.status_code == 200
     assert b"no longer matches" in replay.content
     device.refresh_from_db()
-    assert stored_mapping_for_test(device) == {"secondary": 52401}
+    assert mapping_summary(device) == {"secondary": {"own": 52401}}
 
 
 @pytest.mark.django_db
@@ -312,7 +306,7 @@ def test_a_confirmation_cannot_be_used_by_another_user(client, secondary_server)
     """A confirmation issued for one user is refused for everyone else."""
     from dcim.models import Device
 
-    device = make_device("replace-other-user-device", librenms_cf={"secondary": 52901})
+    device = seed_mapping(make_device("replace-other-user-device"), "secondary", own=52901)
     client.force_login(make_superuser("identity-replacement-issuer"))
     server = _serve_secondary(secondary_server, 53001, device.name)
     token = _offered_token(_post_action(client, 53001, device, "link", server=server))
@@ -323,13 +317,13 @@ def test_a_confirmation_cannot_be_used_by_another_user(client, secondary_server)
     assert response.status_code == 200
     assert b"issued for a different user" in response.content
     device.refresh_from_db()
-    assert stored_mapping_for_test(device) == {"secondary": 52901}
+    assert mapping_summary(device) == {"secondary": {"own": 52901}}
 
 
 @pytest.mark.django_db
 def test_a_tampered_confirmation_is_refused(client, secondary_server):
     """Editing the signed payload invalidates the confirmation."""
-    device = make_device("replace-tampered-device", librenms_cf={"secondary": 53301})
+    device = seed_mapping(make_device("replace-tampered-device"), "secondary", own=53301)
     client.force_login(make_superuser("identity-replacement-tamper"))
     server = _serve_secondary(secondary_server, 53401, device.name)
     token = _offered_token(_post_action(client, 53401, device, "link", server=server))
@@ -340,7 +334,7 @@ def test_a_tampered_confirmation_is_refused(client, secondary_server):
     assert response.status_code == 200
     assert b"not valid" in response.content
     device.refresh_from_db()
-    assert stored_mapping_for_test(device) == {"secondary": 53301}
+    assert mapping_summary(device) == {"secondary": {"own": 53301}}
 
 
 @pytest.mark.django_db
@@ -348,7 +342,7 @@ def test_an_expired_confirmation_is_refused(client, secondary_server, monkeypatc
     """A confirmation older than its lifetime is refused."""
     from netbox_librenms_plugin import identity_replacement
 
-    device = make_device("replace-expired-device", librenms_cf={"secondary": 53501})
+    device = seed_mapping(make_device("replace-expired-device"), "secondary", own=53501)
     client.force_login(make_superuser("identity-replacement-expired"))
     server = _serve_secondary(secondary_server, 53601, device.name)
     token = _offered_token(_post_action(client, 53601, device, "link", server=server))
@@ -359,7 +353,7 @@ def test_an_expired_confirmation_is_refused(client, secondary_server, monkeypatc
     assert response.status_code == 200
     assert b"has expired" in response.content
     device.refresh_from_db()
-    assert stored_mapping_for_test(device) == {"secondary": 53501}
+    assert mapping_summary(device) == {"secondary": {"own": 53501}}
 
 
 @pytest.mark.django_db
@@ -369,7 +363,7 @@ def test_a_confirmation_is_refused_when_the_proposed_host_id_changed(client, sec
 
     from netbox_librenms_plugin.import_utils import get_import_device_cache_key
 
-    device = make_device("replace-drifted-device", librenms_cf={"secondary": 53701})
+    device = seed_mapping(make_device("replace-drifted-device"), "secondary", own=53701)
     client.force_login(make_superuser("identity-replacement-drift"))
 
     token = _offered_token(
@@ -387,7 +381,7 @@ def test_a_confirmation_is_refused_when_the_proposed_host_id_changed(client, sec
     assert response.status_code == 200
     assert b"proposed LibreNMS host ID changed" in response.content
     device.refresh_from_db()
-    assert stored_mapping_for_test(device) == {"secondary": 53701}
+    assert mapping_summary(device) == {"secondary": {"own": 53701}}
 
 
 @pytest.mark.django_db
@@ -395,7 +389,7 @@ def test_a_confirmed_replacement_still_rechecks_the_cross_model_id_claim(client,
     """Another object claiming the proposed ID after validation blocks the replacement."""
     from django.db import connection
 
-    device = make_device("replace-collision-target", librenms_cf={"secondary": 52501})
+    device = seed_mapping(make_device("replace-collision-target"), "secondary", own=52501)
     claimant = make_vm("replace-collision-claimant")
     client.force_login(make_superuser("identity-replacement-collision"))
     server = _serve_secondary(secondary_server, 52601, device.name)
@@ -406,7 +400,7 @@ def test_a_confirmed_replacement_still_rechecks_the_cross_model_id_claim(client,
         nonlocal claim_applied
         if not claim_applied and 'FROM "dcim_device"' in sql and "FOR UPDATE" in sql:
             claim_applied = True
-            seed_stored_mapping_row(claimant, {"secondary": 52601})
+            seed_mapping_row(claimant, seed_mapping(type(claimant)(), "secondary", own=52601, save=False))
         return execute(sql, params, many, context)
 
     with connection.execute_wrapper(claim_the_proposed_id_at_the_target_lock):
@@ -416,14 +410,14 @@ def test_a_confirmed_replacement_still_rechecks_the_cross_model_id_claim(client,
     assert response.status_code == 200
     assert b"already assigned to" in response.content
     device.refresh_from_db()
-    assert stored_mapping_for_test(device) == {"secondary": 52501}
+    assert mapping_summary(device) == {"secondary": {"own": 52501}}
 
 
 @pytest.mark.django_db
 def test_a_blocked_serial_leaves_the_confirmed_replacement_unwritten(client, secondary_server):
     """An error after the mapping is applied in memory persists nothing."""
     make_device("replace-serial-owner", serial="SN-REPLACE-1")
-    device = make_device("replace-rollback-device", serial="SN-ORIGINAL", librenms_cf={"secondary": 52701})
+    device = seed_mapping(make_device("replace-rollback-device", serial="SN-ORIGINAL"), "secondary", own=52701)
     client.force_login(make_superuser("identity-replacement-rollback"))
     server = _serve_secondary(secondary_server, 52801, device.name, serial="SN-REPLACE-1")
 
@@ -433,7 +427,7 @@ def test_a_blocked_serial_leaves_the_confirmed_replacement_unwritten(client, sec
     assert response.status_code == 200
     assert b"Serial conflict" in response.content
     device.refresh_from_db()
-    assert stored_mapping_for_test(device) == {"secondary": 52701}
+    assert mapping_summary(device) == {"secondary": {"own": 52701}}
     assert device.serial == "SN-ORIGINAL"
 
 
@@ -442,7 +436,7 @@ def test_an_overlong_serial_leaves_the_confirmed_replacement_unwritten(client, s
     """The writer refuses a serial longer than the field, so neither the mapping nor the serial is written."""
     from dcim.models import Device
 
-    device = make_device("replace-dberror-device", serial="SN-ORIGINAL", librenms_cf={"secondary": 54101})
+    device = seed_mapping(make_device("replace-dberror-device", serial="SN-ORIGINAL"), "secondary", own=54101)
     client.force_login(make_superuser("identity-replacement-dberror"))
     overlong_serial = "S" * (Device._meta.get_field("serial").max_length + 1)
     server = _serve_secondary(secondary_server, 54201, device.name, serial=overlong_serial)
@@ -453,17 +447,14 @@ def test_an_overlong_serial_leaves_the_confirmed_replacement_unwritten(client, s
     assert response.status_code == 200
     assert b"Validation error" in response.content
     device.refresh_from_db()
-    assert stored_mapping_for_test(device) == {"secondary": 54101}
+    assert mapping_summary(device) == {"secondary": {"own": 54101}}
     assert device.serial == "SN-ORIGINAL"
 
 
 @pytest.mark.django_db
 def test_an_oob_only_mapping_needs_no_replacement_confirmation(client, secondary_server):
     """An entry with only an OOB link has no host identity to replace."""
-    device = make_device(
-        "replace-oob-only-device",
-        librenms_cf={"secondary": {"oob": {"id": 53901, "type": "bmc"}}},
-    )
+    device = seed_mapping(make_device("replace-oob-only-device"), "secondary", oob=53901, oob_type="bmc")
     client.force_login(make_superuser("identity-replacement-oob-only"))
 
     response = _post_action(
@@ -473,16 +464,13 @@ def test_an_oob_only_mapping_needs_no_replacement_confirmation(client, secondary
     assert response.status_code == 200
     assert INTENT_FIELD.encode() not in response.content
     device.refresh_from_db()
-    assert stored_mapping_for_test(device) == {"secondary": {"id": 54001, "oob": {"id": 53901, "type": "bmc"}}}
+    assert mapping_summary(device) == {"secondary": {"own": 54001, "oob": 53901, "oob_type": "bmc"}}
 
 
 @pytest.mark.django_db
 def test_a_confirmation_for_an_oob_only_mapping_fails_closed(client, secondary_server):
     """A confirmation naming a host ID an OOB-only entry never had is refused."""
-    device = make_device(
-        "replace-oob-forged-device",
-        librenms_cf={"secondary": {"oob": {"id": 54301, "type": "bmc"}}},
-    )
+    device = seed_mapping(make_device("replace-oob-forged-device"), "secondary", oob=54301, oob_type="bmc")
     user = make_superuser("identity-replacement-oob-forged")
     client.force_login(user)
     token = sign_identity_replacement_intent(
@@ -503,13 +491,13 @@ def test_a_confirmation_for_an_oob_only_mapping_fails_closed(client, secondary_s
     assert response.status_code == 200
     assert b"no longer matches" in response.content
     device.refresh_from_db()
-    assert stored_mapping_for_test(device) == {"secondary": {"oob": {"id": 54301, "type": "bmc"}}}
+    assert mapping_summary(device) == {"secondary": {"oob": 54301, "oob_type": "bmc"}}
 
 
 @pytest.mark.django_db
 def test_an_unsupported_object_type_is_refused(client, secondary_server):
     """An object type the view cannot resolve fails closed instead of defaulting to Device."""
-    device = make_device("replace-bad-type-device", librenms_cf={"secondary": 54501})
+    device = seed_mapping(make_device("replace-bad-type-device"), "secondary", own=54501)
     client.force_login(make_superuser("identity-replacement-bad-type"))
 
     response = _post_action(
@@ -524,7 +512,7 @@ def test_an_unsupported_object_type_is_refused(client, secondary_server):
     assert response.status_code == 200
     assert b"Unsupported object type" in response.content
     device.refresh_from_db()
-    assert stored_mapping_for_test(device) == {"secondary": 54501}
+    assert mapping_summary(device) == {"secondary": {"own": 54501}}
 
 
 @pytest.mark.django_db
@@ -532,7 +520,7 @@ def test_replacement_requires_change_permission_on_the_target(client, secondary_
     """A user without change permission on the object cannot replace its identity."""
     from dcim.models import Device
 
-    device = make_device("replace-unauthorized-device", librenms_cf={"secondary": 52901})
+    device = seed_mapping(make_device("replace-unauthorized-device"), "secondary", own=52901)
     client.force_login(make_user_with_perms("identity-replacement-viewer", [("view", Device)]))
 
     response = _post_action(
@@ -542,7 +530,7 @@ def test_replacement_requires_change_permission_on_the_target(client, secondary_
     assert response.status_code == 200
     assert INTENT_FIELD.encode() not in response.content
     device.refresh_from_db()
-    assert stored_mapping_for_test(device) == {"secondary": 52901}
+    assert mapping_summary(device) == {"secondary": {"own": 52901}}
 
 
 @pytest.mark.django_db
@@ -550,7 +538,7 @@ def test_replacement_is_scoped_by_a_constrained_change_grant(client, secondary_s
     """A constrained change grant that excludes the target refuses the replacement."""
     from dcim.models import Device
 
-    device = make_device("replace-out-of-scope-device", librenms_cf={"secondary": 53101})
+    device = seed_mapping(make_device("replace-out-of-scope-device"), "secondary", own=53101)
     in_scope = make_device("replace-in-scope-device")
     user = make_user_with_perms(
         "identity-replacement-constrained",
@@ -566,7 +554,7 @@ def test_replacement_is_scoped_by_a_constrained_change_grant(client, secondary_s
     assert response.status_code == 200
     assert INTENT_FIELD.encode() not in response.content
     device.refresh_from_db()
-    assert stored_mapping_for_test(device) == {"secondary": 53101}
+    assert mapping_summary(device) == {"secondary": {"own": 53101}}
 
 
 def test_the_signed_schema_matches_the_intent_dataclass():

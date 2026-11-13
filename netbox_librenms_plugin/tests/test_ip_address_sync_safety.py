@@ -35,7 +35,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
     run_in_threads,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import (
     ip_address_row,
     seed_interfaces_snapshot,
@@ -349,8 +349,8 @@ def test_concurrent_global_ip_sync_creates_one_address(settings):
     user = make_superuser("global-ip-concurrency-user")
     row_id = "198.18.20.10/24"
     devices = [
-        make_device("global-ip-device-a", librenms_cf={"default": {"id": 42}}),
-        make_device("global-ip-device-b", librenms_cf={"default": {"id": 43}}),
+        seed_mapping(make_device("global-ip-device-a"), "default", own=42),
+        seed_mapping(make_device("global-ip-device-b"), "default", own=43),
     ]
     for port_id, device in enumerate(devices, start=7040):
         interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
@@ -382,7 +382,7 @@ def test_concurrent_bulk_ip_sync_orders_host_locks_before_interface_scope(settin
 
     _configure_test_server(settings)
     user = make_superuser("bulk-ip-lock-order-user")
-    device = make_device("bulk-ip-lock-order-device", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("bulk-ip-lock-order-device"), "default", own=42)
     interfaces = [
         make_interface(device, "Ethernet1", iface_type="1000base-t"),
         make_interface(device, "Ethernet2", iface_type="1000base-t"),
@@ -502,7 +502,7 @@ def test_refresh_and_sync_accepts_an_already_prefixed_address(
     """The refresh must not append a second prefix to an already-prefixed address."""
     _configure_test_server(settings)
 
-    device = make_device(device_name, librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device(device_name), "default", own=42)
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
     seed_mapping(interface, "default", own=7001)
     client.force_login(make_superuser("ip-prefix-user"))
@@ -539,9 +539,9 @@ def test_refresh_and_sync_accepts_an_already_prefixed_address(
 @pytest.mark.parametrize(
     ("tag", "binding", "matches"),
     [
-        ("ip-name-other-port", {"default": 7999}, False),
+        ("ip-name-other-port", "default", False),
         ("ip-name-unbound", None, True),
-        ("ip-name-other-server", {"secondary": 7999}, True),
+        ("ip-name-other-server", "secondary", True),
     ],
 )
 def test_a_same_name_interface_bound_to_another_port_does_not_take_the_ip(
@@ -549,10 +549,10 @@ def test_a_same_name_interface_bound_to_another_port_does_not_take_the_ip(
 ):
     """Port 7001 has no bound interface, so only the name Ethernet1 can match the row."""
     _configure_test_server(settings)
-    device = make_device(tag, librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device(tag), "default", own=42)
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
     if binding is not None:
-        seed_stored_mapping(interface, binding, save=True)
+        seed_mapping(interface, binding, own=7999)
     client.force_login(make_superuser(f"{tag}-user"))
     assert _refresh_ip_snapshot(client, device, "198.18.40.10", 24, live_librenms).status_code == 200
 
@@ -612,7 +612,7 @@ def test_sync_requires_confirmation_before_reassigning_an_ip_in_the_same_vrf(cli
     """A selected row must not silently take an IP from another interface."""
     _configure_test_server(settings)
 
-    device = make_device("ip-reassignment-conflict", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("ip-reassignment-conflict"), "default", own=42)
     target_interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
     seed_mapping(target_interface, "default", own=7001)
     current_interface = make_interface(device, "Ethernet2", iface_type="1000base-t")
@@ -652,7 +652,7 @@ def test_sync_requires_confirmation_before_reassigning_an_ip_in_the_same_vrf(cli
 def test_native_ip_conflict_response_renders_a_complete_page(client, settings, live_librenms):
     """A native form submission must not replace the browser document with an HTMX fragment."""
     _configure_test_server(settings)
-    device = make_device("native-ip-conflict", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("native-ip-conflict"), "default", own=42)
     target_interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
     seed_mapping(target_interface, "default", own=7001)
     existing_interface = make_interface(device, "Ethernet2", iface_type="1000base-t")
@@ -710,7 +710,7 @@ def test_native_ip_conflict_page_marks_the_sync_tab_active(client, settings, liv
         target = VMInterface.objects.create(virtual_machine=obj, name="Ethernet1")
         holder = VMInterface.objects.create(virtual_machine=obj, name="Ethernet2")
         refresh_name, sync_tab_name = "vm_ipaddress_sync", "virtualization:virtualmachine_librenms_sync"
-    seed_stored_mapping(obj, {"default": {"id": 42}}, save=True)
+    seed_mapping(obj, "default", own=42)
     seed_mapping(target, "default", own=7001)
     IPAddress.objects.create(address="198.18.2.30/24", assigned_object=holder)
     client.force_login(make_superuser(f"ip-conflict-tabbar-{object_type}"))
@@ -738,7 +738,7 @@ def test_native_ip_conflict_page_marks_the_sync_tab_active(client, settings, liv
 def test_bulk_sync_applies_safe_rows_and_forces_only_selected_conflicts(client, settings, live_librenms):
     """A bulk request must apply safe rows and retain unselected conflicts unchanged."""
     _configure_test_server(settings)
-    device = make_device("ip-bulk-conflicts", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("ip-bulk-conflicts"), "default", own=42)
     target_one = make_interface(device, "Ethernet1", iface_type="1000base-t")
     seed_mapping(target_one, "default", own=7001)
     target_two = make_interface(device, "Ethernet2", iface_type="1000base-t")
@@ -815,7 +815,7 @@ def test_confirmation_replays_create_missing_when_the_target_name_turns_ambiguou
     _configure_test_server(settings)
     _chassis, members = make_virtual_chassis_members("ip-conflict-vc", count=3)
     page_device, target_device, sibling = members
-    seed_stored_mapping(page_device, {"default": {"id": 42}}, save=True)
+    seed_mapping(page_device, "default", own=42)
     # The signed target: an unbound sibling interface, unambiguous by name while the intent is built.
     target = make_interface(target_device, "Ethernet2/1", iface_type="1000base-t")
     holder = make_interface(page_device, "Ethernet1/9", iface_type="1000base-t")
@@ -883,7 +883,7 @@ def test_confirmation_replays_create_missing_when_the_target_name_turns_ambiguou
 def test_row_action_syncs_only_its_ip_when_another_row_is_checked(client, settings, live_librenms):
     """A row action must not submit unrelated bulk selections from the outer form."""
     _configure_test_server(settings)
-    device = make_device("ip-row-action", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("ip-row-action"), "default", own=42)
     first_interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
     second_interface = make_interface(device, "Ethernet2", iface_type="1000base-t")
     seed_mapping(first_interface, "default", own=7030)
@@ -940,7 +940,7 @@ def test_create_missing_interfaces_materializes_one_interface_for_bulk_ip_rows(c
     from dcim.models import Interface
 
     _configure_test_server(settings)
-    device = make_device("ip-create-missing-interface", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("ip-create-missing-interface"), "default", own=42)
     blue = VRF.objects.create(name="Create Missing Blue")
     rows = [
         {
@@ -1015,7 +1015,7 @@ def test_an_empty_snapshot_is_not_reported_as_an_expired_cache(client, settings)
     replaces the tab with the cache-miss prompt.
     """
     _configure_test_server(settings)
-    device = make_device("ip-empty-snapshot", librenms_cf={"default": {"id": 43}})
+    device = seed_mapping(make_device("ip-empty-snapshot"), "default", own=43)
     _seed_ip_rows(device, [])
     client.force_login(make_superuser("ip-empty-snapshot-user"))
 
@@ -1039,7 +1039,7 @@ def test_create_missing_interfaces_rejects_legacy_snapshot_before_processing_row
     from dcim.models import Interface
 
     _configure_test_server(settings)
-    device = make_device("ip-create-missing-legacy", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("ip-create-missing-legacy"), "default", own=42)
     row_id = "198.18.12.20/24"
     # An older release stored this shape under the same key; it is the input under test, not a seed.
     snapshot_key = source_cache.snapshot_key(device, Resource.IP_ADDRESSES, "default")
@@ -1085,7 +1085,7 @@ def test_create_missing_interfaces_reuses_interface_catalog_for_bulk_rows(client
     from dcim.models import Interface
 
     _configure_test_server(settings)
-    device = make_device("ip-create-missing-catalog", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("ip-create-missing-catalog"), "default", own=42)
     rows = [
         {
             "address": "198.18.12.21",
@@ -1158,7 +1158,7 @@ def test_failed_create_missing_row_does_not_leak_interface_catalog(settings):
     from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
 
     _configure_test_server(settings)
-    device = make_device("ip-create-missing-savepoint", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("ip-create-missing-savepoint"), "default", own=42)
     first_row = "198.18.12.23/24"
     second_row = "198.18.12.24/24"
     _seed_ip_rows(
@@ -1215,7 +1215,7 @@ def test_create_missing_interface_resolves_the_virtual_chassis_member(client, se
     _configure_test_server(settings)
     _chassis, members = make_virtual_chassis_members("ip-create-vc")
     page_device, target_device = members
-    seed_stored_mapping(page_device, {"default": {"id": 42}}, save=True)
+    seed_mapping(page_device, "default", own=42)
     rows = [
         {
             "address": "198.18.13.10",
@@ -1264,7 +1264,7 @@ def test_create_missing_interface_supports_virtual_machine_ip_sync(client, setti
 
     _configure_test_server(settings)
     virtual_machine = make_vm("ip-create-vm")
-    seed_stored_mapping(virtual_machine, {"default": {"id": 42}}, save=True)
+    seed_mapping(virtual_machine, "default", own=42)
     rows = [
         {
             "address": "2001:db8:14::10",
@@ -1313,7 +1313,7 @@ def test_create_missing_interface_measures_the_name_against_the_vm_writer_model(
 
     _configure_test_server(settings)
     virtual_machine = make_vm("ip-create-vm")
-    seed_stored_mapping(virtual_machine, {"default": {"id": 42}}, save=True)
+    seed_mapping(virtual_machine, "default", own=42)
     rows = [
         {
             "address": "2001:db8:14::10",
@@ -1367,7 +1367,7 @@ def test_create_missing_interfaces_rejects_ambiguous_cached_port_names(client, s
     from dcim.models import Interface
 
     _configure_test_server(settings)
-    device = make_device("ip-create-ambiguous", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("ip-create-ambiguous"), "default", own=42)
     rows = [
         {
             "address": "198.18.15.10",
@@ -1424,7 +1424,7 @@ def test_interface_sync_keeps_its_source_snapshot_and_clears_the_ip_snapshot(
 ):
     """A committed Interface sync must clear stale IP data but keep its source data."""
     _configure_test_server(settings)
-    device = make_device("ip-cache-cleared-by-interface-sync", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("ip-cache-cleared-by-interface-sync"), "default", own=42)
     rows = [
         {
             "address": "198.18.16.10",
@@ -1507,7 +1507,7 @@ def test_create_missing_interfaces_does_not_adopt_a_hidden_existing_interface(cl
     from dcim.models import Device, Interface
 
     _configure_test_server(settings)
-    device = make_device("ip-hidden-interface", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("ip-hidden-interface"), "default", own=42)
     hidden_interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
     seed_mapping(hidden_interface, "default", own=7018)
     user = make_user_with_perms("ip-hidden-interface-user", [])
@@ -1558,7 +1558,7 @@ def test_direct_ip_sync_post_does_not_mutate_a_migrated_donor(client, settings, 
 
     _configure_test_server(settings)
     _chassis, (page, member) = make_virtual_chassis_members(f"ip-migrated-{migrated}")
-    seed_stored_mapping(page, {"default": {"id": 42}}, save=True)
+    seed_mapping(page, "default", own=42)
     donor = page if migrated == "page" else member
     winner = make_device(f"ip-migration-winner-{migrated}")
     interface = make_interface(donor, "Ethernet1", iface_type="1000base-t")
@@ -1590,7 +1590,7 @@ def test_direct_ip_sync_post_does_not_mutate_a_migrated_donor(client, settings, 
 def test_invalid_force_all_confirmation_reports_the_confirmation_error(client, settings):
     """An invalid force token must not be reported as an empty row selection."""
     _configure_test_server(settings)
-    device = make_device("invalid-force-confirmation", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("invalid-force-confirmation"), "default", own=42)
     _seed_ip_rows(device, [_ip_row("198.18.19.20", 7020, "Ethernet1")])
     client.force_login(make_superuser("invalid-force-confirmation-user"))
 
@@ -1616,7 +1616,7 @@ def test_invalid_confirmation_is_not_reported_as_an_ip_address(client, settings)
     """A bad confirmation token must remain separate from per-address results."""
 
     _configure_test_server(settings)
-    device = make_device("mixed-invalid-confirmation", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("mixed-invalid-confirmation"), "default", own=42)
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
     seed_mapping(interface, own=7021)
     row_id = "198.18.19.21/24"
@@ -1650,7 +1650,7 @@ def test_interface_scope_change_during_lock_is_reported_as_a_failure(client, set
     from django.db import connection
 
     _configure_test_server(settings)
-    device = make_device("interface-lock-view-scope", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("interface-lock-view-scope"), "default", own=42)
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
     interface.description = "managed"
     seed_mapping(interface, own=7030, save=False)
@@ -1702,7 +1702,7 @@ def test_a_name_match_bound_to_another_port_before_the_lock_is_refused(client, s
     from django.db import connection
 
     _configure_test_server(settings)
-    device = make_device("ip-name-rebound-before-lock", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("ip-name-rebound-before-lock"), "default", own=42)
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
     client.force_login(make_superuser("ip-name-rebound-before-lock-user"))
     _seed_ip_rows(device, [_ip_row("198.18.19.31", 7031, "Ethernet1")])
@@ -1742,7 +1742,7 @@ def test_existing_ip_outside_change_scope_is_reported_without_mutation(client, s
     from dcim.models import Device, Interface
 
     _configure_test_server(settings)
-    device = make_device("ip-change-scope", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("ip-change-scope"), "default", own=42)
     target = make_interface(device, "Ethernet1", iface_type="1000base-t")
     original = make_interface(device, "Ethernet2", iface_type="1000base-t")
     seed_mapping(target, own=7020, save=False)
@@ -1792,7 +1792,7 @@ def test_ip_sync_does_not_write_after_interface_owner_disappears(client, setting
     from django.db import connection
 
     _configure_test_server(settings)
-    device = make_device("ip-owner-disappears", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("ip-owner-disappears"), "default", own=42)
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
     seed_mapping(interface, own=7021, save=False)
     interface.save()
@@ -1838,7 +1838,7 @@ def test_force_reassigns_only_the_matching_vrf_row(client, settings, live_libren
     _configure_test_server(settings)
     blue = VRF.objects.create(name="Blue")
     red = VRF.objects.create(name="Red")
-    device = make_device("ip-vrf-reassign", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("ip-vrf-reassign"), "default", own=42)
     target = make_interface(device, "Ethernet1", iface_type="1000base-t")
     seed_mapping(target, "default", own=7001)
     blue_current = make_interface(device, "Ethernet2", iface_type="1000base-t")
@@ -1897,7 +1897,7 @@ def test_a_force_checkbox_without_a_valid_intent_syncs_nothing(client, settings,
     _configure_test_server(settings)
     blue = VRF.objects.create(name="Stale Intent Blue")
     red = VRF.objects.create(name="Stale Intent Red")
-    device = make_device("ip-stale-intent", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("ip-stale-intent"), "default", own=42)
     target = make_interface(device, "Ethernet1", iface_type="1000base-t")
     seed_mapping(target, "default", own=7001)
     blue_current = make_interface(device, "Ethernet2", iface_type="1000base-t")
@@ -1952,7 +1952,7 @@ def test_sync_creates_an_independent_global_row_when_other_vrfs_are_ambiguous(cl
     _configure_test_server(settings)
     blue = VRF.objects.create(name="Independent Blue")
     red = VRF.objects.create(name="Independent Red")
-    device = make_device("ip-vrf-independent-create", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("ip-vrf-independent-create"), "default", own=42)
     target = make_interface(device, "Ethernet1", iface_type="1000base-t")
     seed_mapping(target, "default", own=7001)
     blue_interface = make_interface(device, "Ethernet2", iface_type="1000base-t")
@@ -1989,7 +1989,7 @@ def test_sync_creates_an_independent_global_row_when_other_vrfs_are_ambiguous(cl
 def _bound_device_on_a_refreshed_ip_row(client, settings, live_librenms, name, address, prefix_length):
     """Return a device whose interface is bound to LibreNMS port 7001, with that IP row in the snapshot."""
     _configure_test_server(settings)
-    device = make_device(name, librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device(name), "default", own=42)
     target = make_interface(device, "Ethernet1", iface_type="1000base-t")
     seed_mapping(target, "default", own=7001)
     client.force_login(make_superuser(f"{name}-user"))
@@ -2065,7 +2065,7 @@ def test_vrf_change_requires_confirmation_and_moves_the_identified_row(
     _configure_test_server(settings)
     source_vrf = VRF.objects.create(name="Source VRF")
     destination_vrf = VRF.objects.create(name="Destination VRF")
-    device = make_device("ip-vrf-move", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("ip-vrf-move"), "default", own=42)
     target = make_interface(device, "Ethernet1", iface_type="1000base-t")
     seed_mapping(target, "default", own=7001)
     source_interface = make_interface(device, "Ethernet2", iface_type="1000base-t")
@@ -2104,7 +2104,7 @@ def test_confirmed_vrf_move_fails_when_the_destination_changes(client, settings,
     _configure_test_server(settings)
     source_vrf = VRF.objects.create(name="Stable Source VRF")
     destination_vrf = VRF.objects.create(name="Changing Destination VRF")
-    device = make_device("ip-vrf-stale-destination", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("ip-vrf-stale-destination"), "default", own=42)
     target = make_interface(device, "Ethernet1", iface_type="1000base-t")
     seed_mapping(target, "default", own=7001)
     source_interface = make_interface(device, "Ethernet2", iface_type="1000base-t")
@@ -2169,7 +2169,7 @@ def test_same_host_with_a_different_prefix_requires_confirmation_before_update(
     _configure_test_server(settings)
     vrf = VRF.objects.create(name=f"Prefix VRF {incoming_prefix}")
     other_vrf = VRF.objects.create(name=f"Other Prefix VRF {incoming_prefix}")
-    device = make_device(f"ip-prefix-vrf-{incoming_prefix}", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device(f"ip-prefix-vrf-{incoming_prefix}"), "default", own=42)
     target = make_interface(device, "Ethernet1", iface_type="1000base-t")
     seed_mapping(target, "default", own=7001)
     existing = IPAddress.objects.create(address=existing_address, vrf=vrf, status="active")
@@ -2230,7 +2230,7 @@ def test_same_host_with_a_different_prefix_requires_confirmation_before_update(
 def test_ip_table_render_reads_only_the_reported_addresses(client, settings, live_librenms):
     """The render must not load every IPAddress row in the deployment."""
     _configure_test_server(settings)
-    device = make_device("ip-scan-scope", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("ip-scan-scope"), "default", own=42)
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
     seed_mapping(interface, "default", own=7001)
     for host in range(10, 20):
@@ -2251,7 +2251,7 @@ def test_ip_table_render_reads_only_the_reported_addresses(client, settings, liv
 def test_sync_without_a_selection_reports_the_empty_selection_error(client, settings):
     """A cached snapshot with no selected row must report the selection error, not a cache miss."""
     _configure_test_server(settings)
-    device = make_device("ip-empty-selection", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("ip-empty-selection"), "default", own=42)
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
     seed_mapping(interface, "default", own=7001)
     _seed_ip_rows(device, [_ip_row("198.18.32.10", 7001, "Ethernet1")])
@@ -2276,7 +2276,7 @@ def test_create_missing_interfaces_requires_change_scope_for_the_new_interface(c
     from dcim.models import Device, Interface
 
     _configure_test_server(settings)
-    device = make_device("ip-create-scope", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("ip-create-scope"), "default", own=42)
     user = make_user_with_perms("ip-create-scope-user", [])
     user = grant(user, "view", Device, constraints={"pk": device.pk})
     user = grant(user, "view", Interface)
@@ -2322,7 +2322,7 @@ def test_create_missing_interfaces_is_refused_without_add_and_change_grants(clie
     from dcim.models import Device, Interface
 
     _configure_test_server(settings)
-    device = make_device("ip-view-only", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("ip-view-only"), "default", own=42)
     # Deliberately view-only on both models, plus the IP grants the row would otherwise need.
     user = make_user_with_perms("ip-view-only-user", [])
     user = grant(user, "view", Device, constraints={"pk": device.pk})
@@ -2380,7 +2380,7 @@ def test_create_missing_interfaces_toggle_survives_a_table_refresh(client, setti
     from netbox_librenms_plugin.tests._html_helpers import open_tags
 
     _configure_test_server(settings)
-    device = make_device("ip-toggle-state", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("ip-toggle-state"), "default", own=42)
     client.force_login(make_superuser("ip-toggle-state-user"))
     refresh_url = reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", args=[device.pk])
     rows = [{"address": "198.18.31.10", "prefix_length": 24, "port_id": 7031, "interface": "Ethernet1"}]
@@ -2412,7 +2412,7 @@ def test_ambiguous_port_identity_cannot_bind_an_unrelated_named_interface(
     """A stale name must not override an ambiguous stable LibreNMS port identity."""
 
     _configure_test_server(settings)
-    device = make_device("ambiguous-ip-port", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("ambiguous-ip-port"), "default", own=42)
     for name, port_id in [("duplicate-a", 7), ("duplicate-b", 7), ("eth0", 9)]:
         interface = make_interface(device, name)
         seed_mapping(interface, own=port_id, save=False)
@@ -2446,7 +2446,7 @@ def test_the_sync_creates_the_interface_name_that_the_table_shows(
     from dcim.models import Interface
 
     _configure_test_server(settings)
-    device = make_device(f"ip-naming-field-{name_field}", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device(f"ip-naming-field-{name_field}"), "default", own=42)
     client.force_login(make_superuser(f"ip-naming-field-{name_field}-user"))
     rows = [_ip_row("198.18.23.1", 7023, "Eth1", ifDescr="Ethernet1", ifType="ethernetCsmacd")]
     _serve_librenms_ip_rows(live_librenms.server, rows, device_name=device.name)
@@ -2488,7 +2488,7 @@ def test_duplicate_source_addresses_have_independent_vrf_controls_and_writes(
 ):
     """Equal addresses on separate source ports must retain independent VRF assignments."""
     _configure_test_server(settings)
-    device = make_device("duplicate-source-addresses", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("duplicate-source-addresses"), "default", own=42)
     source_device = device
     if member_source:
         from dcim.models import VirtualChassis
@@ -2581,7 +2581,7 @@ def test_netbox_only_interfaces_respect_view_scope(client, settings, live_libren
     from dcim.models import Device, Interface
 
     _configure_test_server(settings)
-    device = make_device("netbox-only-scope", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("netbox-only-scope"), "default", own=42)
     visible = make_interface(device, "visible-interface")
     hidden = make_interface(device, "hidden-interface")
     hidden.description = "restricted-description"
@@ -2604,7 +2604,7 @@ def test_netbox_only_interfaces_respect_view_scope(client, settings, live_libren
 def test_unchanged_compatible_ipv6_address_has_no_prefix_conflict(client, settings, live_librenms):
     """Equivalent IPv6 representations identify the same existing address."""
     _configure_test_server(settings)
-    device = make_device("compatible-ipv6-device", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("compatible-ipv6-device"), "default", own=42)
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
     seed_mapping(interface, "default", own=7001)
     existing = IPAddress.objects.create(address="::198.18.0.1/128", assigned_object=interface)
@@ -2626,7 +2626,7 @@ def test_unchanged_compatible_ipv6_address_has_no_prefix_conflict(client, settin
 def test_verify_rejects_malformed_source_row_identity(client, settings, row_id, live_librenms):
     """Invalid source selectors must return a client error, without a server crash."""
     _configure_test_server(settings)
-    device = make_device("invalid-source-selector", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("invalid-source-selector"), "default", own=42)
     client.force_login(make_superuser("invalid-source-selector-user"))
     _seed_ip_rows(device, [_ip_row("198.18.22.1", 7001, "Ethernet1")])
     response = client.post(

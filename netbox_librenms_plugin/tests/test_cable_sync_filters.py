@@ -27,7 +27,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_patch_panel,
     make_virtual_chassis_members,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.test_interface_sync_filters import (
     CELL,
     LIBRENMS_ID,
@@ -95,7 +95,7 @@ def _selection_scope(html):
 
 
 def _device(tag):
-    return make_device(f"cables-{tag}", librenms_cf={SERVER_KEY: {"id": LIBRENMS_ID}})
+    return seed_mapping(make_device(f"cables-{tag}"), SERVER_KEY, own=LIBRENMS_ID)
 
 
 def _mixed_device(tag):
@@ -246,7 +246,7 @@ class TestMatching:
 def _chassis(tag):
     """Return a VC member page whose rows belong to both members: the member select shows each row's owner."""
     _vc, (first, second) = make_virtual_chassis_members(f"cables-{tag}", 2)
-    seed_stored_mapping(first, {SERVER_KEY: {"id": LIBRENMS_ID}}, save=True)
+    seed_mapping(first, SERVER_KEY, own=LIBRENMS_ID)
     peer = make_device(f"cables-{tag}-peer")
     for member, name in ((first, "Ethernet1/1"), (second, "Ethernet2/1"), (second, "Ethernet2/2")):
         make_interface(member, name)
@@ -463,7 +463,6 @@ class TestWholeSnapshotData:
         sensors = [
             sensor_row(10000 + n, n, device_id=LIBRENMS_ID, sensor_descr=f"{console.name} Status") for n in (1, 2)
         ]
-        from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
         from netbox_librenms_plugin.tests.source_snapshot_helpers import Failed, seed_cables_snapshot
         from netbox_librenms_plugin.acquisition.registry import Resource
 

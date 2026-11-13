@@ -9,7 +9,12 @@ from django.core.cache import cache
 from django.urls import reverse
 
 from netbox_librenms_plugin.tests.conftest import make_device, make_superuser, make_vm
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping_row, stored_mapping_for_test
+from netbox_librenms_plugin.tests.mapping_fixtures import (
+    mapping_summary,
+    seed_mapping,
+    seed_stored_mapping_row,
+    stored_mapping_for_test,
+)
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
@@ -270,7 +275,7 @@ class TestAddDeviceToLibreNMSView:
 class TestUpdateDeviceLocationView:
     def test_location_update_sends_the_netbox_site_to_the_active_server(self, client, librenms_server):
         device_id = 42
-        device = make_device("location-update-target", librenms_cf={SERVER_KEY: device_id})
+        device = seed_mapping(make_device("location-update-target"), SERVER_KEY, own=device_id)
         received = []
 
         def record_update(**request):
@@ -301,7 +306,7 @@ class TestUpdateDeviceLocationView:
 
     def test_unlinked_device_does_not_patch_a_missing_id(self, client, librenms_server):
         """An unlinked device must stop before the LibreNMS update request."""
-        device = make_device("location-update-unlinked", librenms_cf={SERVER_KEY: None})
+        device = make_device("location-update-unlinked")
         client.force_login(make_superuser("location-update-unlinked-writer"))
 
         response = client.post(
@@ -338,7 +343,7 @@ class TestRemoveServerMappingView:
         assert response.url == reverse("plugins:netbox_librenms_plugin:vm_librenms_sync", args=[vm.pk])
         assert _messages(response, "success") == ["Removed LibreNMS mapping for server 'orphaned-server'."]
         vm.refresh_from_db()
-        assert stored_mapping_for_test(vm) is None
+        assert mapping_summary(vm) == {}
 
     @pytest.mark.parametrize("stored", ["²", 0, -1, True])
     def test_a_legacy_value_the_reader_cannot_resolve_has_no_mapping_to_remove(self, client, settings, stored):
@@ -433,7 +438,7 @@ class TestRemoveServerMappingView:
     def test_mapping_removal_preserves_unrelated_legacy_device_state(self, client):
         from dcim.models import Device
 
-        device = make_device("remove-orphaned-device-mapping", librenms_cf={"orphaned-server": 42})
+        device = seed_mapping(make_device("remove-orphaned-device-mapping"), "orphaned-server", own=42)
         Device.objects.filter(pk=device.pk).update(face="front")
         user = make_user_with_perms("remove-orphaned-device-writer", [("change", Device)])
         client.force_login(user)
@@ -446,5 +451,5 @@ class TestRemoveServerMappingView:
         assert response.status_code == 302
         assert _messages(response, "success") == ["Removed LibreNMS mapping for server 'orphaned-server'."]
         device.refresh_from_db()
-        assert stored_mapping_for_test(device) is None
+        assert mapping_summary(device) == {}
         assert device.face == "front"

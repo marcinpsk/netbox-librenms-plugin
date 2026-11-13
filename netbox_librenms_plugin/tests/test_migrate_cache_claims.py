@@ -14,7 +14,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_device,
     make_interface,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
+from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change, seed_mapping
 from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 from netbox_librenms_plugin.server_mappings import mark_migrated
 
@@ -59,9 +59,9 @@ def test_interface_move_preserves_source_snapshots_for_donor_and_winner(
 ):
     """An interface move preserves both devices' interface snapshots."""
     _configure_server(settings)
-    donor = make_device("claim-interface-donor", librenms_cf={SERVER_KEY: {"id": 1}})
-    winner = make_device("claim-interface-winner", librenms_cf={SERVER_KEY: {"id": 2}})
-    unrelated = make_device("claim-interface-unrelated", librenms_cf={SERVER_KEY: {"id": 3}})
+    donor = seed_mapping(make_device("claim-interface-donor"), SERVER_KEY, own=1)
+    winner = seed_mapping(make_device("claim-interface-winner"), SERVER_KEY, own=2)
+    unrelated = seed_mapping(make_device("claim-interface-unrelated"), SERVER_KEY, own=3)
     _mark_migrated(donor, winner)
 
     interface = make_interface(donor, "Ethernet1", iface_type="1000base-t")
@@ -107,9 +107,9 @@ def test_ip_address_move_preserves_source_snapshots_for_donor_and_winner(
 ):
     """An IP address move preserves both devices' IP address snapshots."""
     _configure_server(settings)
-    donor = make_device("claim-ip-donor", librenms_cf={SERVER_KEY: {"id": 4}})
-    winner = make_device("claim-ip-winner", librenms_cf={SERVER_KEY: {"id": 5}})
-    unrelated = make_device("claim-ip-unrelated", librenms_cf={SERVER_KEY: {"id": 6}})
+    donor = seed_mapping(make_device("claim-ip-donor"), SERVER_KEY, own=4)
+    winner = seed_mapping(make_device("claim-ip-winner"), SERVER_KEY, own=5)
+    unrelated = seed_mapping(make_device("claim-ip-unrelated"), SERVER_KEY, own=6)
     _mark_migrated(donor, winner)
 
     address = ip_on(donor, "198.18.0.10/24", "Ethernet10")

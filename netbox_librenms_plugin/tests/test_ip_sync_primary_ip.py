@@ -130,7 +130,7 @@ class TestPrimaryIPFromManagementAddress:
         """A synced row matching the LibreNMS management IP is written to primary_ip4."""
         from ipam.models import IPAddress
 
-        device = make_device("ip-primary-set", librenms_cf={SERVER_KEY: {"id": 4201}})
+        device = seed_mapping(make_device("ip-primary-set"), SERVER_KEY, own=4201)
         interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
         _set_librenms_id(interface, 9201)
         row = _row("198.18.40.10", 9201, interface.name)
@@ -156,7 +156,7 @@ class TestPrimaryIPFromManagementAddress:
         """A padded ``ip`` still names the management row; a blank or non-string one names no row."""
         from ipam.models import IPAddress
 
-        device = make_device("ip-primary-record", librenms_cf={SERVER_KEY: {"id": 4211}})
+        device = seed_mapping(make_device("ip-primary-record"), SERVER_KEY, own=4211)
         interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
         _set_librenms_id(interface, 9212)
         row = _row("198.18.47.10", 9212, interface.name)
@@ -181,7 +181,7 @@ class TestPrimaryIPFromManagementAddress:
 
         from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
-        device = make_device(f"ip-primary-invalid-{superuser}", librenms_cf={SERVER_KEY: {"id": 4209}})
+        device = seed_mapping(make_device(f"ip-primary-invalid-{superuser}"), SERVER_KEY, own=4209)
         interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
         _set_librenms_id(interface, 9210)
         # A rack face without a rack: NetBox refuses the device, whatever field the write changes.
@@ -223,7 +223,7 @@ class TestPrimaryIPFromManagementAddress:
         """A row whose address is already the primary IP reports no primary change."""
         from ipam.models import IPAddress
 
-        device = make_device("ip-primary-idempotent", librenms_cf={SERVER_KEY: {"id": 4202}})
+        device = seed_mapping(make_device("ip-primary-idempotent"), SERVER_KEY, own=4202)
         interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
         _set_librenms_id(interface, 9202)
         address = IPAddress.objects.create(address="198.18.41.10/24", assigned_object=interface, status="active")
@@ -247,7 +247,7 @@ class TestPrimaryIPFromManagementAddress:
 
         from django.db import connection
 
-        device = make_device("ip-primary-stale", librenms_cf={SERVER_KEY: {"id": 4208}})
+        device = seed_mapping(make_device("ip-primary-stale"), SERVER_KEY, own=4208)
         interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
         _set_librenms_id(interface, 9209)
         address = IPAddress.objects.create(address="198.18.41.20/24", assigned_object=interface, status="active")
@@ -269,7 +269,7 @@ class TestPrimaryIPFromManagementAddress:
         """An unmatched management row is reported apart from an ordinary unmatched row."""
         from ipam.models import IPAddress
 
-        device = make_device("ip-primary-no-interface", librenms_cf={SERVER_KEY: {"id": 4203}})
+        device = seed_mapping(make_device("ip-primary-no-interface"), SERVER_KEY, own=4203)
         management_row = _row("198.18.42.10", 9203, "Ethernet1")
         other_row = _row("198.18.42.11", 9204, "Ethernet2")
         _seed(device, [management_row, other_row], management_ip="198.18.42.10")
@@ -316,7 +316,7 @@ class TestPrimaryIPFromManagementAddress:
 
         from netbox_librenms_plugin.tests.lock_conflict_helpers import failing_statement
 
-        device = make_device("ip-primary-busy", librenms_cf={SERVER_KEY: {"id": 4210}})
+        device = seed_mapping(make_device("ip-primary-busy"), SERVER_KEY, own=4210)
         interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
         _set_librenms_id(interface, 9211)
         row = _row("198.18.44.10", 9211, interface.name)
@@ -343,7 +343,7 @@ class TestIPRowResolution:
         from ipam.models import IPAddress
         from ipam.models import VRF
 
-        device = make_device("ip-vrf-missing", librenms_cf={SERVER_KEY: {"id": 4205}})
+        device = seed_mapping(make_device("ip-vrf-missing"), SERVER_KEY, own=4205)
         interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
         _set_librenms_id(interface, 9206)
         row = _row("198.18.44.10", 9206, interface.name)

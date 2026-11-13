@@ -20,7 +20,6 @@ from netbox_librenms_plugin import source_cache
 from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.confirmation_intent import FIELD
 from netbox_librenms_plugin.tests.conftest import bounded_executor, make_device, run_in_threads
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping_row
 from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_source_snapshot
 from netbox_librenms_plugin.tests.view_test_helpers import (
     assert_locked_before_update,
@@ -30,6 +29,7 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
     post,
 )
 from netbox_librenms_plugin.tests.vlan_intent_helpers import assessed_tokens
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_mapping_row
 
 
 class _CapturedQueries:
@@ -261,7 +261,7 @@ def test_a_target_change_committed_while_the_writer_waits_for_its_lock_is_stale(
     from django.db import transaction
     from ipam.models import VLAN, VLANGroup
 
-    device = make_device(f"vlan-lock-race-{change}", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device(f"vlan-lock-race-{change}"), "default", own=42)
     group = VLANGroup.objects.create(name=f"Lock-Race-{change}", slug=f"lock-race-{change}")
     vlan = VLAN.objects.create(vid=61, group=group, name="old-name", status="active") if change != "create" else None
     from netbox_librenms_plugin.models import NormalizationRule
@@ -319,7 +319,8 @@ def test_a_target_change_committed_while_the_writer_waits_for_its_lock_is_stale(
                 type(device).objects.filter(pk=device.pk).update(device_type=ruled_type)
             else:
                 # Another writer maps the device to another LibreNMS host, or removes its mapping.
-                seed_stored_mapping_row(device, {"default": {"id": 43}} if change == "remap" else None)
+                remapped = seed_mapping(type(device)(), own=43, save=False) if change == "remap" else type(device)()
+                seed_mapping_row(device, remapped)
         recorded = syncing.result(timeout=20)
 
     joined = " || ".join(text for _level, text in recorded)

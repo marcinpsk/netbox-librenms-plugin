@@ -9,7 +9,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_vm,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping, stored_mapping_for_test
+from netbox_librenms_plugin.tests.mapping_fixtures import mapping_summary, seed_mapping
 
 
 class TestStackKey:
@@ -299,7 +299,7 @@ class TestBulkImportIntegration:
         assert len(result["success"]) == 1
         imported = Device.objects.get(name="bulk-new-device")
         assert imported.serial == "TEST-SERIAL-81"
-        assert stored_mapping_for_test(imported)["default"] == 81
+        assert mapping_summary(imported)["default"] == {"own": 81}
 
     def test_a_batch_reuses_its_serial_rules_and_the_next_batch_sees_a_change(self, live_librenms):
         from dcim.models import Device, DeviceRole, DeviceType, Site
@@ -418,7 +418,7 @@ class TestRefreshLibreNMSLinkage:
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_librenms_linkage
 
         device = make_device("refresh-host-link")
-        seed_stored_mapping(device, {"default": {"id": 101}}, save=True)
+        seed_mapping(device, "default", own=101)
         validation = _validation(device)
 
         _refresh_librenms_linkage(validation, device, {"device_id": 101}, "default")
@@ -430,7 +430,7 @@ class TestRefreshLibreNMSLinkage:
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_librenms_linkage
 
         device = make_device("refresh-oob-link")
-        seed_stored_mapping(device, {"default": {"id": 101, "oob": {"id": 102, "type": "controller"}}}, save=True)
+        seed_mapping(device, "default", own=101, oob=102)
         validation = _validation(device)
 
         _refresh_librenms_linkage(validation, device, {"device_id": 102}, "default")

@@ -248,7 +248,9 @@ def test_expired_picker_requires_refresh_without_another_acquisition(client, liv
 @pytest.mark.django_db
 @pytest.mark.parametrize("change", ["host", "link", "unlink"])
 def test_snapshot_binding_tracks_host_and_oob_mapping_changes(client, live_librenms, change):
-    from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping, seed_stored_mapping_row
+    from dcim.models import Device
+
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_mapping_row, seed_unmapped
 
     device = _device("cable-snapshot-binding", oob={"id": OOB_ID, "type": "idrac"})
     client.force_login(make_superuser("cable-snapshot-binding-user"))
@@ -256,15 +258,11 @@ def test_snapshot_binding_tracks_host_and_oob_mapping_changes(client, live_libre
     _serve(live_librenms.server, device_id=OOB_ID, links=[], ports=[])
     _refresh(client, device)
     assert source_cache.read(device, Resource.CABLES, SERVER_KEY) is not None
-    mapping = {"id": HOST_ID, "oob": {"id": OOB_ID, "type": "idrac"}}
-    if change == "host":
-        mapping["id"] = HOST_ID + 10
-    elif change == "link":
-        mapping["oob"]["id"] = OOB_ID + 10
-    else:
-        del mapping["oob"]
-    seed_stored_mapping(device, {SERVER_KEY: mapping})
-    seed_stored_mapping_row(device, {SERVER_KEY: mapping})
+    own = HOST_ID + 10 if change == "host" else HOST_ID
+    oob = {"host": OOB_ID, "link": OOB_ID + 10, "unlink": None}[change]
+    seed_unmapped(device, SERVER_KEY, save=False)
+    seed_mapping(device, SERVER_KEY, own=own, oob=oob, oob_type="idrac", save=False)
+    seed_mapping_row(device, seed_mapping(Device(), SERVER_KEY, own=own, oob=oob, oob_type="idrac", save=False))
 
     assert source_cache.read(device, Resource.CABLES, SERVER_KEY) is None
     before = list(live_librenms.server.requests)

@@ -625,8 +625,8 @@ class TestLibreNMSAPIDeviceLookup:
             seed_mapping(owner, "default", own=4242, save=False)
             owner.save()
         else:
-            owner = make_device("discovery-claimed-by-device", librenms_cf={"default": 4242})
-        target = make_device(f"discovery-claim-target-{owner_kind}", librenms_cf={"default": None})
+            owner = seed_mapping(make_device("discovery-claimed-by-device"), "default", own=4242)
+        target = make_device(f"discovery-claim-target-{owner_kind}")
         librenms_server.register(
             f"/api/v0/devices/{target.name}", {"status": "ok", "devices": [{"device_id": 4242}]}, method="GET"
         )
@@ -1124,7 +1124,7 @@ class TestIPAddressAcquisitionAnswers:
         server.register(f"/api/v0/devices/{self.DEVICE_ID}/ip", addresses_body, status=addresses_status)
         server.register(f"/api/v0/devices/{self.DEVICE_ID}/ports", {"status": "ok", "ports": []})
         server.register(f"/api/v0/devices/{self.DEVICE_ID}", {"status": "ok", "devices": [{"ip": ""}]})
-        device = make_device("api-ip-answers", librenms_cf={"default": {"id": self.DEVICE_ID}})
+        device = seed_mapping(make_device("api-ip-answers"), "default", own=self.DEVICE_ID)
         return acquire(device, server_key="default", resources=[Resource.IP_ADDRESSES]).record(
             Resource.IP_ADDRESSES, "addresses"
         )
@@ -1436,7 +1436,7 @@ class TestVlanAcquisitionResponseShape:
         from netbox_librenms_plugin.tests.conftest import make_device
 
         serve(live_librenms.server, self.PATH)
-        device = make_device("vlan-shape", librenms_cf={"default": {"id": 7}})
+        device = seed_mapping(make_device("vlan-shape"), "default", own=7)
 
         record = acquire(device, server_key="default", resources=[Resource.VLANS]).record(Resource.VLANS, "vlans")
 

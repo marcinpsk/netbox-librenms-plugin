@@ -158,7 +158,7 @@ class TestInstallModuleView:
 
         from netbox_librenms_plugin.views.sync.modules import InstallModuleView
 
-        device = make_device(f"install-bad-{broken_field}", librenms_cf={"default": 61})
+        device = seed_mapping(make_device(f"install-bad-{broken_field}"), "default", own=61)
         bay = make_module_bay(device, "Bad Input Bay")
         module_type = make_module_type(f"BAD-INPUT-CARD-{broken_field}")
         data = {
@@ -202,7 +202,7 @@ class TestInstallModuleView:
 
         from netbox_librenms_plugin.views.sync.modules import InstallModuleView
 
-        device = make_device("install-post-fallback", librenms_cf={"default": 62})
+        device = seed_mapping(make_device("install-post-fallback"), "default", own=62)
         bay = make_module_bay(device, "Fallback Bay")
         module_type = make_module_type("FALLBACK-CARD")
         interface = make_interface(device, "Te1/1/1")
@@ -237,7 +237,7 @@ class TestInstallBranchView:
     def test_a_non_numeric_parent_index_is_rejected(self, live_librenms):
         from netbox_librenms_plugin.views.sync.modules import InstallBranchView
 
-        device = make_device("branch-bad-index", librenms_cf={"default": 63})
+        device = seed_mapping(make_device("branch-bad-index"), "default", own=63)
 
         _view, request, response = _drive(
             InstallBranchView,
@@ -252,7 +252,7 @@ class TestInstallBranchView:
     def test_without_a_snapshot_the_user_is_told_to_refresh(self, live_librenms):
         from netbox_librenms_plugin.views.sync.modules import InstallBranchView
 
-        device = make_device("branch-no-cache", librenms_cf={"default": 64})
+        device = seed_mapping(make_device("branch-no-cache"), "default", own=64)
 
         _view, request, response = _drive(
             InstallBranchView,
@@ -425,7 +425,7 @@ class TestInstallSelectedView:
 
         from netbox_librenms_plugin.views.sync.modules import InstallSelectedView
 
-        device = make_device("selected-bad-index", librenms_cf={"default": 67})
+        device = seed_mapping(make_device("selected-bad-index"), "default", own=67)
         request = make_request(
             "post",
             {"select": ["not-a-number"], "server_key": "default"},
@@ -513,7 +513,7 @@ class TestUpdateModuleSerialView:
         from netbox_librenms_plugin.module_grants import GrantRefusal
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
 
-        device = make_device("serial-bad-inputs", librenms_cf={"default": 68})
+        device = seed_mapping(make_device("serial-bad-inputs"), "default", own=68)
 
         _view, request, response = _drive(
             UpdateModuleSerialView,
@@ -572,7 +572,7 @@ class TestUpdateModuleSerialView:
     def test_an_invalid_module_id_is_reported(self, live_librenms):
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
 
-        device = make_device("serial-bad-module", librenms_cf={"default": 68})
+        device = seed_mapping(make_device("serial-bad-module"), "default", own=68)
 
         _view, request, response = _drive(
             UpdateModuleSerialView, device, {"module_id": "", "server_key": "default"}, live_librenms

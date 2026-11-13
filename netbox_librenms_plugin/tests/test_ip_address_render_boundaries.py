@@ -88,7 +88,7 @@ class TestManagementIPResolution:
 
     def test_a_render_flags_the_management_row_from_the_snapshot_without_a_request(self, live_librenms):
         """The render reads the stored device record; it never asks LibreNMS for the management IP."""
-        device = make_device("ip-render-mgmt-snapshot", librenms_cf={SERVER_KEY: {"id": 4300}})
+        device = seed_mapping(make_device("ip-render-mgmt-snapshot"), SERVER_KEY, own=4300)
         seed_ip_snapshot(
             device,
             [ip_address_row("198.18.51.10", 9302), ip_address_row("198.18.51.11", 9302)],
@@ -106,7 +106,7 @@ class TestManagementIPResolution:
         """A refresh whose device record carries no string IP stores a snapshot with an empty management IP."""
         from netbox_librenms_plugin.views.base.ip_addresses_view import read_ip_assessment
 
-        device = make_device("ip-render-mgmt-missing", librenms_cf={SERVER_KEY: {"id": 4302}})
+        device = seed_mapping(make_device("ip-render-mgmt-missing"), SERVER_KEY, own=4302)
         interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
         _set_librenms_id(interface, 9303)
         _serve(
@@ -134,7 +134,7 @@ class TestExistingAddressEnrichment:
 
     def test_unassigned_existing_address_stays_an_update_row(self, client, live_librenms):
         """An existing but unassigned address is reported as an update, not a match."""
-        device = make_device("ip-render-unassigned", librenms_cf={SERVER_KEY: {"id": 4303}})
+        device = seed_mapping(make_device("ip-render-unassigned"), SERVER_KEY, own=4303)
         interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
         _set_librenms_id(interface, 9304)
         address = make_ip("198.18.51.30/24")
@@ -162,7 +162,7 @@ class TestPrepareContextNameField:
 
     def test_the_request_interface_name_field_decides_the_rendered_name(self):
         """The request's interface_name_field picks the port column the rendered row is named by."""
-        device = make_device("ip-render-name-field", librenms_cf={SERVER_KEY: {"id": 4304}})
+        device = seed_mapping(make_device("ip-render-name-field"), SERVER_KEY, own=4304)
         make_interface(device, "Ethernet1", iface_type="1000base-t")
         seed_ip_snapshot(
             device,
@@ -191,7 +191,7 @@ class TestFreshFetchValidation:
     )
     def test_an_unusable_row_fails_the_refresh_and_drops_the_older_snapshot(self, client, live_librenms, bad_row):
         """One unusable row fails the whole refresh: no row is dropped silently and no older snapshot stays."""
-        device = make_device("ip-render-bad-port", librenms_cf={SERVER_KEY: {"id": 4305}})
+        device = seed_mapping(make_device("ip-render-bad-port"), SERVER_KEY, own=4305)
         seed_ip_snapshot(device, [ip_address_row("198.18.51.51", 9306)], [{"port_id": 9306, "ifName": "eth0"}])
         _serve(
             live_librenms,
@@ -219,7 +219,7 @@ class TestRefreshWithAnUnknownServer:
         from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
 
         winner = make_device("ip-refresh-winner")
-        donor = make_device("ip-refresh-donor", librenms_cf={SERVER_KEY: {"id": 4306}})
+        donor = seed_mapping(make_device("ip-refresh-donor"), SERVER_KEY, own=4306)
         interface = make_interface(donor, "Ethernet1", iface_type="1000base-t")
         make_ip("198.18.51.60/24", assigned_object=interface)
         apply_mapping_change(donor, mark_migrated(donor, winner.pk, SERVER_KEY))

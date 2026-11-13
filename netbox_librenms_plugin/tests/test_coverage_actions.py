@@ -25,7 +25,9 @@ from netbox_librenms_plugin.tests.conftest import (
 )
 from netbox_librenms_plugin.tests.lock_conflict_helpers import lock_row, lock_timeout, second_connection
 from netbox_librenms_plugin.tests.mapping_fixtures import (
+    mapping_summary,
     seed_mapping,
+    seed_mapping_row,
     seed_stored_mapping,
     seed_stored_mapping_row,
     stored_mapping_for_test,
@@ -1576,11 +1578,7 @@ class TestDeviceValidationDetailsView:
         assert [request["path"] for request in self.primary_server.requests] == ["/api/v0/devices/1"]
 
     def test_get_with_existing_device_renders_sync_info(self):
-        existing = make_device(
-            "validation-details-existing",
-            serial="SN001",
-            librenms_cf={"default": {"id": 1}},
-        )
+        existing = seed_mapping(make_device("validation-details-existing", serial="SN001"), "default", own=1)
         self.primary_server.device_info_response(
             device_id=1,
             hostname=existing.name,
@@ -1758,7 +1756,12 @@ class TestBuildIdServerInfo:
 
     @staticmethod
     def _object(mapping):
+        # Storage shape: a legacy, malformed or text-form stored value.
         return make_device("build-id-server-info", librenms_cf=mapping)
+
+    @staticmethod
+    def _mapped(**seed):
+        return seed_mapping(make_device("build-id-server-info"), **seed)
 
     @staticmethod
     def _configure(settings, plugin_config):
@@ -1778,7 +1781,7 @@ class TestBuildIdServerInfo:
         method = self._get_method()
         self._configure(settings, {"servers": {"default": {"display_name": "Default Server"}}})
 
-        result = method(self._object({"default": 42}))
+        result = method(self._mapped(own=42))
 
         assert result is not None
         assert result[0]["server_key"] == "default"
@@ -1799,7 +1802,7 @@ class TestBuildIdServerInfo:
         method = self._get_method()
         self._configure(settings, {"servers": {"default": {"display_name": "Default Server"}}})
 
-        result = method(self._object({"default": {"id": 42, "oob": {"id": 17, "type": "idrac"}}}))
+        result = method(self._mapped(own=42, oob=17, oob_type="idrac"))
 
         assert result is not None
         assert result[0]["device_id"] == 42
@@ -1809,7 +1812,7 @@ class TestBuildIdServerInfo:
         method = self._get_method()
         self._configure(settings, {"servers": {"default": {"display_name": "Default Server"}}})
 
-        result = method(self._object({"default": {"oob": {"id": 17, "type": "idrac"}}}))
+        result = method(self._mapped(oob=17, oob_type="idrac"))
 
         # Mirrors the device-sync modal (_build_all_server_mappings): the OOB-only link is shown
         # using the OOB controller's id rather than dropped (which would risk a duplicate re-import).
@@ -1820,7 +1823,7 @@ class TestBuildIdServerInfo:
         method = self._get_method()
         self._configure(settings, {"display_name": "My LibreNMS", "servers": {}})
 
-        result = method(self._object({"default": 55}))
+        result = method(self._mapped(own=55))
 
         assert result is not None
         assert result[0]["display_name"] == "My LibreNMS"
@@ -1838,7 +1841,7 @@ class TestBuildIdServerInfo:
         method = self._get_method()
         self._configure(settings, {"servers": "not-a-dict"})
 
-        result = method(self._object({"default": 42}))
+        result = method(self._mapped(own=42))
 
         assert result == [{"server_key": "default", "display_name": "default", "device_id": 42}]
 
@@ -1954,10 +1957,7 @@ class TestDeviceConflictActionView:
         from django.urls import get_script_prefix
 
         view = self._make_view()
-        existing_device = make_device(
-            "conflict-denied",
-            librenms_cf={self.server_key: {"id": 10}},
-        )
+        existing_device = seed_mapping(make_device("conflict-denied"), self.server_key, own=10)
         self._register_device(17, existing_device.name)
         user = make_view_user(
             f"conflict-denied-{'htmx' if htmx else 'regular'}-user",
@@ -1989,7 +1989,7 @@ class TestDeviceConflictActionView:
         assert view_message_texts(request, "error") == ["You do not have permission to perform this action."]
         assert Device.objects.count() == device_count
         reloaded = Device.objects.get(pk=existing_device.pk)
-        assert stored_mapping_for_test(reloaded)[self.server_key] == {"id": 10}
+        assert mapping_summary(reloaded)[self.server_key] == {"own": 10}
 
     def test_missing_action_renders_htmx_error_toast(self):
         view = self._make_view()
@@ -2934,11 +2934,7 @@ class TestDeviceConflictActionMigrateLibreNMSId:
         from dcim.models import Device
 
         view = self._make_view()
-        device = make_device(
-            "migrate-json-device",
-            serial="MIGRATE-SERIAL",
-            librenms_cf={self.server_key: 42},
-        )
+        device = seed_mapping(make_device("migrate-json-device", serial="MIGRATE-SERIAL"), self.server_key, own=42)
         self._register_device(42, "migrate-json-device", serial="MIGRATE-SERIAL")
         request = make_view_request(
             "post",
@@ -2956,7 +2952,7 @@ class TestDeviceConflictActionMigrateLibreNMSId:
         assert response.status_code == 200
         assert response.headers.get("HX-Reswap") == "none"
         assert b"already in JSON format" in response.content
-        assert stored_mapping_for_test(Device.objects.get(pk=device.pk)) == {self.server_key: 42}
+        assert mapping_summary(Device.objects.get(pk=device.pk)) == {self.server_key: {"own": 42}}
 
     def test_rejects_a_legacy_id_that_is_not_the_active_device_id(self):
         """Reject a signed legacy ID that differs from the active LibreNMS device ID."""
@@ -2994,11 +2990,7 @@ class TestDeviceConflictActionMigrateLibreNMSId:
 
         view = self._make_view()
         device = make_device("migrate-reader-only-device", serial="MIGRATE-SERIAL", librenms_cf="4_2")
-        rival = make_device(
-            "migrate-reader-only-rival",
-            serial="RIVAL-SERIAL",
-            librenms_cf={self.server_key: 99},
-        )
+        rival = seed_mapping(make_device("migrate-reader-only-rival", serial="RIVAL-SERIAL"), self.server_key, own=99)
         self._register_device(42, "migrate-reader-only-device", serial="MIGRATE-SERIAL")
         # Only an ID match sets serial_confirmed, and "4_2" matches no lookup, so force is required here.
         request = make_view_request(
@@ -3137,10 +3129,7 @@ class TestDeviceConflictActionMigrateLibreNMSId:
         from virtualization.models import VirtualMachine
 
         view = self._make_view()
-        device = make_device(
-            "migrate-cross-model-owner",
-            librenms_cf={self.server_key: 99},
-        )
+        device = seed_mapping(make_device("migrate-cross-model-owner"), self.server_key, own=99)
         vm = make_vm("migrate-cross-model-vm")
         seed_stored_mapping(vm, 42, save=True)
         self.librenms_server.device_info_response(
@@ -3311,11 +3300,7 @@ class TestDeviceConflictActionMigrateLibreNMSId:
 
         view = self._make_view()
         device = make_device("migrate-ambiguity-target", serial="MIGRATE-SERIAL", librenms_cf=42)
-        rival = make_device(
-            "migrate-ambiguity-rival",
-            serial="RIVAL-SERIAL",
-            librenms_cf={self.server_key: 99},
-        )
+        rival = seed_mapping(make_device("migrate-ambiguity-rival", serial="RIVAL-SERIAL"), self.server_key, own=99)
         self._register_device(42, "migrate-ambiguity-target", serial="MIGRATE-SERIAL")
         request = make_view_request(
             "post",
@@ -3449,7 +3434,7 @@ class TestDeviceConflictActionBranches:
         self._assert_htmx_error(response, "Missing validated conflict target")
         reloaded = Device.objects.get(pk=target.pk)
         assert reloaded.name == "branches-missing-validation-target"
-        assert stored_mapping_for_test(reloaded) is None
+        assert mapping_summary(reloaded) == {}
 
     def test_rejects_a_posted_device_that_differs_from_the_validated_target(self):
         from dcim.models import Device
@@ -3472,7 +3457,7 @@ class TestDeviceConflictActionBranches:
         )
         reloaded = Device.objects.get(pk=target.pk)
         assert reloaded.name == "branches-mismatch-posted-target"
-        assert stored_mapping_for_test(reloaded) is None
+        assert mapping_summary(reloaded) == {}
 
     def test_rejects_a_validated_vm_with_the_same_pk_as_the_posted_device(self):
         from dcim.models import Device
@@ -3536,7 +3521,7 @@ class TestDeviceConflictActionBranches:
         )
         reloaded = Device.objects.get(pk=target.pk)
         assert reloaded.device_type_id != reported_type.pk
-        assert stored_mapping_for_test(reloaded) is None
+        assert mapping_summary(reloaded) == {}
 
     def test_rejects_an_invalid_device_id_from_the_live_payload(self):
         from dcim.models import Device
@@ -3578,7 +3563,7 @@ class TestDeviceConflictActionBranches:
         self._assert_htmx_error(response, "Invalid or missing LibreNMS device_id in payload")
         reloaded = Device.objects.get(pk=target.pk)
         assert reloaded.name == "branches-invalid-payload-id-target"
-        assert stored_mapping_for_test(reloaded) is None
+        assert mapping_summary(reloaded) == {}
 
     def test_rejects_a_legacy_mapping_inside_the_lock(self):
         from dcim.models import Device
@@ -3633,16 +3618,14 @@ class TestDeviceConflictActionBranches:
         reloaded = Device.objects.get(pk=target.pk)
         assert reloaded.name == "branches-link-source-name"
         assert reloaded.device_type_id == reported_type.pk
-        assert stored_mapping_for_test(reloaded) == {self.server_key: 42}
+        assert mapping_summary(reloaded) == {self.server_key: {"own": 42}}
 
     def test_update_sets_the_name_serial_mapping_and_device_type_then_renders_the_row(self):
         from dcim.models import Device, DeviceType
 
         view = self._make_view()
-        target = make_device(
-            "branches-update-target",
-            serial="BRANCHES-UPDATE-OLD",
-            librenms_cf={self.server_key: 42},
+        target = seed_mapping(
+            make_device("branches-update-target", serial="BRANCHES-UPDATE-OLD"), self.server_key, own=42
         )
         reported_type = DeviceType.objects.create(
             manufacturer=target.device_type.manufacturer,
@@ -3670,16 +3653,16 @@ class TestDeviceConflictActionBranches:
         assert reloaded.name == "branches-update-source-name"
         assert reloaded.serial == "BRANCHES-UPDATE-NEW"
         assert reloaded.device_type_id == reported_type.pk
-        assert stored_mapping_for_test(reloaded) == {self.server_key: 42}
+        assert mapping_summary(reloaded) == {self.server_key: {"own": 42}}
 
     def test_update_reports_a_real_serial_conflict(self):
         from dcim.models import Device
 
         view = self._make_view()
-        target = make_device(
-            "branches-update-conflict-target",
-            serial="BRANCHES-UPDATE-CONFLICT-OLD",
-            librenms_cf={self.server_key: 42},
+        target = seed_mapping(
+            make_device("branches-update-conflict-target", serial="BRANCHES-UPDATE-CONFLICT-OLD"),
+            self.server_key,
+            own=42,
         )
         conflict = make_device(
             "branches-update-conflict-owner",
@@ -3705,16 +3688,14 @@ class TestDeviceConflictActionBranches:
         reloaded = Device.objects.get(pk=target.pk)
         assert reloaded.name == "branches-update-conflict-target"
         assert reloaded.serial == "BRANCHES-UPDATE-CONFLICT-OLD"
-        assert stored_mapping_for_test(reloaded) == {self.server_key: 42}
+        assert mapping_summary(reloaded) == {self.server_key: {"own": 42}}
 
     def test_update_serial_sets_the_serial_mapping_and_device_type_then_renders_the_row(self):
         from dcim.models import Device, DeviceType
 
         view = self._make_view()
-        target = make_device(
-            "branches-update-serial-target",
-            serial="BRANCHES-UPDATE-SERIAL-OLD",
-            librenms_cf={self.server_key: 42},
+        target = seed_mapping(
+            make_device("branches-update-serial-target", serial="BRANCHES-UPDATE-SERIAL-OLD"), self.server_key, own=42
         )
         reported_type = DeviceType.objects.create(
             manufacturer=target.device_type.manufacturer,
@@ -3742,7 +3723,7 @@ class TestDeviceConflictActionBranches:
         assert reloaded.name == "branches-update-serial-target"
         assert reloaded.serial == "BRANCHES-UPDATE-SERIAL-NEW"
         assert reloaded.device_type_id == reported_type.pk
-        assert stored_mapping_for_test(reloaded) == {self.server_key: 42}
+        assert mapping_summary(reloaded) == {self.server_key: {"own": 42}}
 
     @pytest.mark.parametrize("change", ["hidden-duplicate", "target-serial-changed"])
     @pytest.mark.parametrize("action", ["link", "update", "update_serial"])
@@ -3760,7 +3741,7 @@ class TestDeviceConflictActionBranches:
 
         assert response.headers.get("HX-Reswap") == "none"
         assert f"{target.name}-twin".encode() not in response.content
-        assert stored_mapping_for_test(Device.objects.get(pk=target.pk)) is None
+        assert mapping_summary(Device.objects.get(pk=target.pk)) == {}
 
     def test_a_serial_match_that_still_holds_links_the_device(self):
         from dcim.models import Device
@@ -3773,7 +3754,7 @@ class TestDeviceConflictActionBranches:
         response = post_view(view, self._request("link", target, f"{target.name}-user"), device_id=42)
 
         self._assert_success(response)
-        assert stored_mapping_for_test(Device.objects.get(pk=target.pk)) == {self.server_key: 42}
+        assert mapping_summary(Device.objects.get(pk=target.pk)) == {self.server_key: {"own": 42}}
 
     @pytest.mark.parametrize("action", ["link", "update", "update_serial", "update_type"])
     def test_a_forced_type_change_refuses_when_another_device_then_holds_the_stored_serial(self, action):
@@ -3784,7 +3765,7 @@ class TestDeviceConflictActionBranches:
 
         view = self._make_view()
         tag = f"branches-retype-{action}".replace("_", "-")
-        target = make_device(tag, serial="XABC", librenms_cf={self.server_key: 42})
+        target = seed_mapping(make_device(tag, serial="XABC"), self.server_key, own=42)
         NormalizationRule.objects.create(
             scope="serial", match_pattern=r"^X(AB)C$", replacement=r"\1", manufacturer=target.device_type.manufacturer
         )
@@ -3812,7 +3793,7 @@ class TestDeviceConflictActionBranches:
 
         view = self._make_view()
         tag = f"branches-retype-{shape}"
-        target = make_device(tag, librenms_cf={self.server_key: 42})
+        target = seed_mapping(make_device(tag), self.server_key, own=42)
         new_maker = Manufacturer.objects.create(name=f"Retype {shape}", slug=f"{tag}-maker")
         _retype_shape(target, shape, new_maker)
         new_type = DeviceType.objects.create(
@@ -3835,10 +3816,8 @@ class TestDeviceConflictActionBranches:
         from netbox_librenms_plugin.models import NormalizationRule
 
         view = self._make_view()
-        target = make_device(
-            f"branches-type-serial-{action}".replace("_", "-"),
-            serial="BEFORE123",
-            librenms_cf={self.server_key: 42},
+        target = seed_mapping(
+            make_device(f"branches-type-serial-{action}".replace("_", "-"), serial="BEFORE123"), self.server_key, own=42
         )
         NormalizationRule.objects.create(
             scope="serial",
@@ -3867,10 +3846,10 @@ class TestDeviceConflictActionBranches:
         from dcim.models import Device
 
         view = self._make_view()
-        target = make_device(
-            "branches-update-serial-conflict-target",
-            serial="BRANCHES-UPDATE-SERIAL-CONFLICT-OLD",
-            librenms_cf={self.server_key: 42},
+        target = seed_mapping(
+            make_device("branches-update-serial-conflict-target", serial="BRANCHES-UPDATE-SERIAL-CONFLICT-OLD"),
+            self.server_key,
+            own=42,
         )
         conflict = make_device(
             "branches-update-serial-conflict-owner",
@@ -3896,16 +3875,13 @@ class TestDeviceConflictActionBranches:
         reloaded = Device.objects.get(pk=target.pk)
         assert reloaded.name == "branches-update-serial-conflict-target"
         assert reloaded.serial == "BRANCHES-UPDATE-SERIAL-CONFLICT-OLD"
-        assert stored_mapping_for_test(reloaded) == {self.server_key: 42}
+        assert mapping_summary(reloaded) == {self.server_key: {"own": 42}}
 
     def test_sync_name_sets_the_name_then_renders_the_row(self):
         from dcim.models import Device
 
         view = self._make_view()
-        target = make_device(
-            "branches-sync-name-target",
-            librenms_cf={self.server_key: 42},
-        )
+        target = seed_mapping(make_device("branches-sync-name-target"), self.server_key, own=42)
         self._register_device(42, "branches-sync-name-source")
         request = self._request(
             "sync_name",
@@ -3918,17 +3894,14 @@ class TestDeviceConflictActionBranches:
         self._assert_success(response)
         reloaded = Device.objects.get(pk=target.pk)
         assert reloaded.name == "branches-sync-name-source"
-        assert stored_mapping_for_test(reloaded) == {self.server_key: 42}
+        assert mapping_summary(reloaded) == {self.server_key: {"own": 42}}
 
     @pytest.mark.django_db(transaction=True)
     def test_sync_name_reports_a_real_database_name_collision(self):
         from dcim.models import Device
 
         view = self._make_view()
-        target = make_device(
-            "branches-sync-name-collision-target",
-            librenms_cf={self.server_key: 42},
-        )
+        target = seed_mapping(make_device("branches-sync-name-collision-target"), self.server_key, own=42)
         conflict = make_device("branches-sync-name-collision-owner")
         self._register_device(42, conflict.name)
         request = self._request(
@@ -4260,10 +4233,7 @@ class TestDeviceConflictActionBranches:
         from dcim.models import Device
 
         view = self._make_view()
-        target = make_device(
-            "branches-post-action-missing-target",
-            librenms_cf={self.server_key: 42},
-        )
+        target = seed_mapping(make_device("branches-post-action-missing-target"), self.server_key, own=42)
         self._register_device(42, "branches-post-action-missing-source")
         request = self._request(
             "sync_name",
@@ -4288,7 +4258,7 @@ class TestDeviceConflictActionBranches:
         self._assert_htmx_error(response, "Device not found after action")
         reloaded = Device.objects.get(pk=target.pk)
         assert reloaded.name == "branches-post-action-missing-source"
-        assert stored_mapping_for_test(reloaded) == {self.server_key: 42}
+        assert mapping_summary(reloaded) == {self.server_key: {"own": 42}}
 
 
 @pytest.mark.django_db
@@ -4778,7 +4748,7 @@ class TestAddDeviceTypeMappingIntegration:
         from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
 
         hostname = f"mapping-device-{device_id}"
-        make_device(hostname, librenms_cf={self.server_key: {"id": device_id}})
+        seed_mapping(make_device(hostname), self.server_key, own=device_id)
         libre_device = {
             "device_id": device_id,
             "hardware": hardware,
@@ -4916,7 +4886,7 @@ class TestCreatePlatformAssignmentIndependence:
             yield
 
     def _mapped_device(self, name, device_id=42):
-        device = make_device(name, librenms_cf={self.server_key: {"id": device_id}})
+        device = seed_mapping(make_device(name), self.server_key, own=device_id)
         self.librenms_server.device_info_response(
             device_id=device_id,
             hostname=name,
@@ -5280,7 +5250,7 @@ class TestAddAsOOBViewGenericSentinel:
         """attach_oob must not raise ValueError for oob_type='oob'."""
         from netbox_librenms_plugin.server_mappings import attach_oob
 
-        obj = make_device("generic-oob-storage", librenms_cf={"default": {"id": 10}})
+        obj = seed_mapping(make_device("generic-oob-storage"), "default", own=10)
 
         # Previously this raised ValueError("does not match any known OOB type")
         # → AddAsOOBView returned HTTP 400 "Invalid OOB data: ..."
@@ -5308,7 +5278,7 @@ class TestAddAsOOBViewGenericSentinel:
         # The 'oob' sentinel is REAL production output (verified against _detect_serial_match_role
         # in test_coverage_device_operations.py); here we only assert storage accepts it — no
         # inline reimplementation of the production fallback chain to drift against.
-        obj = make_device("detected-oob-storage", librenms_cf={"default": {"id": 99}})
+        obj = seed_mapping(make_device("detected-oob-storage"), "default", own=99)
 
         entry = attach_oob(obj, "default", 42, oob_type="oob").after.server("default")  # must not raise
         assert (entry.oob_id, entry.oob_type) == (42, "oob")
@@ -5322,7 +5292,7 @@ class TestAttachOOBGenericSentinel:
         """The generic 'oob' sentinel from the promote path's existing_oob_type fallback must not raise in attach_oob."""
         from netbox_librenms_plugin.server_mappings import attach_oob
 
-        obj = make_device("promoted-oob-storage", librenms_cf={"default": {"id": 10}})
+        obj = seed_mapping(make_device("promoted-oob-storage"), "default", own=10)
 
         # 'oob' is the promote path's real `existing_oob_from_name or "oob"` fallback (production
         # output); this asserts only that storage accepts it. Previously the setter raised
@@ -5414,10 +5384,8 @@ class TestAddAsOOBViewPost:
         from django.urls import get_script_prefix
 
         view = self._make_view()
-        existing_device = make_device(
-            "oob-denied-host",
-            serial="OOB-DENIED-SERIAL",
-            librenms_cf={self.server_key: {"id": 10}},
+        existing_device = seed_mapping(
+            make_device("oob-denied-host", serial="OOB-DENIED-SERIAL"), self.server_key, own=10
         )
         self._register_oob_device(17, "oob-denied-controller", serial=existing_device.serial)
         user = make_view_user(
@@ -5446,7 +5414,7 @@ class TestAddAsOOBViewPost:
         assert view_message_texts(request, "error") == ["You do not have permission to perform this action."]
         assert Device.objects.count() == device_count
         reloaded = Device.objects.get(pk=existing_device.pk)
-        assert stored_mapping_for_test(reloaded)[self.server_key] == {"id": 10}
+        assert mapping_summary(reloaded)[self.server_key] == {"own": 10}
 
     def test_invalid_existing_device_id_returns_htmx_error(self):
         """POST with a non-integer existing_device_id returns HTMX error — the failure is the int() conversion, which raises before any ORM lookup, so the manager is never hit."""
@@ -5510,10 +5478,7 @@ class TestAddAsOOBViewPost:
     def test_device_id_mismatch_returns_htmx_error(self):
         """When oob_candidate device pk does not match existing_device_id, returns HTMX error."""
         view = self._make_view()
-        existing_device = make_device(
-            "oob-existing",
-            librenms_cf={self.server_key: {"id": 10}},
-        )
+        existing_device = seed_mapping(make_device("oob-existing"), self.server_key, own=10)
         # The real serial match resolves the OOB candidate to a different device.
         other_device = make_device("oob-other", serial="OOB-MISMATCH-SERIAL")
         self._register_oob_device(50, "oob-other-controller", serial=other_device.serial)
@@ -5575,11 +5540,7 @@ class TestAddAsOOBViewPost:
 
         # Host id 10 is already linked under this test's server key. The OOB-IP sub-flow is skipped because
         # the candidate carries no ip below.
-        existing_device = make_device(
-            "oob-happy",
-            serial="OOB-HAPPY-SERIAL",
-            librenms_cf={self.server_key: {"id": 10}},
-        )
+        existing_device = seed_mapping(make_device("oob-happy", serial="OOB-HAPPY-SERIAL"), self.server_key, own=10)
 
         # Distinct host id (10) vs incoming OOB controller id (17): pins that the *incoming*
         # id lands in oob.id, not a reused host id.
@@ -5601,9 +5562,11 @@ class TestAddAsOOBViewPost:
         # The real attach_oob + _save_device persisted under the active key: reload from
         # the DB and confirm the incoming controller id (17) landed in oob with the generic
         # sentinel type, while the host id (10) is preserved.
-        entry = stored_mapping_for_test(Device.objects.get(pk=existing_device.pk))[self.server_key]
-        assert entry["id"] == 10
-        assert entry["oob"] == {"id": 17, "type": "oob"}
+        assert mapping_summary(Device.objects.get(pk=existing_device.pk))[self.server_key] == {
+            "own": 10,
+            "oob": 17,
+            "oob_type": "oob",
+        }
 
     def test_oob_link_written_to_vc_sync_device_not_selected_member(self):
         """An OOB link matched through a non-sync virtual-chassis member is stored on the resolved sync device."""
@@ -5616,7 +5579,7 @@ class TestAddAsOOBViewPost:
         vc = VirtualChassis.objects.create(name="vc-oob-sync")
         # Sync member: the ONLY member with a host librenms_id for this server key. It is priority 1 of
         # get_librenms_sync_device. Position 1 so it also iterates first.
-        sync_member = make_device("vc-oob-sync-a", librenms_cf={self.server_key: {"id": 10}})
+        sync_member = seed_mapping(make_device("vc-oob-sync-a"), self.server_key, own=10)
         sync_member.virtual_chassis = vc
         sync_member.vc_position = 1
         sync_member.save()
@@ -5650,7 +5613,7 @@ class TestAddAsOOBViewPost:
         sync_reloaded = Device.objects.get(pk=sync_member.pk)
         sync_entry = read_mapping(sync_reloaded).server(self.server_key)
         assert (sync_entry.oob_id, sync_entry.oob_type) == (17, "oob")
-        assert stored_mapping_for_test(sync_reloaded)[self.server_key]["id"] == 10  # host id kept
+        assert read_mapping(sync_reloaded).own_id(self.server_key) == 10  # host id kept
         # The selected non-sync member got NO orphan OOB link written to it.
         assert not read_mapping(Device.objects.get(pk=selected_member.pk)).has_oob(self.server_key)
 
@@ -5659,10 +5622,8 @@ class TestAddAsOOBViewPost:
         from dcim.models import Device
 
         view = self._make_view()
-        existing_device = make_device(
-            "oob-legacy-race",
-            serial="OOB-LEGACY-RACE-SERIAL",
-            librenms_cf={self.server_key: {"id": 10}},
+        existing_device = seed_mapping(
+            make_device("oob-legacy-race", serial="OOB-LEGACY-RACE-SERIAL"), self.server_key, own=10
         )
         self._register_oob_device(17, "controller-node", serial=existing_device.serial, generic=True)
         request = make_view_request(
@@ -5691,8 +5652,8 @@ class TestAddAsOOBViewPost:
 
         _seed_decorated_serial_rule()
         view = self._make_view()
-        existing_device = make_device(
-            f"oob-serial-lost-{change}", serial="OOB-SERIAL-LOST", librenms_cf={self.server_key: {"id": 10}}
+        existing_device = seed_mapping(
+            make_device(f"oob-serial-lost-{change}", serial="OOB-SERIAL-LOST"), self.server_key, own=10
         )
         self._register_oob_device(17, "controller-node", serial=existing_device.serial, generic=True)
         request = make_view_request(
@@ -5706,7 +5667,7 @@ class TestAddAsOOBViewPost:
 
         assert response["HX-Reswap"] == "none"
         assert f"{existing_device.name}-twin".encode() not in response.content
-        assert stored_mapping_for_test(Device.objects.get(pk=existing_device.pk)) == {self.server_key: {"id": 10}}
+        assert mapping_summary(Device.objects.get(pk=existing_device.pk)) == {self.server_key: {"own": 10}}
 
     def test_existing_different_oob_ip_kept_but_user_warned(self):
         """A different existing oob_ip is kept, but a deferred WARNING tells the user it was not changed."""
@@ -5714,11 +5675,7 @@ class TestAddAsOOBViewPost:
 
         view = self._make_view()
         # Real device already carrying an OOB IP (10.50.50.50) on one of its interfaces.
-        existing_device = make_device(
-            "oob-haship",
-            serial="OOB-HAS-IP-SERIAL",
-            librenms_cf={self.server_key: {"id": 10}},
-        )
+        existing_device = seed_mapping(make_device("oob-haship", serial="OOB-HAS-IP-SERIAL"), self.server_key, own=10)
         iface = make_interface(existing_device, "mgmt0")
         existing_ip = make_ip("10.50.50.50/24", assigned_object=iface)
         existing_device.oob_ip = existing_ip
@@ -5744,8 +5701,8 @@ class TestAddAsOOBViewPost:
 
         assert response.status_code == 200
         # The OOB link still committed (the attach itself succeeds)…
-        entry = stored_mapping_for_test(Device.objects.get(pk=existing_device.pk))[self.server_key]
-        assert entry["oob"] == {"id": 17, "type": "oob"}
+        entry = mapping_summary(Device.objects.get(pk=existing_device.pk))[self.server_key]
+        assert (entry["oob"], entry["oob_type"]) == (17, "oob")
         # …the existing oob_ip was NOT overwritten…
         assert Device.objects.get(pk=existing_device.pk).oob_ip_id == existing_ip.pk
         # …and a deferred WARNING naming both the un-applied controller IP and the kept one
@@ -5760,10 +5717,8 @@ class TestAddAsOOBViewPost:
 
         view = self._make_view()
         # Existing OOB IP stored in COMPRESSED IPv6 form.
-        existing_device = make_device(
-            "oob-samehost-v6",
-            serial="OOB-SAME-HOST-V6-SERIAL",
-            librenms_cf={self.server_key: {"id": 10}},
+        existing_device = seed_mapping(
+            make_device("oob-samehost-v6", serial="OOB-SAME-HOST-V6-SERIAL"), self.server_key, own=10
         )
         iface = make_interface(existing_device, "mgmt0")
         existing_ip = make_ip("2001:db8::1/64", assigned_object=iface)
@@ -5801,10 +5756,8 @@ class TestAddAsOOBViewPost:
         from ipam.models import IPAddress
 
         view = self._make_view()
-        existing_device = make_device(
-            f"oob-invalid-ip-{superuser}",
-            serial=f"OOB-INVALID-IP-{superuser}",
-            librenms_cf={self.server_key: {"id": 10}},
+        existing_device = seed_mapping(
+            make_device(f"oob-invalid-ip-{superuser}", serial=f"OOB-INVALID-IP-{superuser}"), self.server_key, own=10
         )
         iface = make_interface(existing_device, "idrac0")
         broadcast = make_ip("198.18.9.255/24")
@@ -5828,8 +5781,8 @@ class TestAddAsOOBViewPost:
         response = post_view(view, request, device_id=17)
 
         assert response.status_code == 200
-        entry = stored_mapping_for_test(Device.objects.get(pk=existing_device.pk))[self.server_key]
-        assert entry["oob"] == {"id": 17, "type": "oob"}
+        entry = mapping_summary(Device.objects.get(pk=existing_device.pk))[self.server_key]
+        assert (entry["oob"], entry["oob_type"]) == (17, "oob")
         assert Device.objects.get(pk=existing_device.pk).oob_ip_id is None
         broadcast.refresh_from_db()
         assert broadcast.assigned_object is None
@@ -5845,11 +5798,7 @@ class TestAddAsOOBViewPost:
         from dcim.models import Device
 
         view = self._make_view()
-        existing_device = make_device(
-            "host-a",
-            serial="OOB-OWNER-RACE-SERIAL",
-            librenms_cf={self.server_key: {"id": 10}},
-        )
+        existing_device = seed_mapping(make_device("host-a", serial="OOB-OWNER-RACE-SERIAL"), self.server_key, own=10)
         # A different real device gains LibreNMS id 17 after validation.
         conflicting_device = make_device("<script>the-idrac</script>")
         self._register_oob_device(17, "controller-node", serial=existing_device.serial, generic=True)
@@ -5863,7 +5812,9 @@ class TestAddAsOOBViewPost:
         )
 
         def claim_incoming_id():
-            seed_stored_mapping_row(conflicting_device, {self.server_key: {"id": 17}})
+            seed_mapping_row(
+                conflicting_device, seed_mapping(type(conflicting_device)(), self.server_key, own=17, save=False)
+            )
 
         response = self._post_after_validation(view, request, 17, claim_incoming_id)
 
@@ -5873,20 +5824,16 @@ class TestAddAsOOBViewPost:
         assert b"already assigned to device &#x27;&lt;script&gt;the-idrac&lt;/script&gt;&#x27;" in response.content
         assert b"&amp;lt;script&amp;gt;" not in response.content
         # Nothing attached: the host device's entry gained no oob sub-block.
-        entry = stored_mapping_for_test(Device.objects.get(pk=existing_device.pk))[self.server_key]
-        assert entry == {"id": 10}
-        conflict_entry = stored_mapping_for_test(Device.objects.get(pk=conflicting_device.pk))[self.server_key]
-        assert conflict_entry == {"id": 17}
+        assert mapping_summary(Device.objects.get(pk=existing_device.pk))[self.server_key] == {"own": 10}
+        assert mapping_summary(Device.objects.get(pk=conflicting_device.pk))[self.server_key] == {"own": 17}
 
     def test_aborts_when_librenms_id_is_owned_by_a_vm(self):
         """An incoming OOB ID owned by a VM must not be attached to a Device."""
         from dcim.models import Device
 
         view = self._make_view()
-        existing_device = make_device(
-            "oob-vm-owner-target",
-            serial="OOB-VM-OWNER-SERIAL",
-            librenms_cf={self.server_key: {"id": 10}},
+        existing_device = seed_mapping(
+            make_device("oob-vm-owner-target", serial="OOB-VM-OWNER-SERIAL"), self.server_key, own=10
         )
         conflicting_vm = make_vm("oob-vm-owner")
         self._register_oob_device(17, "controller-node", serial=existing_device.serial, generic=True)
@@ -5903,26 +5850,21 @@ class TestAddAsOOBViewPost:
         )
 
         def claim_incoming_id():
-            seed_stored_mapping_row(conflicting_vm, {self.server_key: {"id": 17}})
+            seed_mapping_row(conflicting_vm, seed_mapping(type(conflicting_vm)(), self.server_key, own=17, save=False))
 
         response = self._post_after_validation(view, request, 17, claim_incoming_id)
 
         assert response.status_code == 200
         assert response["HX-Reswap"] == "none"
         assert b"already assigned to VM" in response.content
-        entry = stored_mapping_for_test(Device.objects.get(pk=existing_device.pk))[self.server_key]
-        assert entry == {"id": 10}
+        assert mapping_summary(Device.objects.get(pk=existing_device.pk))[self.server_key] == {"own": 10}
 
     def test_aborts_when_incoming_id_is_own_host_id(self):
         """A concurrent re-link could make this device's host id equal the incoming OOB id; attaching it as OOB would store the same id in both slots (self host/OOB conflict)."""
         from dcim.models import Device
 
         view = self._make_view()
-        existing_device = make_device(
-            "host-a",
-            serial="OOB-SELF-RACE-SERIAL",
-            librenms_cf={self.server_key: {"id": 10}},
-        )
+        existing_device = seed_mapping(make_device("host-a", serial="OOB-SELF-RACE-SERIAL"), self.server_key, own=10)
         self._register_oob_device(17, "controller-node", serial=existing_device.serial, generic=True)
         request = make_view_request(
             "post",
@@ -5932,7 +5874,9 @@ class TestAddAsOOBViewPost:
         )
 
         def relink_host_to_incoming_id():
-            seed_stored_mapping_row(existing_device, {self.server_key: {"id": 17}})
+            seed_mapping_row(
+                existing_device, seed_mapping(type(existing_device)(), self.server_key, own=17, save=False)
+            )
 
         response = self._post_after_validation(view, request, 17, relink_host_to_incoming_id)
 
@@ -5940,19 +5884,14 @@ class TestAddAsOOBViewPost:
         assert response["HX-Reswap"] == "none"
         assert b"this device&#x27;s host link" in response.content
         # No oob sub-block was written, and the host id is untouched.
-        entry = stored_mapping_for_test(Device.objects.get(pk=existing_device.pk))[self.server_key]
-        assert entry == {"id": 17}
+        assert mapping_summary(Device.objects.get(pk=existing_device.pk))[self.server_key] == {"own": 17}
 
     def test_aborts_when_locked_oob_type_changed_concurrently(self):
         """Same OOB id already linked, but a concurrent re-detection stored a different type."""
         from dcim.models import Device
 
         view = self._make_view()
-        existing_device = make_device(
-            "host-a",
-            serial="OOB-TYPE-RACE-SERIAL",
-            librenms_cf={self.server_key: {"id": 10}},
-        )
+        existing_device = seed_mapping(make_device("host-a", serial="OOB-TYPE-RACE-SERIAL"), self.server_key, own=10)
         self._register_oob_device(17, "controller-node", serial=existing_device.serial, generic=True)
         request = make_view_request(
             "post",
@@ -5962,7 +5901,10 @@ class TestAddAsOOBViewPost:
         )
 
         def change_oob_type():
-            seed_stored_mapping_row(existing_device, {self.server_key: {"id": 10, "oob": {"id": 17, "type": "ilo"}}})
+            seed_mapping_row(
+                existing_device,
+                seed_mapping(Device(), self.server_key, own=10, oob=17, oob_type="ilo", save=False),
+            )
 
         response = self._post_after_validation(view, request, 17, change_oob_type)
 
@@ -5970,8 +5912,11 @@ class TestAddAsOOBViewPost:
         assert response["HX-Reswap"] == "none"
         assert b"modified concurrently" in response.content
         # The stored type is preserved (not overwritten with the stale modal's "oob").
-        oob = stored_mapping_for_test(Device.objects.get(pk=existing_device.pk))[self.server_key]["oob"]
-        assert oob == {"id": 17, "type": "ilo"}
+        assert mapping_summary(Device.objects.get(pk=existing_device.pk))[self.server_key] == {
+            "own": 10,
+            "oob": 17,
+            "oob_type": "ilo",
+        }
 
 
 @pytest.mark.django_db
@@ -6058,10 +6003,8 @@ class TestPromoteToHostViewPost:
         from django.urls import get_script_prefix
 
         view = self._make_view()
-        existing_device = make_device(
-            "promote-denied-controller",
-            serial="PROMOTE-DENIED-SERIAL",
-            librenms_cf={self.server_key: {"id": 10}},
+        existing_device = seed_mapping(
+            make_device("promote-denied-controller", serial="PROMOTE-DENIED-SERIAL"), self.server_key, own=10
         )
         self._register_host_device(17, "promote-denied-host", serial=existing_device.serial)
         user = make_view_user(
@@ -6090,7 +6033,7 @@ class TestPromoteToHostViewPost:
         assert view_message_texts(request, "error") == ["You do not have permission to perform this action."]
         assert Device.objects.count() == device_count
         reloaded = Device.objects.get(pk=existing_device.pk)
-        assert stored_mapping_for_test(reloaded)[self.server_key] == {"id": 10}
+        assert mapping_summary(reloaded)[self.server_key] == {"own": 10}
 
     def test_no_promote_candidate_returns_htmx_error(self):
         """When validation has no promote_to_host, the endpoint reports promotion N/A."""
@@ -6113,14 +6056,9 @@ class TestPromoteToHostViewPost:
     def test_device_id_mismatch_returns_htmx_error(self):
         """When the validation's existing_device pk does not match the posted existing_device_id, the view rejects the stale modal."""
         view = self._make_view()
-        existing_device = make_device(
-            "promote-existing",
-            librenms_cf={self.server_key: {"id": 20}},
-        )
-        other_device = make_device(
-            "promote-other-controller",
-            serial="PROMOTE-MISMATCH-SERIAL",
-            librenms_cf={self.server_key: {"id": 10}},
+        existing_device = seed_mapping(make_device("promote-existing"), self.server_key, own=20)
+        other_device = seed_mapping(
+            make_device("promote-other-controller", serial="PROMOTE-MISMATCH-SERIAL"), self.server_key, own=10
         )
         self._register_host_device(17, "promote-other-host", serial=other_device.serial)
         request = make_view_request(
@@ -6161,10 +6099,8 @@ class TestPromoteToHostViewPost:
         from dcim.models import Device
 
         view = self._make_view()
-        existing_device = make_device(
-            "promote-src-controller",
-            serial="PROMOTE-CONFLICT-RACE-SERIAL",
-            librenms_cf={self.server_key: {"id": 10}},
+        existing_device = seed_mapping(
+            make_device("promote-src-controller", serial="PROMOTE-CONFLICT-RACE-SERIAL"), self.server_key, own=10
         )
         conflicting_device = make_device("<script>promote-conflict</script>")
         self._register_host_device(17, "promote-src-host", serial=existing_device.serial)
@@ -6176,7 +6112,9 @@ class TestPromoteToHostViewPost:
         )
 
         def claim_incoming_id():
-            seed_stored_mapping_row(conflicting_device, {self.server_key: {"id": 17}})
+            seed_mapping_row(
+                conflicting_device, seed_mapping(type(conflicting_device)(), self.server_key, own=17, save=False)
+            )
 
         response = self._post_after_validation(view, request, 17, claim_incoming_id)
 
@@ -6186,17 +6124,15 @@ class TestPromoteToHostViewPost:
         assert b"&amp;lt;script&amp;gt;" not in response.content
         # The source device must be left unchanged (still host id 10, no OOB).
         existing_device.refresh_from_db()
-        assert stored_mapping_for_test(existing_device)[self.server_key] == {"id": 10}
+        assert mapping_summary(existing_device)[self.server_key] == {"own": 10}
         conflicting_device.refresh_from_db()
-        assert stored_mapping_for_test(conflicting_device)[self.server_key] == {"id": 17}
+        assert mapping_summary(conflicting_device)[self.server_key] == {"own": 17}
 
     def test_promote_rejected_when_a_vm_claimed_the_host_id_after_validation(self):
         """A VM claim created after validation must block the Device promotion."""
         view = self._make_view()
-        existing_device = make_device(
-            "promote-vm-conflict-controller",
-            serial="PROMOTE-VM-CONFLICT-SERIAL",
-            librenms_cf={self.server_key: {"id": 10}},
+        existing_device = seed_mapping(
+            make_device("promote-vm-conflict-controller", serial="PROMOTE-VM-CONFLICT-SERIAL"), self.server_key, own=10
         )
         conflicting_vm = make_vm("promote-vm-conflict-owner")
         self._register_host_device(17, "promote-vm-conflict-host", serial=existing_device.serial)
@@ -6208,7 +6144,7 @@ class TestPromoteToHostViewPost:
         )
 
         def claim_incoming_id():
-            seed_stored_mapping_row(conflicting_vm, {self.server_key: {"id": 17}})
+            seed_mapping_row(conflicting_vm, seed_mapping(type(conflicting_vm)(), self.server_key, own=17, save=False))
 
         response = self._post_after_validation(view, request, 17, claim_incoming_id)
 
@@ -6216,7 +6152,7 @@ class TestPromoteToHostViewPost:
         assert response["HX-Reswap"] == "none"
         assert b"already assigned to VM" in response.content
         existing_device.refresh_from_db()
-        assert stored_mapping_for_test(existing_device)[self.server_key] == {"id": 10}
+        assert mapping_summary(existing_device)[self.server_key] == {"own": 10}
 
     def test_happy_path_generic_oob_sentinel_promotes_and_demotes_link(self):
         """End-to-end VIEW-level regression for issue #89: POST to PromoteToHostView with the generic 'oob' sentinel as the existing controller type."""
@@ -6225,10 +6161,8 @@ class TestPromoteToHostViewPost:
         view = self._make_view()
         # Existing device is currently linked to LibreNMS id 10 (the controller, occupying the
         # host slot pre-promote); the incoming real host is id 17.
-        existing_device = make_device(
-            "promote-happy",
-            serial="PROMOTE-HAPPY-SERIAL",
-            librenms_cf={self.server_key: {"id": 10}},
+        existing_device = seed_mapping(
+            make_device("promote-happy", serial="PROMOTE-HAPPY-SERIAL"), self.server_key, own=10
         )
         self._register_host_device(17, "promote-happy-host", serial=existing_device.serial)
         request = make_view_request(
@@ -6247,9 +6181,11 @@ class TestPromoteToHostViewPost:
 
         # Reload from the DB: host id swapped to 17, previous link (10) demoted to the OOB
         # slot with the generic sentinel type.
-        entry = stored_mapping_for_test(Device.objects.get(pk=existing_device.pk))[self.server_key]
-        assert entry["id"] == 17
-        assert entry["oob"] == {"id": 10, "type": "oob"}
+        assert mapping_summary(Device.objects.get(pk=existing_device.pk))[self.server_key] == {
+            "own": 17,
+            "oob": 10,
+            "oob_type": "oob",
+        }
 
     @pytest.mark.parametrize("change", ["hidden-duplicate", "target-serial-changed"])
     def test_a_serial_match_that_no_longer_holds_under_the_lock_refuses_the_promotion(self, change):
@@ -6257,8 +6193,8 @@ class TestPromoteToHostViewPost:
 
         _seed_decorated_serial_rule()
         view = self._make_view()
-        existing_device = make_device(
-            f"promote-serial-lost-{change}", serial="PROMOTE-SERIAL-LOST", librenms_cf={self.server_key: {"id": 10}}
+        existing_device = seed_mapping(
+            make_device(f"promote-serial-lost-{change}", serial="PROMOTE-SERIAL-LOST"), self.server_key, own=10
         )
         self._register_host_device(17, f"promote-serial-lost-{change}-host", serial=existing_device.serial)
         request = make_view_request(
@@ -6272,17 +6208,15 @@ class TestPromoteToHostViewPost:
 
         assert response["HX-Reswap"] == "none"
         assert f"{existing_device.name}-twin".encode() not in response.content
-        assert stored_mapping_for_test(Device.objects.get(pk=existing_device.pk)) == {self.server_key: {"id": 10}}
+        assert mapping_summary(Device.objects.get(pk=existing_device.pk)) == {self.server_key: {"own": 10}}
 
     def test_override_platform_manufacturer_mismatch_rejected(self):
         """An override platform whose manufacturer differs from the device type's is rejected (update_fields skips full_clean, so the cross-field invariant is enforced explicitly), and nothing is committed."""
         from dcim.models import Device, Manufacturer, Platform
 
         view = self._make_view()
-        existing_device = make_device(
-            "promote-badplat",
-            serial="PROMOTE-BAD-PLATFORM-SERIAL",
-            librenms_cf={self.server_key: {"id": 10}},
+        existing_device = seed_mapping(
+            make_device("promote-badplat", serial="PROMOTE-BAD-PLATFORM-SERIAL"), self.server_key, own=10
         )
         # A platform under a DIFFERENT manufacturer than the device's device_type.
         other_mfr, _ = Manufacturer.objects.get_or_create(name="OtherMfr-3001", slug="othermfr-3001")
@@ -6312,17 +6246,15 @@ class TestPromoteToHostViewPost:
         assert b"update the platform first" in response.content
         reloaded = Device.objects.get(pk=existing_device.pk)
         assert reloaded.platform_id is None  # the bad override was never persisted
-        assert stored_mapping_for_test(reloaded)[self.server_key] == {"id": 10}  # host swap not committed
+        assert mapping_summary(reloaded)[self.server_key] == {"own": 10}  # host swap not committed
 
     def test_aborts_when_incoming_host_id_owned_by_another_device(self):
         """The incoming host id must not already belong to another NetBox device."""
         from dcim.models import Device
 
         view = self._make_view()
-        existing_device = make_device(
-            "promote-host-controller",
-            serial="PROMOTE-OWNER-RACE-SERIAL",
-            librenms_cf={self.server_key: {"id": 10}},
+        existing_device = seed_mapping(
+            make_device("promote-host-controller", serial="PROMOTE-OWNER-RACE-SERIAL"), self.server_key, own=10
         )
         # A different real device gains LibreNMS id 17 after validation.
         conflicting_device = make_device("promote-thief")
@@ -6335,7 +6267,9 @@ class TestPromoteToHostViewPost:
         )
 
         def claim_incoming_id():
-            seed_stored_mapping_row(conflicting_device, {self.server_key: {"id": 17}})
+            seed_mapping_row(
+                conflicting_device, seed_mapping(type(conflicting_device)(), self.server_key, own=17, save=False)
+            )
 
         response = self._post_after_validation(view, request, 17, claim_incoming_id)
 
@@ -6343,10 +6277,8 @@ class TestPromoteToHostViewPost:
         assert response["HX-Reswap"] == "none"
         assert b"already assigned to device &#x27;promote-thief&#x27;" in response.content
         # Nothing committed: the host slot is unchanged and no OOB slot was written.
-        entry = stored_mapping_for_test(Device.objects.get(pk=existing_device.pk))[self.server_key]
-        assert entry == {"id": 10}
-        conflict_entry = stored_mapping_for_test(Device.objects.get(pk=conflicting_device.pk))[self.server_key]
-        assert conflict_entry == {"id": 17}
+        assert mapping_summary(Device.objects.get(pk=existing_device.pk))[self.server_key] == {"own": 10}
+        assert mapping_summary(Device.objects.get(pk=conflicting_device.pk))[self.server_key] == {"own": 17}
 
 
 @pytest.mark.django_db
@@ -6444,8 +6376,8 @@ class TestMergeNetBoxDevicesViewOOBTransfer(_MergeViewHarness):
         from dcim.models import Device
         from netbox_librenms_plugin.tests.conftest import ip_on
 
-        winner = make_device("merge-winner", librenms_cf={self.server_key: {"id": 20}})
-        donor = make_device("merge-donor", librenms_cf={self.server_key: {"id": 10}})
+        winner = seed_mapping(make_device("merge-winner"), self.server_key, own=20)
+        donor = seed_mapping(make_device("merge-donor"), self.server_key, own=10)
 
         # The donor carries an oob_ip whose underlying IP is assigned to an interface
         # owned by whichever device the scenario dictates. save() (not full_clean) lets
@@ -6478,8 +6410,8 @@ class TestMergeNetBoxDevicesViewOOBTransfer(_MergeViewHarness):
 
         from netbox_librenms_plugin.tests.conftest import ip_on
 
-        winner = make_device("merge-winner-lock", librenms_cf={self.server_key: {"id": 20}})
-        donor = make_device("merge-donor-lock", librenms_cf={self.server_key: {"id": 10}})
+        winner = seed_mapping(make_device("merge-winner-lock"), self.server_key, own=20)
+        donor = seed_mapping(make_device("merge-donor-lock"), self.server_key, own=10)
         oob_ip = ip_on(winner, "192.0.2.9/32", "mgmt0")  # IP on a WINNER interface → transfer path runs
         donor.oob_ip = oob_ip
         donor.save()
@@ -6505,8 +6437,8 @@ class TestMergeNetBoxDevicesViewOOBTransfer(_MergeViewHarness):
         from django.db import IntegrityError
         from netbox_librenms_plugin.tests.conftest import ip_on
 
-        winner = make_device("merge-winner-fail", librenms_cf={self.server_key: {"id": 20}})
-        donor = make_device("merge-donor-fail", librenms_cf={self.server_key: {"id": 10}})
+        winner = seed_mapping(make_device("merge-winner-fail"), self.server_key, own=20)
+        donor = seed_mapping(make_device("merge-donor-fail"), self.server_key, own=10)
         # oob_ip on a winner-owned interface → the transfer path runs (oob_ip in update_fields).
         oob_ip = ip_on(winner, "192.0.2.8/32", "mgmt0")
         donor.oob_ip = oob_ip
@@ -6537,17 +6469,15 @@ class TestMergeNetBoxDevicesViewOOBTransfer(_MergeViewHarness):
         winner.refresh_from_db()
         assert donor.oob_ip_id == oob_ip.pk
         assert winner.oob_ip_id is None
-        entry = stored_mapping_for_test(donor)[self.server_key]
-        assert entry == {"id": 10}
-        assert "_migrated_to" not in entry
+        assert mapping_summary(donor)[self.server_key] == {"own": 10}
 
     def test_transfer_survives_interface_move_onto_winner_between_read_and_lock(self, monkeypatch):
         """A concurrent interface move ONTO the winner, landing between the assigned_object read and the interface lock, must not spuriously fail the merge: the locked IP's GFK cache is refreshed to the freshly-locked (winner-owned) interface before set_device_ip_fk re-checks ownership."""
         from dcim.models import Interface
         from netbox_librenms_plugin.tests.conftest import ip_on
 
-        winner = make_device("merge-winner-race", librenms_cf={self.server_key: {"id": 20}})
-        donor = make_device("merge-donor-race", librenms_cf={self.server_key: {"id": 10}})
+        winner = seed_mapping(make_device("merge-winner-race"), self.server_key, own=20)
+        donor = seed_mapping(make_device("merge-donor-race"), self.server_key, own=10)
         # The IP starts on a DONOR interface, so the merge's assigned_object read caches device_id=donor.
         oob_ip = ip_on(donor, "192.0.2.11/32", "mgmt0")
         donor.oob_ip = oob_ip
@@ -6587,7 +6517,7 @@ class TestMergeNetBoxDevicesViewOOBTransfer(_MergeViewHarness):
         assert state["moved"], "the injected interface move never fired — test wiring is stale"
 
 
-def _two_member_vc(name, *, m1_cf=None, m2_cf=None):
+def _two_member_vc(name, *, m1_cf=None):
     """Create a real 2-member VirtualChassis (positions 1, 2). m1 becomes the sync device when it is the member holding the ``librenms_id``."""
     from dcim.models import VirtualChassis
 
@@ -6596,7 +6526,7 @@ def _two_member_vc(name, *, m1_cf=None, m2_cf=None):
     m1.virtual_chassis = vc
     m1.vc_position = 1
     m1.save()
-    m2 = make_device(f"{name}-m2", librenms_cf=m2_cf)
+    m2 = make_device(f"{name}-m2")
     m2.virtual_chassis = vc
     m2.vc_position = 2
     m2.save()
@@ -6614,48 +6544,50 @@ class TestMergeNetBoxDevicesViewVCSyncDevice(_MergeViewHarness):
 
     def _entry(self, device):
         device.refresh_from_db()
-        return (stored_mapping_for_test(device) or {}).get(self.server_key) or {}
+        return mapping_summary(device).get(self.server_key, {})
 
     def test_winner_is_non_sync_vc_member_link_lands_on_sync_device(self):
         """Winner is a non-sync VC member whose sync sibling already holds a host id; the donor's id must merge onto the sync sibling (into its OOB half) and NEVER onto the raw winner member — otherwise two members of one chassis hold ``librenms_id`` (split brain)."""
-        _vc, m1, m2 = _two_member_vc("mrg-vc-win", m1_cf={self.server_key: {"id": 30}}, m2_cf=None)
-        donor = make_device("mrg-vc-win-donor", librenms_cf={self.server_key: {"id": 40}})
+        _vc, m1, m2 = _two_member_vc("mrg-vc-win")
+        seed_mapping(m1, self.server_key, own=30)
+        donor = seed_mapping(make_device("mrg-vc-win-donor"), self.server_key, own=40)
 
         self._run_merge(winner=m2, donor=donor)
 
         # The raw non-sync winner member must stay clean — no host id planted on it.
-        assert "id" not in self._entry(m2), "non-sync VC member must not receive the merged host id (split brain)"
+        assert "own" not in self._entry(m2), "non-sync VC member must not receive the merged host id (split brain)"
         # The VC's sync device keeps its own id and absorbs the donor's id into its OOB slot.
         m1_entry = self._entry(m1)
-        assert m1_entry.get("id") == 30
-        assert (m1_entry.get("oob") or {}).get("id") == 40, "donor id should merge onto the sync device's OOB slot"
+        assert m1_entry.get("own") == 30
+        assert m1_entry.get("oob") == 40, "donor id should merge onto the sync device's OOB slot"
         # Donor cleared + marked migrated toward the sync device (the real link holder).
         donor_entry = self._entry(donor)
-        assert "id" not in donor_entry
-        assert donor_entry.get("_migrated_to", {}).get("device_id") == m1.pk
+        assert "own" not in donor_entry
+        assert donor_entry.get("migrated_to") == m1.pk
 
     def test_donor_is_non_sync_vc_member_clears_link_on_sync_device(self):
         """Donor is a non-sync VC member; its real link lives on the sync sibling. The merge must read + clear that sibling's link (and mark IT migrated), not the empty selected member — otherwise the source VC stays linked to LibreNMS."""
-        _vc, m1, m2 = _two_member_vc("mrg-vc-don", m1_cf={self.server_key: {"id": 30}}, m2_cf=None)
-        winner = make_device("mrg-vc-don-winner", librenms_cf={self.server_key: {"id": 50}})
+        _vc, m1, m2 = _two_member_vc("mrg-vc-don")
+        seed_mapping(m1, self.server_key, own=30)
+        winner = seed_mapping(make_device("mrg-vc-don-winner"), self.server_key, own=50)
 
         self._run_merge(winner=winner, donor=m2)
 
         # The donor VC's sync sibling holds the real link: it must be absorbed and cleared + marked.
         m1_entry = self._entry(m1)
-        assert "id" not in m1_entry, "the donor VC's sync device must be cleared, not left linked to LibreNMS"
-        assert m1_entry.get("_migrated_to", {}).get("device_id") == winner.pk
+        assert "own" not in m1_entry, "the donor VC's sync device must be cleared, not left linked to LibreNMS"
+        assert m1_entry.get("migrated_to") == winner.pk
         # Winner absorbed the sync sibling's id into its OOB slot (winner already had a host id).
         winner_entry = self._entry(winner)
-        assert winner_entry.get("id") == 50
-        assert (winner_entry.get("oob") or {}).get("id") == 30
+        assert winner_entry.get("own") == 50
+        assert winner_entry.get("oob") == 30
         # The raw selected member (m2) never held a link; nothing is planted on it.
-        assert "id" not in self._entry(m2)
+        assert "own" not in self._entry(m2)
 
     def test_legacy_id_on_donor_sync_sibling_gets_convert_first_message(self):
         """A legacy link on the donor's sync sibling gets the friendly convert-first message."""
-        _vc, _sync_member, selected_member = _two_member_vc("mrg-vc-legacy", m1_cf=30, m2_cf=None)
-        winner = make_device("mrg-vc-legacy-winner", librenms_cf={self.server_key: {"id": 50}})
+        _vc, _sync_member, selected_member = _two_member_vc("mrg-vc-legacy", m1_cf=30)
+        winner = seed_mapping(make_device("mrg-vc-legacy-winner"), self.server_key, own=50)
 
         response = self._run_merge(winner=winner, donor=selected_member)
 
@@ -6669,13 +6601,15 @@ class TestMergeNetBoxDevicesViewVCSyncDevice(_MergeViewHarness):
         from django.db import connection
         from django.test.utils import CaptureQueriesContext
 
-        vc, m1, m2 = _two_member_vc("mrg-vc-lock", m1_cf={self.server_key: {"id": 30}}, m2_cf=None)
+        vc, m1, m2 = _two_member_vc("mrg-vc-lock")
+
+        seed_mapping(m1, self.server_key, own=30)
         # A bystander member: not the selected winner (m2) and not the sync device (m1).
-        m3 = make_device("mrg-vc-lock-m3", librenms_cf=None)
+        m3 = make_device("mrg-vc-lock-m3")
         m3.virtual_chassis = vc
         m3.vc_position = 3
         m3.save()
-        donor = make_device("mrg-vc-lock-donor", librenms_cf={self.server_key: {"id": 40}})
+        donor = seed_mapping(make_device("mrg-vc-lock-donor"), self.server_key, own=40)
 
         with CaptureQueriesContext(connection) as ctx:
             self._run_merge(winner=m2, donor=donor)
@@ -6707,9 +6641,9 @@ class TestMergeNetBoxDevicesViewFailClosed(_MergeViewHarness):
 
         from netbox_librenms_plugin.transactions import classify_conflict
 
-        winner = make_device("merge-lock-winner", librenms_cf={self.server_key: {"id": 20}})
+        winner = seed_mapping(make_device("merge-lock-winner"), self.server_key, own=20)
         # A serial of its own, so the harness writes nothing while the donor row is locked.
-        donor = make_device("merge-lock-donor", serial="MERGE-LOCK-DONOR", librenms_cf={self.server_key: {"id": 10}})
+        donor = seed_mapping(make_device("merge-lock-donor", serial="MERGE-LOCK-DONOR"), self.server_key, own=10)
 
         with second_connection() as other:
             lock_row(other, Device, donor.pk)
@@ -6718,7 +6652,7 @@ class TestMergeNetBoxDevicesViewFailClosed(_MergeViewHarness):
 
         assert classify_conflict(caught.value)
         donor.refresh_from_db()
-        assert stored_mapping_for_test(donor)[self.server_key] == {"id": 10}
+        assert mapping_summary(donor)[self.server_key] == {"own": 10}
 
     @pytest.mark.parametrize("change", ["hidden-duplicate", "target-serial-changed"])
     def test_a_serial_peer_that_no_longer_holds_under_the_lock_refuses_the_merge(self, change):
@@ -6726,27 +6660,21 @@ class TestMergeNetBoxDevicesViewFailClosed(_MergeViewHarness):
         from dcim.models import Device
 
         _seed_decorated_serial_rule()
-        winner = make_device(f"merge-serial-lost-{change}-winner", librenms_cf={self.server_key: {"id": 20}})
-        donor = make_device(
-            f"merge-serial-lost-{change}-donor", serial="MERGE-SERIAL-LOST", librenms_cf={self.server_key: {"id": 10}}
+        winner = seed_mapping(make_device(f"merge-serial-lost-{change}-winner"), self.server_key, own=20)
+        donor = seed_mapping(
+            make_device(f"merge-serial-lost-{change}-donor", serial="MERGE-SERIAL-LOST"), self.server_key, own=10
         )
 
         resp = self._post_merge(winner, donor, after_validation=_serial_match_lost(donor, change))
 
         assert resp["HX-Reswap"] == "none"
         assert f"{donor.name}-twin".encode() not in resp.content
-        assert stored_mapping_for_test(Device.objects.get(pk=donor.pk))[self.server_key] == {"id": 10}
+        assert mapping_summary(Device.objects.get(pk=donor.pk))[self.server_key] == {"own": 10}
 
     def test_orphan_host_id_merge_fails_closed_and_leaves_donor_unmigrated(self):
         """A winner holding both host id + oob and a donor with a distinct host-id-only link fails closed."""
-        winner = make_device(
-            "merge-orphan-winner",
-            librenms_cf={self.server_key: {"id": 100, "oob": {"id": 50, "type": "idrac"}}},
-        )
-        donor = make_device(
-            "<script>merge-orphan-donor</script>",
-            librenms_cf={self.server_key: {"id": 200}},
-        )
+        winner = seed_mapping(make_device("merge-orphan-winner"), self.server_key, own=100, oob=50, oob_type="idrac")
+        donor = seed_mapping(make_device("<script>merge-orphan-donor</script>"), self.server_key, own=200)
 
         resp = self._post_merge(winner, donor)
 
@@ -6757,16 +6685,11 @@ class TestMergeNetBoxDevicesViewFailClosed(_MergeViewHarness):
         assert b"&amp;lt;script&amp;gt;" not in resp.content
         # Donor's link is preserved and it was NOT marked migrated (no orphaned LibreNMS host).
         donor.refresh_from_db()
-        entry = stored_mapping_for_test(donor)[self.server_key]
-        assert entry == {"id": 200}
-        assert "_migrated_to" not in entry
+        assert mapping_summary(donor)[self.server_key] == {"own": 200}
 
     def test_corrupt_donor_oob_id_with_winner_oob_fails_closed_not_500(self):
         """A donor oob id the link merge skipped (winner already has an oob) fails closed at the marker, not a 500."""
-        winner = make_device(
-            "merge-f2-winner",
-            librenms_cf={self.server_key: {"id": 5, "oob": {"id": 9, "type": "idrac"}}},
-        )
+        winner = seed_mapping(make_device("merge-f2-winner"), self.server_key, own=5, oob=9, oob_type="idrac")
         # Same host id (so the orphan guard doesn't fire) but a corrupt donor oob id. Because the
         # winner already holds an oob, the link merge skips validating the donor oob id; the
         # donor's migration marker is the one that rejects it, and that refusal must be guarded too.
@@ -6789,8 +6712,8 @@ class TestMergeNetBoxDevicesViewFailClosed(_MergeViewHarness):
         """The donor saves first; when the winner's save refuses, the whole group rolls back and the refusal shows."""
         from django.db import IntegrityError, connection
 
-        winner = make_device("merge-refused-winner", librenms_cf={self.server_key: {"id": 20}})
-        donor = make_device("merge-refused-donor", librenms_cf={self.server_key: {"id": 10}})
+        winner = seed_mapping(make_device("merge-refused-winner"), self.server_key, own=20)
+        donor = seed_mapping(make_device("merge-refused-donor"), self.server_key, own=10)
 
         def refuse_the_winner_update(execute, sql, params, many, context):
             # A database refusal is not reproducible here without a second writer; inject it at the statement.
@@ -6806,16 +6729,16 @@ class TestMergeNetBoxDevicesViewFailClosed(_MergeViewHarness):
         assert b"integrity constraint" in resp.content
         donor.refresh_from_db()
         winner.refresh_from_db()
-        assert stored_mapping_for_test(donor) == {self.server_key: {"id": 10}}
-        assert stored_mapping_for_test(winner) == {self.server_key: {"id": 20}}
+        assert mapping_summary(donor) == {self.server_key: {"own": 10}}
+        assert mapping_summary(winner) == {self.server_key: {"own": 20}}
 
     def test_oob_transfer_valueerror_fails_closed_and_rolls_back(self, monkeypatch):
         """A ValueError from the oob_ip transfer (the TOCTOU race the lock guards) fails closed with rollback, not a 500."""
         import netbox_librenms_plugin.views.imports.actions as actions_mod
         from netbox_librenms_plugin.tests.conftest import ip_on
 
-        winner = make_device("merge-f5-winner", librenms_cf={self.server_key: {"id": 20}})
-        donor = make_device("merge-f5-donor", librenms_cf={self.server_key: {"id": 10}})
+        winner = seed_mapping(make_device("merge-f5-winner"), self.server_key, own=20)
+        donor = seed_mapping(make_device("merge-f5-donor"), self.server_key, own=10)
         oob_ip = ip_on(winner, "192.0.2.11/32", "mgmt0")  # IP on a WINNER interface → transfer path runs
         donor.oob_ip = oob_ip
         donor.save()
@@ -6841,9 +6764,7 @@ class TestMergeNetBoxDevicesViewFailClosed(_MergeViewHarness):
         winner.refresh_from_db()
         assert donor.oob_ip_id == oob_ip.pk
         assert winner.oob_ip_id is None
-        entry = stored_mapping_for_test(donor)[self.server_key]
-        assert entry == {"id": 10}
-        assert "_migrated_to" not in entry
+        assert mapping_summary(donor)[self.server_key] == {"own": 10}
 
     def test_oob_ip_lock_database_error_fails_closed_without_leaking_backend_text(self, monkeypatch):
         """A DB failure while acquiring the OOB-IP lock returns a safe toast and rolls back."""
@@ -6852,8 +6773,8 @@ class TestMergeNetBoxDevicesViewFailClosed(_MergeViewHarness):
         from ipam.models import IPAddress
         from netbox_librenms_plugin.tests.conftest import ip_on
 
-        winner = make_device("merge-db-lock-winner", librenms_cf={self.server_key: {"id": 20}})
-        donor = make_device("merge-db-lock-donor", librenms_cf={self.server_key: {"id": 10}})
+        winner = seed_mapping(make_device("merge-db-lock-winner"), self.server_key, own=20)
+        donor = seed_mapping(make_device("merge-db-lock-donor"), self.server_key, own=10)
         oob_ip = ip_on(winner, "192.0.2.12/32", "mgmt0")
         donor.oob_ip = oob_ip
         donor.save()
@@ -6872,15 +6793,15 @@ class TestMergeNetBoxDevicesViewFailClosed(_MergeViewHarness):
         winner.refresh_from_db()
         assert donor.oob_ip_id == oob_ip.pk
         assert winner.oob_ip_id is None
-        assert stored_mapping_for_test(donor)[self.server_key] == {"id": 10}
+        assert mapping_summary(donor)[self.server_key] == {"own": 10}
 
     def test_device_lock_database_error_fails_closed_without_leaking_backend_text(self, monkeypatch):
         """A DB failure while locking the merge pair returns a safe retry toast, not a 500."""
         from dcim.models import Device
         from django.db import DatabaseError
 
-        winner = make_device("merge-device-lock-winner", librenms_cf={self.server_key: {"id": 20}})
-        donor = make_device("merge-device-lock-donor", librenms_cf={self.server_key: {"id": 10}})
+        winner = seed_mapping(make_device("merge-device-lock-winner"), self.server_key, own=20)
+        donor = seed_mapping(make_device("merge-device-lock-donor"), self.server_key, own=10)
 
         def fail_device_lock():
             raise DatabaseError("forced primary lock timeout with backend detail")
@@ -6894,8 +6815,8 @@ class TestMergeNetBoxDevicesViewFailClosed(_MergeViewHarness):
         assert b"forced primary lock timeout" not in resp.content
         donor.refresh_from_db()
         winner.refresh_from_db()
-        assert stored_mapping_for_test(donor)[self.server_key] == {"id": 10}
-        assert stored_mapping_for_test(winner)[self.server_key] == {"id": 20}
+        assert mapping_summary(donor)[self.server_key] == {"own": 10}
+        assert mapping_summary(winner)[self.server_key] == {"own": 20}
 
 
 @pytest.mark.django_db
@@ -7713,14 +7634,8 @@ class TestBuildIdServerInfoRejectsNonPositiveIds:
         from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
 
         device = make_device("idsrv-oob")
-        seed_stored_mapping(
-            device,
-            {
-                "host_srv": {"id": 10},
-                "oob_srv": {"oob": {"id": 99}},  # OOB-only link: no host "id"
-            },
-            save=True,
-        )
+        seed_mapping(device, "host_srv", own=10, save=False)
+        seed_mapping(device, "oob_srv", oob=99)  # OOB-only link: no host id
 
         result = DeviceValidationDetailsView._build_id_server_info(device)
 
@@ -7813,7 +7728,7 @@ class TestMappingChangeScope:
 
     def _register_device(self, name, *, hardware="Mapping Scope Hardware", os="mapping-scope-os"):
         device_id = 73
-        target = make_device(name, librenms_cf={self.server_key: {"id": device_id}})
+        target = seed_mapping(make_device(name), self.server_key, own=device_id)
         self.librenms_server.device_info_response(
             device_id=device_id,
             hostname=name,
@@ -8388,7 +8303,7 @@ class TestConflictActionsObjectScope:
             assert str(conflict.pk) not in body
             assert "already assigned to another object outside your view scope" in body
         target.refresh_from_db()
-        assert not stored_mapping_for_test(target)
+        assert mapping_summary(target) == {}
 
     def _post_add_as_oob(self, user, target, ip="", extra_post=None):
         """Drive OOB attachment through real HTTP validation and object permissions."""
@@ -8456,7 +8371,7 @@ class TestConflictActionsObjectScope:
             assert str(conflict.pk) not in body
             assert "already assigned to another object outside your view scope" in body
         target.refresh_from_db()
-        assert not stored_mapping_for_test(target)
+        assert mapping_summary(target) == {}
 
     def test_conflict_action_cannot_link_an_out_of_scope_device(self):
         """A pk-constrained change_device grant clears the model-level gate but must not link a device outside its scope."""
@@ -8469,7 +8384,7 @@ class TestConflictActionsObjectScope:
         response = self._post_conflict(user, out_of_scope)
 
         assert b"Existing device not found" in response.content
-        assert stored_mapping_for_test(Device.objects.get(pk=out_of_scope.pk)) is None
+        assert mapping_summary(Device.objects.get(pk=out_of_scope.pk)) == {}
 
     def test_conflict_action_still_links_the_in_scope_device(self):
         """The device the grant DOES cover resolves through the restricted lookup (no over-block)."""
@@ -8481,7 +8396,7 @@ class TestConflictActionsObjectScope:
         response = self._post_conflict(user, in_scope)
 
         assert b"Existing device not found" not in response.content
-        assert stored_mapping_for_test(Device.objects.get(pk=in_scope.pk))["default"] == 4242
+        assert mapping_summary(Device.objects.get(pk=in_scope.pk))["default"] == {"own": 4242}
 
     def test_add_as_oob_cannot_attach_to_an_out_of_scope_device(self):
         """AddAsOOB must object-scope its target too: a constrained grant cannot attach an OOB link elsewhere."""
@@ -8494,7 +8409,7 @@ class TestConflictActionsObjectScope:
         response = self._post_add_as_oob(user, out_of_scope)
 
         assert b"Existing device not found" in response.content
-        assert stored_mapping_for_test(Device.objects.get(pk=out_of_scope.pk)) is None
+        assert mapping_summary(Device.objects.get(pk=out_of_scope.pk)) == {}
 
     def test_add_as_oob_still_attaches_to_the_in_scope_device(self):
         """The in-scope device still resolves and receives the OOB link."""
@@ -8506,8 +8421,7 @@ class TestConflictActionsObjectScope:
         response = self._post_add_as_oob(user, in_scope)
 
         assert b"Existing device not found" not in response.content
-        stored = stored_mapping_for_test(Device.objects.get(pk=in_scope.pk))["default"]
-        assert stored["oob"]["id"] == 4343
+        assert read_mapping(Device.objects.get(pk=in_scope.pk)).oob_id("default") == 4343
 
     @pytest.mark.parametrize("ip", ["192.0.2.77", "2001:db8::77"])
     def test_add_as_oob_creates_the_oob_ip_on_a_new_interface(self, ip):
@@ -8527,7 +8441,7 @@ class TestConflictActionsObjectScope:
         assert oob_ip.vrf is None
         assert oob_ip.assigned_object.name == "idrac"
         assert oob_ip.assigned_object.device_id == device.pk
-        assert stored_mapping_for_test(device)["default"]["oob"]["id"] == 4343
+        assert read_mapping(device).oob_id("default") == 4343
         texts = [str(m) for m in get_messages(self.last_request)]
         assert f"Set OOB IP {ip} on interface idrac." in texts
 
@@ -8540,15 +8454,15 @@ class TestConflictActionsObjectScope:
         response = self._post_conflict(make_superuser(), target)
 
         assert b"Existing device not found" not in response.content
-        assert stored_mapping_for_test(Device.objects.get(pk=target.pk))["default"] == 4242
+        assert mapping_summary(Device.objects.get(pk=target.pk))["default"] == {"own": 4242}
 
     @staticmethod
-    def _vc_pair(name, *, sync_cf):
+    def _vc_pair(name, *, sync_own):
         """Create a two-member chassis whose first member is the sync device."""
         from dcim.models import VirtualChassis
 
         vc = VirtualChassis.objects.create(name=name)
-        m1 = make_device(f"{name}-m1", librenms_cf=sync_cf)
+        m1 = seed_mapping(make_device(f"{name}-m1"), own=sync_own)
         m1.virtual_chassis = vc
         m1.vc_position = 1
         m1.save()
@@ -8562,15 +8476,16 @@ class TestConflictActionsObjectScope:
         """The OOB link lands on the VC sync sibling, so a grant covering only the selected member must not attach it."""
         from dcim.models import Device
 
-        sync, selected = self._vc_pair("scope-oob-vc", sync_cf={"default": {"id": 30}})
+        sync, selected = self._vc_pair("scope-oob-vc", sync_own=30)
         user = self._scoped_writer(selected, "scoped-oob-vc-writer")  # excludes the sync sibling
 
         response = self._post_add_as_oob(user, selected)
 
         assert b"Existing device not found" in response.content
-        sync_entry = stored_mapping_for_test(Device.objects.get(pk=sync.pk))["default"]
-        assert sync_entry == {"id": 30}  # no OOB half written onto the unauthorized sibling
-        assert stored_mapping_for_test(Device.objects.get(pk=selected.pk)) is None
+        assert mapping_summary(Device.objects.get(pk=sync.pk))["default"] == {
+            "own": 30
+        }  # no OOB half written onto the unauthorized sibling
+        assert mapping_summary(Device.objects.get(pk=selected.pk)) == {}
 
     def test_add_as_oob_writes_the_vc_sync_device_when_it_is_in_scope(self):
         """Widening the grant to the sync sibling lets the same attach through (no over-block)."""
@@ -8579,7 +8494,7 @@ class TestConflictActionsObjectScope:
         from django.contrib.auth import get_user_model
         from users.models import ObjectPermission
 
-        sync, selected = self._vc_pair("scope-oob-vc-ok", sync_cf={"default": {"id": 30}})
+        sync, selected = self._vc_pair("scope-oob-vc-ok", sync_own=30)
         user = self._scoped_writer(selected, "scoped-oob-vc-writer-ok")
         extra = ObjectPermission.objects.create(
             name="scoped-oob-vc-sync", actions=["change"], constraints={"pk": sync.pk}
@@ -8591,9 +8506,8 @@ class TestConflictActionsObjectScope:
         response = self._post_add_as_oob(user, selected)
 
         assert b"Existing device not found" not in response.content
-        sync_entry = stored_mapping_for_test(Device.objects.get(pk=sync.pk))["default"]
-        assert sync_entry["id"] == 30
-        assert sync_entry["oob"]["id"] == 4343
+        sync_entry = mapping_summary(Device.objects.get(pk=sync.pk))["default"]
+        assert (sync_entry["own"], sync_entry["oob"]) == (30, 4343)
 
 
 @pytest.mark.django_db
@@ -8672,36 +8586,35 @@ class TestPromoteAndMergeObjectScope:
         from dcim.models import Device
 
         in_scope = make_device("promote-scope-in")
-        out_of_scope = make_device("promote-scope-out", librenms_cf={"default": {"id": 10}})
+        out_of_scope = seed_mapping(make_device("promote-scope-out"), "default", own=10)
         user = _scoped_device_writer(in_scope, "scoped-promote-writer")
 
         response = self._post_promote(user, out_of_scope)
 
         assert b"Existing device not found" in response.content
-        entry = stored_mapping_for_test(Device.objects.get(pk=out_of_scope.pk))["default"]
-        assert entry["id"] == 10  # untouched: no host swap, no OOB demotion
-        assert "oob" not in entry
+        assert mapping_summary(Device.objects.get(pk=out_of_scope.pk))["default"] == {
+            "own": 10
+        }  # untouched: no host swap, no OOB demotion
 
     def test_promote_still_works_for_the_in_scope_device(self):
         """The device the grant DOES cover promotes normally (no over-block)."""
         from dcim.models import Device
 
-        in_scope = make_device("promote-scope-in-2", librenms_cf={"default": {"id": 10}})
+        in_scope = seed_mapping(make_device("promote-scope-in-2"), "default", own=10)
         user = _scoped_device_writer(in_scope, "scoped-promote-writer-2")
 
         response = self._post_promote(user, in_scope)
 
         assert b"Existing device not found" not in response.content
-        entry = stored_mapping_for_test(Device.objects.get(pk=in_scope.pk))["default"]
-        assert entry["id"] == 55
-        assert entry["oob"]["id"] == 10
+        entry = mapping_summary(Device.objects.get(pk=in_scope.pk))["default"]
+        assert (entry["own"], entry["oob"]) == (55, 10)
 
     def test_promote_rechecks_legacy_mapping_after_lock(self):
         """A concurrent legacy write between validation and row lock must fail closed without partially promoting."""
         from dcim.models import Device
         from django.db import connection
 
-        target = make_device("promote-legacy-race", librenms_cf={"default": {"id": 10}})
+        target = seed_mapping(make_device("promote-legacy-race"), "default", own=10)
         user = _scoped_device_writer(target, "scoped-promote-legacy-race")
         concurrent_write_applied = False
 
@@ -8723,7 +8636,7 @@ class TestPromoteAndMergeObjectScope:
         """A catalog ID outside the user's view scope cannot change the promoted device type."""
         from dcim.models import Device, DeviceType
 
-        target = make_device("promote-hidden-dt", librenms_cf={"default": {"id": 10}})
+        target = seed_mapping(make_device("promote-hidden-dt"), "default", own=10)
         hidden_type = DeviceType.objects.create(
             manufacturer=target.device_type.manufacturer,
             model="Hidden Promote Type",
@@ -8740,7 +8653,7 @@ class TestPromoteAndMergeObjectScope:
         """A catalog ID outside the user's view scope cannot change the promoted platform."""
         from dcim.models import Device, Platform
 
-        target = make_device("promote-hidden-platform", librenms_cf={"default": {"id": 10}})
+        target = seed_mapping(make_device("promote-hidden-platform"), "default", own=10)
         hidden_platform = Platform.objects.create(
             name="Hidden Promote Platform",
             slug="hidden-promote-platform",
@@ -8757,8 +8670,8 @@ class TestPromoteAndMergeObjectScope:
         """An out-of-scope donor must not be merged away, and is not offered as a candidate either."""
         from dcim.models import Device
 
-        winner = make_device("merge-scope-winner", librenms_cf={"default": {"id": 20}})
-        donor = make_device("merge-scope-donor", librenms_cf={"default": {"id": 10}})
+        winner = seed_mapping(make_device("merge-scope-winner"), "default", own=20)
+        donor = seed_mapping(make_device("merge-scope-donor"), "default", own=10)
         user = _scoped_device_writer(winner, "scoped-merge-writer")  # scoped to the winner only
 
         response = self._post_merge(user, winner, donor)
@@ -8766,51 +8679,50 @@ class TestPromoteAndMergeObjectScope:
         # The disclosure gate withdraws the whole suggestion when either candidate is out of
         # scope, so the refusal now happens before the winner/donor pks are resolved.
         assert b"does not match the validation result" in response.content
-        assert "_migrated_to" not in stored_mapping_for_test(Device.objects.get(pk=donor.pk))["default"]
-        assert "oob" not in stored_mapping_for_test(Device.objects.get(pk=winner.pk))["default"]
+        assert read_mapping(Device.objects.get(pk=donor.pk)).migrated_to("default") is None
+        assert read_mapping(Device.objects.get(pk=winner.pk)).oob_id("default") is None
 
     def test_merge_succeeds_when_both_sides_are_in_scope(self):
         """A superuser (unrestricted queryset) still merges both candidates."""
         from dcim.models import Device
 
-        winner = make_device("merge-scope-winner-2", librenms_cf={"default": {"id": 20}})
-        donor = make_device("merge-scope-donor-2", librenms_cf={"default": {"id": 10}})
+        winner = seed_mapping(make_device("merge-scope-winner-2"), "default", own=20)
+        donor = seed_mapping(make_device("merge-scope-donor-2"), "default", own=10)
 
         response = self._post_merge(make_superuser(), winner, donor)
 
         assert b"Winner or donor device not found" not in response.content
-        donor_entry = stored_mapping_for_test(Device.objects.get(pk=donor.pk))["default"]
-        assert donor_entry["_migrated_to"]["device_id"] == winner.pk
+        assert read_mapping(Device.objects.get(pk=donor.pk)).migrated_to("default").device_id == winner.pk
 
     def test_merge_cannot_write_an_out_of_scope_vc_sync_device(self):
         """The donor's VC sync sibling holds the link the merge clears and stamps, so an out-of-scope sibling must block the merge."""
         from dcim.models import Device
 
-        _vc, m1, m2 = _two_member_vc("mrg-scope-vc", m1_cf={"default": {"id": 30}}, m2_cf=None)
-        winner = make_device("mrg-scope-winner", librenms_cf={"default": {"id": 50}})
+        _vc, m1, m2 = _two_member_vc("mrg-scope-vc")
+
+        seed_mapping(m1, "default", own=30)
+        winner = seed_mapping(make_device("mrg-scope-winner"), "default", own=50)
         # Covers the selected winner and the selected donor member, but NOT the sync sibling m1.
         user = _constrained_device_writer({"pk__in": [winner.pk, m2.pk]}, "scoped-merge-vc-sync")
 
         response = self._post_merge(user, winner, m2)
 
         assert b"Winner or donor device not found" in response.content
-        sync_entry = stored_mapping_for_test(Device.objects.get(pk=m1.pk))["default"]
-        assert sync_entry["id"] == 30  # link not cleared
-        assert "_migrated_to" not in sync_entry  # not stamped
-        assert "oob" not in stored_mapping_for_test(Device.objects.get(pk=winner.pk))["default"]
+        assert mapping_summary(Device.objects.get(pk=m1.pk))["default"] == {"own": 30}  # link not cleared, not stamped
+        assert read_mapping(Device.objects.get(pk=winner.pk)).oob_id("default") is None
 
     def test_merge_runs_when_the_vc_sync_device_is_also_in_scope(self):
         """Widening the grant to the sync sibling lets the same merge through (no over-block)."""
         from dcim.models import Device
 
-        _vc, m1, m2 = _two_member_vc("mrg-scope-vc-ok", m1_cf={"default": {"id": 30}}, m2_cf=None)
-        winner = make_device("mrg-scope-winner-ok", librenms_cf={"default": {"id": 50}})
+        _vc, m1, m2 = _two_member_vc("mrg-scope-vc-ok")
+
+        seed_mapping(m1, "default", own=30)
+        winner = seed_mapping(make_device("mrg-scope-winner-ok"), "default", own=50)
         user = _constrained_device_writer({"pk__in": [winner.pk, m1.pk, m2.pk]}, "scoped-merge-vc-sync-ok")
 
         response = self._post_merge(user, winner, m2)
 
         assert b"Winner or donor device not found" not in response.content
-        sync_entry = stored_mapping_for_test(Device.objects.get(pk=m1.pk))["default"]
-        assert "id" not in sync_entry
-        assert sync_entry["_migrated_to"]["device_id"] == winner.pk
-        assert stored_mapping_for_test(Device.objects.get(pk=winner.pk))["default"]["oob"]["id"] == 30
+        assert mapping_summary(Device.objects.get(pk=m1.pk))["default"] == {"migrated_to": winner.pk}
+        assert read_mapping(Device.objects.get(pk=winner.pk)).oob_id("default") == 30

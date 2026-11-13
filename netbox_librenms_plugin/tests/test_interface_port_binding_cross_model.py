@@ -21,11 +21,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_vm,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import (
-    custom_fields_without_mapping,
-    seed_mapping,
-    stored_mapping_for_test,
-)
+from netbox_librenms_plugin.tests.mapping_fixtures import custom_fields_without_mapping, mapping_summary, seed_mapping
 from netbox_librenms_plugin.tests.interface_sync_post_helpers import seed_ports
 from netbox_librenms_plugin.tests.source_snapshot_helpers import interface_rows, port_pair
 
@@ -41,7 +37,7 @@ def _field_state(interface):
         interface.name,
         interface.description,
         interface.enabled,
-        stored_mapping_for_test(interface),
+        mapping_summary(interface),
         custom_fields_without_mapping(interface.custom_field_data),
     )
 
@@ -127,7 +123,7 @@ class TestTheSyncWriter:
         else:
             holder = _vm_interface("foreign-port-owner", PORT)
         if object_type == "device":
-            owner = make_device("requested-port-owner", librenms_cf={SERVER_KEY: {"id": 71}})
+            owner = seed_mapping(make_device("requested-port-owner"), SERVER_KEY, own=71)
             model = Interface
             owner_filter = {"device": owner}
         else:
@@ -358,7 +354,7 @@ def test_a_persistent_foreign_binding_skips_only_its_row(client, settings, objec
         else _vm_interface("bulk-foreign-holder", PORT)
     )
     if object_type == "device":
-        owner = make_device("bulk-conflict-owner", librenms_cf={SERVER_KEY: {"id": 71}})
+        owner = seed_mapping(make_device("bulk-conflict-owner"), SERVER_KEY, own=71)
         model, owner_filter = Interface, {"device": owner}
     else:
         owner = make_vm("bulk-conflict-owner", make_cluster("bulk-conflict-cluster"))
@@ -398,7 +394,7 @@ def test_a_foreign_bound_related_row_cannot_use_a_local_name_fallback(client, se
         if holder_type == "device"
         else _vm_interface("related-foreign-holder", PORT)
     )
-    owner = make_device("related-conflict-owner", librenms_cf={SERVER_KEY: {"id": 71}})
+    owner = seed_mapping(make_device("related-conflict-owner"), SERVER_KEY, own=71)
     # Each relation comes from the raw facts that the assessment classifies as that relation.
     member_name, related_name, member_type, related_type, device_record = {
         "lag": ("eth0", "Po1", "ethernetCsmacd", "ieee8023adLag", None),

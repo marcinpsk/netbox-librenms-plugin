@@ -40,7 +40,6 @@ from netbox_librenms_plugin.tests.conftest import (
     make_virtual_chassis,
     persist_test_server_mapping,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
 from netbox_librenms_plugin.tests.test_serial_cables_view import _make_view
 
 SERVER_KEY = configured_server_key()
@@ -1287,7 +1286,7 @@ class TestRemotePickerEndpoint:
 
         client = self._client("duplicate-link-rows")
         local_device = make_device("picker-duplicate-link-local")
-        seed_stored_mapping(local_device, {SERVER_KEY: {"id": 8}}, save=True)
+        seed_mapping(local_device, SERVER_KEY, own=8)
         local = make_interface(local_device, "Ethernet1")
         first_device = make_device("picker-duplicate-link-first")
         make_interface(first_device, "Ethernet1")

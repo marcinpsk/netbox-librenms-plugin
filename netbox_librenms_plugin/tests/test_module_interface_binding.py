@@ -16,7 +16,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_virtual_chassis,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post as view_post
 from netbox_librenms_plugin.tests.view_test_helpers import render_module_tab, rendered_module_form
 
@@ -131,7 +131,7 @@ class TestInterfacePortBinding:
         assert read_mapping(taken).own_id("default") == 8999
         assert read_mapping(module.interfaces.get(name="Uplink")).own_id("default") is None
 
-    @pytest.mark.parametrize("stored", [None, {"default": 8999}], ids=["unbound", "bound-elsewhere"])
+    @pytest.mark.parametrize("stored", [None, 8999], ids=["unbound", "bound-elsewhere"])
     def test_a_named_interface_outside_the_change_scope_is_not_passed_over(self, stored):
         """The table sees every interface, so the writer must choose from all of them and then check scope."""
         from dcim.models import Interface
@@ -141,7 +141,7 @@ class TestInterfacePortBinding:
         device = make_device_with_module_bays(f"bind-name-out-of-scope-{bool(stored)}", ["Slot 1"])
         named = make_interface(device, "Ethernet1/1")
         if stored is not None:
-            seed_stored_mapping(named, stored, save=True)
+            seed_mapping(named, own=stored)
         module = _module_with_interfaces(device, "Slot 1", "BIND-SCOPE-CARD", ["Uplink"])
         item = {"_librenms_port_id": 8806, "_librenms_ifname": "Ethernet1/1"}
 
@@ -250,7 +250,7 @@ class TestModuleTableShowsTheWriterChoice:
 
         device, module, row, cache_key = self._seed("oob", ["Uplink"], {"ifDescr": "Unmatched Label"})
         uplink = module.interfaces.get(name="Uplink")
-        seed_stored_mapping(uplink, {"default": {"oob": {"id": 8811}}}, save=True)
+        seed_mapping(uplink, oob=8811)
         user = make_superuser()
         try:
             content = render_module_tab(device, user=user)
@@ -265,17 +265,17 @@ class TestModuleTableShowsTheWriterChoice:
         assert read_mapping(uplink).own_id("default") == 8811
 
     @pytest.mark.parametrize(
-        "stored",
-        [{"default": 8811}, {"default": {"id": 8999, "oob": {"id": 8811}}}],
+        ("own", "oob"),
+        [(8811, None), (8999, 8811)],
         ids=["already-bound", "own-id-is-another-port"],
     )
-    def test_a_holder_whose_own_id_is_set_offers_no_update(self, live_librenms, stored):
+    def test_a_holder_whose_own_id_is_set_offers_no_update(self, live_librenms, own, oob):
         """The table reads the holder's own ID: the same port needs no bind, and another port refuses it."""
         from django.core.cache import cache
 
         device, module, _row, cache_key = self._seed("own", ["Uplink"], {"ifDescr": "Unmatched Label"})
         uplink = module.interfaces.get(name="Uplink")
-        seed_stored_mapping(uplink, stored, save=True)
+        seed_mapping(uplink, own=own, oob=oob)
         try:
             content = render_module_tab(device, user=make_superuser())
         finally:
@@ -352,8 +352,8 @@ class TestModuleTableShowsTheWriterChoice:
         device, _module, _row, cache_key = self._seed("twice", ["Uplink"], {"ifDescr": "Unmatched Label"})
         local = make_interface(device, "Ethernet9")
         for holder in (local, make_interface(make_device("table-choice-twice-other"), "Ethernet9")):
-            # A duplicate binding: no writer can store it, so seed the raw state.
-            seed_stored_mapping(holder, {"default": 8811}, save=True)
+            # A duplicate binding: no persisted writer stores it, but the seed checks no owner.
+            seed_mapping(holder, own=8811)
         try:
             content = render_module_tab(device, user=make_superuser())
         finally:
@@ -501,7 +501,7 @@ class TestUpdateModuleInterfaceAdoption:
     def _module_with_templates(self, tag, template_names):
         from dcim.models import InterfaceTemplate, Module
 
-        device = make_device(f"{tag}-device", librenms_cf={"default": ADOPTION_LIBRENMS_ID})
+        device = seed_mapping(make_device(f"{tag}-device"), "default", own=ADOPTION_LIBRENMS_ID)
         bay = make_module_bay(device, f"{tag} Bay")
         module_type = make_module_type(f"{tag.upper()}-CARD")
         module = Module.objects.create(device=device, module_bay=bay, module_type=module_type, status="active")

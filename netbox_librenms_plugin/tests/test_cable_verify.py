@@ -23,7 +23,6 @@ from django.conf import settings
 from django.core.cache import cache as real_cache
 from django.test import RequestFactory, override_settings
 from netbox_librenms_plugin.server_mappings import resolve_device_port
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
 
 SERVER_KEY = "default"
 
@@ -517,9 +516,9 @@ class TestRemoteDeviceResolutionExcludesOOB:
         from netbox_librenms_plugin.tests.conftest import make_device
         from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
 
-        host = make_device("remote-host", librenms_cf={"default": {"id": 42}})
+        host = seed_mapping(make_device("remote-host"), "default", own=42)
         # A DIFFERENT device references LibreNMS id 42 as its OOB controller (not its own id).
-        make_device("oob-referencer", librenms_cf={"default": {"oob": {"id": 42}}})
+        seed_mapping(make_device("oob-referencer"), "default", oob=42)
 
         view = object.__new__(BaseCableTableView)
         # Pass a hostname that matches NO device so the resolution can only succeed via the id-42
@@ -811,6 +810,6 @@ class TestResolveLocalInterfaceCore:
         device, _by_name = self._dev("core-id-ambiguous")
         for name in ("eth-dup-a", "eth-dup-b"):
             duplicate = Interface.objects.create(device=device, name=name, type="1000base-t")
-            seed_stored_mapping(duplicate, {"default": 4242}, save=True)
+            seed_mapping(duplicate, "default", own=4242)
 
         assert resolve_device_port(device, server="default", port_id=4242, name_candidates=["eth-by-name"]) is None
