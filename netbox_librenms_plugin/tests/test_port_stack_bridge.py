@@ -1,5 +1,9 @@
 """Integration coverage for bridge and parent relationships from LibreNMS port stacks."""
 
+import json
+import re
+from html import unescape
+
 import pytest
 
 from netbox_librenms_plugin.interface_relationships import resolve_port_relationships
@@ -14,7 +18,7 @@ from netbox_librenms_plugin.tests.conftest import (
 )
 from netbox_librenms_plugin.tests.interface_sync_post_helpers import post_interface_sync, seed_ports
 from netbox_librenms_plugin.tests.source_snapshot_helpers import interface_rows, port_pair, seed_interfaces_snapshot
-from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser, post
+from netbox_librenms_plugin.tests.view_test_helpers import bind_relationship, make_request, make_superuser, post
 from netbox_librenms_plugin.utils import _get_netbox_version_tuple, normalize_relationship_maps
 
 
@@ -169,7 +173,7 @@ def test_inline_parent_sync_promotes_a_physical_child_to_virtual(settings):
     ]
     assert _seed_relationships(device, ports) == _maps(sub={102: 101})
 
-    response = post(view, request, object_type="device", object_id=device.pk)
+    response = post(view, bind_relationship(request, device), object_type="device", object_id=device.pk)
 
     assert response.status_code == 200, response.content
     child.refresh_from_db()
@@ -203,7 +207,7 @@ def test_inline_parent_sync_preserves_a_virtual_role_and_its_members(role, setti
     ports = [{"port_id": 100, "ifName": child.name, "ifType": "ipForward"}, {"port_id": 101, "ifName": parent.name}]
     assert _seed_relationships(device, ports, [port_pair(100, 101)]) == _maps(sub={100: 101})
 
-    response = post(view, request, object_type="device", object_id=device.pk)
+    response = post(view, bind_relationship(request, device), object_type="device", object_id=device.pk)
 
     assert response.status_code == 409, response.content
     child.refresh_from_db()
@@ -247,18 +251,24 @@ def test_inline_lag_sync_does_not_replace_a_parent_child_role(settings):
 
     parent_response = post(
         parent_view,
-        make_request(
-            "post",
-            {"port_id": "100", "parent_port_id": "101", "interface_name_field": "ifName"},
+        bind_relationship(
+            make_request(
+                "post",
+                {"port_id": "100", "parent_port_id": "101", "interface_name_field": "ifName"},
+            ),
+            device,
         ),
         object_type="device",
         object_id=device.pk,
     )
     lag_response = post(
         lag_view,
-        make_request(
-            "post",
-            {"port_id": "102", "lag_port_id": "100", "interface_name_field": "ifName"},
+        bind_relationship(
+            make_request(
+                "post",
+                {"port_id": "102", "lag_port_id": "100", "interface_name_field": "ifName"},
+            ),
+            device,
         ),
         object_type="device",
         object_id=device.pk,
@@ -276,7 +286,11 @@ def test_inline_lag_sync_does_not_replace_a_parent_child_role(settings):
 def test_inline_lag_sync_rejects_cross_member_parent_on_netbox_44(monkeypatch, settings):
     """Reject an invalid LAG target before NetBox 4.4 reaches its VC validation bug."""
     configure_default_librenms_server(settings)
+    from unittest.mock import patch
+
     from dcim.models import Interface
+
+    from netbox_librenms_plugin import utils
 
     from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
     from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
@@ -302,7 +316,8 @@ def test_inline_lag_sync_rejects_cross_member_parent_on_netbox_44(monkeypatch, s
     original_clean = Interface.clean
 
     def netbox_44_clean(interface):
-        if interface.pk == target.pk:
+        # NetBox 4.4.0 fails only while it reads the parent on the other member.
+        if interface.pk == target.pk and interface.parent_id is not None:
             raise AttributeError(
                 "'Interface' object has no attribute 'virtual_chassis'",
                 name="virtual_chassis",
@@ -311,15 +326,20 @@ def test_inline_lag_sync_rejects_cross_member_parent_on_netbox_44(monkeypatch, s
 
     monkeypatch.setattr(Interface, "clean", netbox_44_clean)
 
-    response = post(
-        view,
-        make_request(
-            "post",
-            {"port_id": "102", "lag_port_id": "100", "interface_name_field": "ifName"},
-        ),
-        object_type="device",
-        object_id=target_device.pk,
-    )
+    # The fake clean is the defect of NetBox 4.4.0 only, which the tab's own validation handles.
+    with patch.object(utils, "_get_netbox_version_tuple", return_value=(4, 4, 0)):
+        response = post(
+            view,
+            bind_relationship(
+                make_request(
+                    "post",
+                    {"port_id": "102", "lag_port_id": "100", "interface_name_field": "ifName"},
+                ),
+                parent_device,
+            ),
+            object_type="device",
+            object_id=target_device.pk,
+        )
 
     assert response.status_code == 409, response.content
     assert b"NetBox rejected the LAG relationship" in response.content
@@ -365,7 +385,7 @@ def test_inline_bridge_sync_sets_the_bridge_relationship(settings):
     ]
     assert _seed_relationships(device, ports, [port_pair(103, 100)], os="linux") == _maps(bridge={103: 100})
 
-    response = post(view, request, object_type="device", object_id=device.pk)
+    response = post(view, bind_relationship(request, device), object_type="device", object_id=device.pk)
 
     assert response.status_code == 200, response.content
     member.refresh_from_db()
@@ -422,9 +442,12 @@ def test_inline_bridge_sync_accepts_cross_member_parent_on_netbox_44(monkeypatch
     with patch.object(utils, "_get_netbox_version_tuple", return_value=(4, 4, 0)):
         response = post(
             view,
-            make_request(
-                "post",
-                {"port_id": "102", "bridge_port_id": "100", "interface_name_field": "ifName"},
+            bind_relationship(
+                make_request(
+                    "post",
+                    {"port_id": "102", "bridge_port_id": "100", "interface_name_field": "ifName"},
+                ),
+                parent_device,
             ),
             object_type="device",
             object_id=child_device.pk,
@@ -482,7 +505,10 @@ def test_inline_bridge_sync_refuses_a_parent_on_another_chassis_on_netbox_44(mon
     ):
         response = post(
             view,
-            make_request("post", {"port_id": "102", "bridge_port_id": "100", "interface_name_field": "ifName"}),
+            bind_relationship(
+                make_request("post", {"port_id": "102", "bridge_port_id": "100", "interface_name_field": "ifName"}),
+                child_device,
+            ),
             object_type="device",
             object_id=child_device.pk,
         )
@@ -600,9 +626,12 @@ def test_inline_lag_sync_rejects_cross_member_parented_member_on_netbox_44(monke
     with patch.object(utils, "_get_netbox_version_tuple", return_value=(4, 4, 0)):
         response = post(
             view,
-            make_request(
-                "post",
-                {"port_id": "102", "lag_port_id": "100", "interface_name_field": "ifName"},
+            bind_relationship(
+                make_request(
+                    "post",
+                    {"port_id": "102", "lag_port_id": "100", "interface_name_field": "ifName"},
+                ),
+                parent_device,
             ),
             object_type="device",
             object_id=child_device.pk,
@@ -621,7 +650,7 @@ def test_bulk_sync_applies_parent_and_bridge_to_the_same_interface(client, setti
 
     configure_default_librenms_server(settings)
     client.force_login(make_superuser("bulk-parent-bridge-sync-user"))
-    device = make_device("bulk-parent-bridge-sync")
+    device = make_device("bulk-parent-bridge-sync", librenms_cf={"default": {"id": 42}})
     child = make_interface(device, "bond0.110", iface_type="1000base-t")
     parent = make_interface(device, "bond0", iface_type="lag")
     bridge = make_interface(device, "vmbr0", iface_type="virtual")
@@ -671,11 +700,13 @@ def test_failed_parent_sync_restores_the_source_type_and_relationship():
 
 def test_relationship_column_renders_bridge_in_the_existing_column():
     """Render bridge state and its action without adding another interface-table column."""
+    from netbox_librenms_plugin.sync_query import SyncQuery
     from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
 
     device = make_device("bridge-relationship-column")
     member = make_interface(device, "nic0")
     table = LibreNMSInterfaceTable([], device=device, server_key="default")
+    table.sync_query = SyncQuery.from_request(make_request("get"))
     html = str(
         table.render_parent(
             None,
@@ -695,7 +726,8 @@ def test_relationship_column_renders_bridge_in_the_existing_column():
 
     assert "Bridge vmbr0" in html
     assert "bridge-sync-btn" in html
-    assert 'data-bridge-port-id="100"' in html
+    (values,) = re.findall(r'hx-vals="([^"]*)"', html)
+    assert json.loads(unescape(values))["bridge_port_id"] == "100"
     assert "sync-interface-bridge" in html
 
 
@@ -722,7 +754,7 @@ def test_inline_bridge_sync_supports_virtual_machine_interfaces(settings):
     ]
     assert _seed_relationships(vm, ports, [port_pair(103, 100)], os="linux") == _maps(bridge={103: 100})
 
-    response = post(view, request, object_type="virtualmachine", object_id=vm.pk)
+    response = post(view, bind_relationship(request, vm), object_type="virtualmachine", object_id=vm.pk)
 
     assert response.status_code == 200, response.content
     member.refresh_from_db()
@@ -744,20 +776,34 @@ def test_default_linux_bridge_pattern_is_seeded():
     )
 
 
-def test_interface_selection_and_inline_action_include_bridge_dependencies():
-    """Keep bridge selection and inline POST wiring in the shared relationship JavaScript."""
-    from pathlib import Path
+def test_the_tab_renders_the_bridge_as_a_required_row_and_offers_the_inline_bridge_action(client, settings):
+    """A bridged port requires its bridge row, and its relationship cell posts the bridge port ID."""
+    import json
 
-    import netbox_librenms_plugin
+    from netbox_librenms_plugin.tests._html_helpers import open_tags
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+    from netbox_librenms_plugin.tests.view_test_helpers import draft_tab
 
-    source = (
-        Path(netbox_librenms_plugin.__file__).parent / "static" / "netbox_librenms_plugin" / "js" / "librenms_sync.js"
-    ).read_text(encoding="utf-8")
+    configure_default_librenms_server(settings)
+    client.force_login(make_superuser("bridge-requirement-tab-user"))
+    device = make_device("bridge-requirement-tab", librenms_cf={"default": {"id": 42}})
+    for name, port_id in (("nic0", 103), ("vmbr0", 100)):
+        interface = make_interface(device, name)
+        seed_mapping(interface, own=port_id, save=False)
+        interface.save()
+    ports = [
+        {**_PORT_KEYS_UNSET, "port_id": 103, "ifName": "nic0"},
+        {**_PORT_KEYS_UNSET, "port_id": 100, "ifName": "vmbr0"},
+    ]
+    seed_ports(device, ports, [port_pair(103, 100)], device={"os": "linux"})
 
-    assert "row.dataset.bridgePortId" in source
-    assert ".lag-sync-btn, .parent-sync-btn, .bridge-sync-btn" in source
-    assert "btn.dataset.bridgePortId" in source
-    assert "`${relation}_port_id`" in source
+    shown = draft_tab(client, device, "interfaces", interface_name_field="ifName")
+
+    assert json.loads(shown.rows["103"]["data-requires"]) == ["100"]
+    assert json.loads(shown.rows["100"]["data-requires"]) == []
+    buttons = [attrs for attrs in open_tags(shown.html, "button") if "bridge-sync-btn" in attrs.get("class", "")]
+    values = [json.loads(attrs["hx-vals"]) for attrs in buttons]
+    assert [(value["port_id"], value["bridge_port_id"]) for value in values] == [("103", "100")]
 
 
 def test_device_interface_lookup_prefetches_bridge(db, django_assert_num_queries, settings):

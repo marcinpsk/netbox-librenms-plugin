@@ -27,7 +27,7 @@ from netbox_librenms_plugin.tests.conftest import (
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.interface_sync_post_helpers import SERVER_KEY, seed_ports, sync_port
 from netbox_librenms_plugin.tests.source_snapshot_helpers import port_pair
-from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms, relationship_binding
 from netbox_librenms_plugin.transactions import row_changed
 from netbox_librenms_plugin.views.sync import interfaces as interfaces_view
 
@@ -76,14 +76,21 @@ def _user(username, owner_model, interface_model, *, view=None, change=None):
 
 
 def _link(client, owner, relation, port_id, related_port_id):
-    """POST one single-row relationship sync, the way the inline button of the row does."""
+    """POST one single-row relationship sync, the way the inline button of the row does: bound to the row it shows."""
+    from django.contrib.auth import get_user
+
     object_type = "device" if isinstance(owner, Device) else "virtualmachine"
     return client.post(
         reverse(
             f"plugins:netbox_librenms_plugin:sync_interface_{relation}",
             kwargs={"object_type": object_type, "object_id": owner.pk},
         ),
-        {"port_id": str(port_id), f"{relation}_port_id": str(related_port_id), "server_key": SERVER_KEY},
+        {
+            "port_id": str(port_id),
+            f"{relation}_port_id": str(related_port_id),
+            "server_key": SERVER_KEY,
+            **relationship_binding(get_user(client), owner, port_id),
+        },
     )
 
 
@@ -305,6 +312,9 @@ def test_an_interface_rule_refusal_names_only_the_interfaces_that_the_user_may_v
     member_text, aggregate_text = _shown_ends(hidden_end)
     reason = f"ignored by interface rule {rule.pk} ({rule})"
     error = f"Cannot link {member_text} to LAG {aggregate_text}; {interfaces_view.HIDDEN_INTERFACE}: {reason}."
+    if hidden_end == "member":
+        # The ignored member row has no button, so its action is refused before the rules, naming no interface.
+        error = interfaces_view.ROW_CHANGED
     _assert_link_refused(response, error, member, aggregate, hidden_end)
 
 

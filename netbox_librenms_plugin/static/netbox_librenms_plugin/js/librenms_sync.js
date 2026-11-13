@@ -1370,15 +1370,9 @@ function initializeTableCheckboxes(tableId) {
     if (toggleAll && toggleAll.dataset.tableToggleInitialized !== 'true') {
         toggleAll.dataset.tableToggleInitialized = 'true';
         toggleAll.addEventListener('change', function () {
-            // Index the member rows once for the batch: a per-row selector query would be quadratic.
-            const membersByLag = _membersByLag();
             liveCheckboxes().forEach(checkbox => {
-                const changed = checkbox.checked !== toggleAll.checked;
                 checkbox.checked = toggleAll.checked;
-                applyRowSelection(checkbox, membersByLag, changed);
             });
-            // Recompute once for the whole page rather than per row: select-all still has to pull
-            // in an off-page parent or aggregate, but the closure is the same for every seed.
             commitSelectionChange(table);
         });
     }
@@ -1399,12 +1393,8 @@ function initializeTableCheckboxes(tableId) {
                 // Skip the range when the prior anchor was swapped out (indexOf -1) rather than
                 // slicing a bogus range off the live list.
                 if (start !== -1 && end !== -1) {
-                    // Index the member rows once for the batch: a per-row selector query would be quadratic.
-                    const membersByLag = _membersByLag();
                     current.slice(Math.min(start, end), Math.max(start, end) + 1).forEach(cb => {
-                        const changed = cb.checked !== anchor.checked;
                         cb.checked = anchor.checked;
-                        applyRowSelection(cb, membersByLag, changed);
                     });
                     commitSelectionChange(table);
                 }
@@ -1413,8 +1403,7 @@ function initializeTableCheckboxes(tableId) {
         });
     }
 
-    // Re-check whatever this table had selected on another page. Runs after the handlers are
-    // bound so the requirement cascade sees the restored rows.
+    // Re-check whatever this table had selected on another page.
     restoreTableSelection(table);
 }
 
@@ -1428,303 +1417,21 @@ function initializeCheckboxes() {
             .filter((tableId) => SELECTABLE_TABLE_TABS[tableId] === tab.dataset.syncFilterTab)
             .forEach((tableId) => pruneOtherSelectionScopes(tableId, tab.dataset.selectionScope));
     });
-    initializeTableCheckboxes('librenms-interface-table');
-    initializeTableCheckboxes('librenms-interface-table-vm');
     initializeTableCheckboxes('librenms-cable-table');
     initializeTableCheckboxes('librenms-cable-table-vc');
-    initializeTableCheckboxes('librenms-vlan-table');
-    initializeTableCheckboxes('librenms-port-vlan-table');
     initializeTableCheckboxes('librenms-module-table');
 }
 
 /**
- * Selection dependency rules for the interface tables.
- *
- * A row cannot sync unless the rows it depends on are synced too. A sub-interface needs its
- * parent, a LAG member needs its aggregate, and a bridge member needs its bridge. Each dependency
- * is read from the row as a LibreNMS port id and can chain through another relationship.
- *
- * Requirements are recomputed from the rows the user checked rather than propagated hop by hop.
- * A recompute is idempotent and needs no unwind bookkeeping, so an aggregate that is only
- * required transitively is dropped as soon as the last row needing it is cleared.
- *
- * Checking an aggregate additionally pulls its MEMBERS in. That is a convenience, not a
- * requirement (an aggregate syncs perfectly well on its own), so it is applied once when the
- * aggregate is toggled and the user stays free to clear an individual member afterwards.
- *
- * Everything here is gated on the #autoSelectLagMembers toggle.
- */
-
-/** Marks a row this code checked to satisfy another row's requirement. */
-const REQUIRED_MARKER = 'autoRequired';
-/** Marks a member row an aggregate pulled in as a convenience. */
-const MEMBER_MARKER = 'autoMember';
-/** Marks a row the user cleared by hand, so the cascade stops offering to re-add it. */
-const CLEARED_MARKER = 'selectionCleared';
-
-/**
- * Return the table rows that carry a LibreNMS port id, indexed by that id.
- *
- * @returns {Map<string, HTMLTableRowElement>} Row per port id present on this page.
- */
-function _rowsByPortId() {
-    const rows = new Map();
-    document.querySelectorAll('tr[data-port-id]').forEach(function (row) {
-        const portId = row.dataset.portId;
-        if (portId) rows.set(portId, row);
-    });
-    return rows;
-}
-
-/**
- * Return the port ids no sync may write, across the whole snapshot and not only this page.
- *
- * The server renders every row its interface write check refuses (ignored, ambiguous, an
- * incomplete record, or no owner), and ``applyRowEligibility`` keeps the set current.
- *
- * @returns {Set<string>} The blocked port ids.
- */
-function _blockedPortIds() {
-    const holder = document.querySelector('[data-blocked-port-ids]');
-    if (!holder || !holder.dataset.blockedPortIds) return new Set();
-    return new Set(JSON.parse(holder.dataset.blockedPortIds));
-}
-
-/**
- * Repaint a row's sync eligibility after the verify repaint decided it for another member.
- *
- * It sets the row's rule state and the blocked-port set the related-row walk reads. Storage is
- * left to the persist step of ``commitSelectionChange``, which runs after the closure.
- *
- * @param {HTMLTableRowElement} row - The repainted row.
- * @param {string} ruleState - The row's blocked state, or an empty string.
- * @returns {void}
- */
-function applyRowEligibility(row, ruleState) {
-    row.dataset.ruleState = ruleState || '';
-    const portId = row.dataset.portId;
-    const holder = document.querySelector('[data-blocked-port-ids]');
-    if (holder && portId) {
-        const blocked = _blockedPortIds();
-        if (ruleState) {
-            blocked.add(portId);
-        } else {
-            blocked.delete(portId);
-        }
-        holder.dataset.blockedPortIds = JSON.stringify(Array.from(blocked));
-    }
-}
-
-/**
- * Finish every change to a row's member, eligibility or checkbox, always in the same order.
- *
- * (a) Repaint the eligibility of the rows that changed, (b) recompute the dependency closure,
- * (c) store the selection from the final page state. Nothing is stored before (b), so a row the
- * closure releases is never kept in storage.
+ * Store the selection of a table whose rows changed: the store of the cable and module tables.
  *
  * @param {HTMLElement|null} table - The table whose selection changed.
- * @param {{row: HTMLTableRowElement, ruleState: string}[]} [eligibility] - Rows with a new rule state.
  * @returns {void}
  */
-function commitSelectionChange(table, eligibility) {
-    (eligibility || []).forEach(function (change) {
-        applyRowEligibility(change.row, change.ruleState);
-    });
-    refreshRequiredSelections();
+function commitSelectionChange(table) {
     if (table && SELECTABLE_TABLE_IDS.includes(table.id)) {
         persistTableSelection(table);
     }
-    updateBulkActionButton();
-}
-
-/**
- * Return the port ids a row depends on.
- *
- * @param {HTMLTableRowElement} row - The row to read.
- * @returns {string[]} Port ids that must be selected alongside this row.
- */
-function _requiredPortIds(row) {
-    return [row.dataset.parentPortId, row.dataset.memberOfLag, row.dataset.bridgePortId].filter(Boolean);
-}
-
-/**
- * Return a row's selection checkbox when it can be toggled.
- *
- * @param {HTMLTableRowElement|null} row - The row to read.
- * @returns {HTMLInputElement|null} The enabled checkbox, or null.
- */
-function _selectableCheckbox(row) {
-    if (!row) return null;
-    const checkbox = row.querySelector('input[name="select"]');
-    return checkbox && !checkbox.disabled ? checkbox : null;
-}
-
-/**
- * Return the member rows on this page, grouped by the port id of their aggregate.
- *
- * @returns {Map<string, HTMLTableRowElement[]>} Member rows per aggregate port id.
- */
-function _membersByLag() {
-    const members = new Map();
-    document.querySelectorAll('tr[data-member-of-lag]').forEach(function (row) {
-        const lagPortId = row.dataset.memberOfLag;
-        if (!members.has(lagPortId)) members.set(lagPortId, []);
-        members.get(lagPortId).push(row);
-    });
-    return members;
-}
-
-/**
- * Recompute which rows are held selected to satisfy another row's requirements.
- *
- * Walks the requirement chain from every row the user selected in their own right, checks each
- * required row still on this page, and releases any row this code had checked that nothing
- * requires any more. Rows required from another page raise an inline notice instead.
- *
- * @returns {boolean} True when the selection changed.
- */
-function refreshRequiredSelections() {
-    const toggle = document.getElementById('autoSelectLagMembers');
-    const enabled = Boolean(toggle && toggle.checked);
-    const rows = _rowsByPortId();
-    const required = new Set();
-    const offPage = new Map();
-    // A blocked port is never selected, and the walk never starts from or goes through one.
-    const blocked = _blockedPortIds();
-
-    if (enabled) {
-        // Seeds are the rows selected on their own account: a user click, a select-all, or a
-        // member an aggregate pulled in. A row held only by this function is never a seed, or
-        // releasing the last real selection could not release the chain above it.
-        const pending = [];
-        rows.forEach(function (row) {
-            const checkbox = _selectableCheckbox(row);
-            if (checkbox && checkbox.checked && !checkbox.dataset[REQUIRED_MARKER] && !blocked.has(row.dataset.portId)) {
-                pending.push(row);
-            }
-        });
-
-        while (pending.length) {
-            const row = pending.pop();
-            _requiredPortIds(row).forEach(function (portId) {
-                if (required.has(portId) || blocked.has(portId)) return;
-                required.add(portId);
-                const requiredRow = rows.get(portId);
-                if (requiredRow) {
-                    pending.push(requiredRow);
-                } else if (!offPage.has(portId)) {
-                    // Name the relationship so the notice can say which row is missing and why.
-                    const isParent = row.dataset.parentPortId === portId;
-                    const isBridge = row.dataset.bridgePortId === portId;
-                    offPage.set(portId, {
-                        kind: isParent ? 'Parent' : (isBridge ? 'Bridge' : 'LAG'),
-                        name: (
-                            isParent ? row.dataset.parentName : (isBridge ? row.dataset.bridgeName : row.dataset.lagName)
-                        ) || portId,
-                    });
-                }
-            });
-        }
-    }
-
-    let changed = false;
-    rows.forEach(function (row, portId) {
-        const checkbox = _selectableCheckbox(row);
-        if (!checkbox) return;
-        if (required.has(portId)) {
-            // A row the user cleared by hand stays cleared. A missing parent only leaves the
-            // relationship unset rather than failing the sync, so re-checking the box under the
-            // user's cursor would be fighting them over a hint.
-            if (!checkbox.checked && !checkbox.dataset[CLEARED_MARKER]) {
-                checkbox.checked = true;
-                checkbox.dataset[REQUIRED_MARKER] = 'true';
-                changed = true;
-            }
-        } else {
-            if (checkbox.dataset[REQUIRED_MARKER]) {
-                delete checkbox.dataset[REQUIRED_MARKER];
-                if (checkbox.checked) {
-                    checkbox.checked = false;
-                    changed = true;
-                }
-            }
-            // Nothing needs this row any more, so a later requirement starts from a clean slate.
-            delete checkbox.dataset[CLEARED_MARKER];
-        }
-    });
-
-    offPage.forEach(function (related) {
-        _showRequiredRowCrossPageNotice(related.name, related.kind);
-    });
-
-    return changed;
-}
-
-/**
- * Check or release the member rows of an aggregate the user just toggled.
- *
- * @param {HTMLTableRowElement} row - The aggregate row that changed.
- * @param {boolean} checked - Whether the aggregate is now selected.
- * @param {Map<string, HTMLTableRowElement[]>} membersByLag - Member rows per aggregate port id, from _membersByLag().
- * @returns {boolean} True when the selection changed.
- */
-function _propagateToLagMembers(row, checked, membersByLag) {
-    const portId = row.dataset.portId;
-    if (!portId) return false;
-    let changed = false;
-    // A blocked row (an unresolved owner keeps its checkbox) never starts a cascade and is never pulled in.
-    const blocked = _blockedPortIds();
-    if (checked && blocked.has(portId)) return false;
-    (membersByLag.get(portId) || []).forEach(function (memberRow) {
-        const checkbox = _selectableCheckbox(memberRow);
-        if (!checkbox) return;
-        if (checked) {
-            if (blocked.has(memberRow.dataset.portId)) return;
-            if (!checkbox.checked) {
-                checkbox.checked = true;
-                checkbox.dataset[MEMBER_MARKER] = 'true';
-                changed = true;
-            }
-        } else if (checkbox.dataset[MEMBER_MARKER]) {
-            delete checkbox.dataset[MEMBER_MARKER];
-            if (checkbox.checked) {
-                checkbox.checked = false;
-                changed = true;
-            }
-        }
-    });
-    return changed;
-}
-
-/**
- * Apply the selection rules for a row the user set, and cascade to the aggregate's members.
- *
- * The change handler calls this for a click; the shift-range and select-all paths call it for
- * each row they assign, because a programmatic `checked` assignment raises no change event.
- * A range that crosses an already selected aggregate must not re-check a member the user cleared.
- *
- * @param {HTMLInputElement} checkbox - The row checkbox, already in its new state.
- * @param {Map<string, HTMLTableRowElement[]>} membersByLag - Member rows per aggregate port id, from _membersByLag().
- * @param {boolean} changed - Whether the checkbox state changed; only a transition cascades.
- * @returns {boolean} True when a member row changed.
- */
-function applyRowSelection(checkbox, membersByLag, changed) {
-    const row = checkbox.closest('tr');
-    if (!row) return false;
-    // The user acted on this row, so it is theirs now: drop the markers that said this code
-    // had put it there, or a later recompute would release a row they chose to keep.
-    delete checkbox.dataset[REQUIRED_MARKER];
-    if (checkbox.checked) {
-        delete checkbox.dataset[CLEARED_MARKER];
-        delete checkbox.dataset[MEMBER_MARKER];
-    } else {
-        delete checkbox.dataset[MEMBER_MARKER];
-        checkbox.dataset[CLEARED_MARKER] = 'true';
-    }
-    if (!changed) return false;
-    const toggle = document.getElementById('autoSelectLagMembers');
-    if (!toggle || !toggle.checked) return false;
-    return _propagateToLagMembers(row, checkbox.checked, membersByLag);
 }
 
 document.addEventListener('change', function (e) {
@@ -1732,35 +1439,7 @@ document.addEventListener('change', function (e) {
     if (!checkbox.matches('input[name="select"]') || checkbox.disabled) return;
     // A converted table keeps its selection in the server draft, which sync_draft.js writes.
     if (checkbox.closest('table[data-draft-id]')) return;
-
-    applyRowSelection(checkbox, _membersByLag(), true);
     commitSelectionChange(checkbox.closest('table'));
-});
-
-// Keep the cascade in step with #autoSelectLagMembers: turning it off releases every row this
-// code is holding, turning it back on re-derives them from what the user has selected.
-document.addEventListener('change', function (e) {
-    const toggle = e.target;
-    if (!toggle.matches('#autoSelectLagMembers')) return;
-
-    if (!toggle.checked) {
-        // One rule in both directions: turning the cascade off gives back exactly the rows it
-        // added, so the selection left behind is the one the user made themselves.
-        document.querySelectorAll('input[name="select"][data-auto-member]').forEach(function (checkbox) {
-            delete checkbox.dataset[MEMBER_MARKER];
-            checkbox.checked = false;
-        });
-    }
-    commitSelectionChange(
-        document.getElementById('librenms-interface-table') || document.getElementById('librenms-interface-table-vm')
-    );
-
-    if (!toggle.checked) {
-        const noticeContainer = document.getElementById('parent-cross-page-notices');
-        if (noticeContainer) {
-            noticeContainer.remove();
-        }
-    }
 });
 
 // ============================================
@@ -1807,12 +1486,8 @@ function offPageRecords(table, selection) {
 
 /** Tables whose selection survives pagination, and the tab each belongs to. */
 const SELECTABLE_TABLE_TABS = {
-    'librenms-interface-table': 'interfaces',
-    'librenms-interface-table-vm': 'interfaces',
     'librenms-cable-table': 'cables',
     'librenms-cable-table-vc': 'cables',
-    'librenms-vlan-table': 'vlans',
-    'librenms-port-vlan-table': 'vlans',
     'librenms-module-table': 'modules',
 };
 const SELECTABLE_TABLE_IDS = Object.keys(SELECTABLE_TABLE_TABS);
@@ -1887,11 +1562,10 @@ function _selectionSnapshot(table) {
 /**
  * Read a table's stored selection.
  *
- * Each entry records the row's companion inputs and whether the cascade put the row there, so a
- * row restored after paging keeps the same standing it had before.
+ * Each entry records the row's companion inputs, so a row restored after paging keeps its choices.
  *
  * @param {HTMLElement} table - The table element.
- * @returns {Object<string, {inputs: Object<string, string>, auto: string}>} Selected rows by key.
+ * @returns {Object<string, {inputs: Object<string, string>}>} Selected rows by key.
  */
 function readStoredSelection(table) {
     try {
@@ -1982,7 +1656,6 @@ function _isSelectionCompanionName(name) {
         Boolean(name) &&
         (name.startsWith('device_selection_') ||
             name.startsWith('selection_grant_') ||
-            name.startsWith('vlan_group_') ||
             _isShownStateName(name))
     );
 }
@@ -1999,7 +1672,6 @@ function _isShownStateName(name) {
         'expected_local_device_id_',
         'expected_remote_id_',
         'expected_remote_device_id_',
-        'expected_vlan_name_',
     ].some((prefix) => name.startsWith(prefix));
 }
 
@@ -2018,24 +1690,11 @@ function persistTableSelection(table) {
         // A restored row keeps its stored member and grant until its verify settles; a user's new member stores no grant.
         if (row.dataset.verifyPending === 'restore') return;
         if (checkbox.checked) {
-            selection[checkbox.value] = {
-                inputs: _rowCompanionInputs(row),
-                auto: checkbox.dataset[REQUIRED_MARKER]
-                    ? 'required'
-                    : checkbox.dataset[MEMBER_MARKER]
-                      ? 'member'
-                      : '',
-            };
+            selection[checkbox.value] = { inputs: _rowCompanionInputs(row) };
         } else {
             // Only the visible page can retract a row: an absent checkbox means "another page",
             // not "cleared".
             delete selection[checkbox.value];
-        }
-    });
-    // A rendered row the rules block has no checkbox and cannot be submitted.
-    table.querySelectorAll('tr[data-rule-state][data-port-id]').forEach(function (row) {
-        if (!row.querySelector('input[name="select"]')) {
-            delete selection[row.dataset.portId];
         }
     });
     writeStoredSelection(table, selection);
@@ -2051,7 +1710,6 @@ function persistTableSelection(table) {
 function restoreTableSelection(table) {
     if (!table || !table.id) return;
     const selection = readStoredSelection(table);
-    const blocked = _blockedPortIds();
     let cleared = 0;
     const reverified = [];
     table.querySelectorAll('td input[name="select"]').forEach(function (checkbox) {
@@ -2070,13 +1728,6 @@ function restoreTableSelection(table) {
             cleared += 1;
             return;
         }
-        // A row the cascade added is re-derived by the closure; it is never restored onto a blocked row.
-        if (entry.auto && blocked.has(row.dataset.portId)) return;
-        // A stored group that the row no longer offers would fall back to another one, so the row is cleared.
-        if (_storedChoiceIsGone(row, companionInputs)) {
-            cleared += 1;
-            return;
-        }
         if (reverify) _rememberRenderedModuleMember(reverify);
         row.querySelectorAll('select[name], input[type="hidden"][name]').forEach(function (input) {
             if (!_isSelectionCompanionName(input.name)) return;
@@ -2085,18 +1736,13 @@ function restoreTableSelection(table) {
             if (input.name.startsWith('selection_grant_')) return;
             // A rendered row posts the state it shows now; only an off-page row posts its stored state.
             if (_isShownStateName(input.name)) return;
-            const renderedValue = input.value;
             if (input.tomselect) {
                 input.tomselect.setValue(companionInputs[input.name], true);
             } else {
                 input.value = companionInputs[input.name];
             }
-            if (input.matches('select.vlan-sync-group-select') && input.value !== renderedValue) {
-                verifyVlanSyncGroup(input, input.dataset.vlanId, input.dataset.vlanName, input.value);
-            }
         });
         checkbox.checked = true;
-        _applySelectionMarker(checkbox, entry.auto);
         if (reverify) reverified.push(reverify);
     });
     // The verify locks its row first, so the commit below keeps the stored member and grant of that row.
@@ -2127,28 +1773,6 @@ function _restoredModuleMemberSelect(table, row, rowKey, companionInputs) {
 }
 
 /**
- * Return whether the row no longer offers a stored VLAN group.
- *
- * Setting a select to a value it does not offer selects its first option, so the row would post another
- * group than the user chose. The empty value is always offered.
- *
- * @param {HTMLTableRowElement} row - The rendered row.
- * @param {Object<string, string>} companionInputs - The stored companion values of the row.
- * @returns {boolean}
- */
-function _storedChoiceIsGone(row, companionInputs) {
-    return Array.from(row.querySelectorAll('select.vlan-sync-group-select[name]')).some(
-        (select) => {
-            if (!Object.hasOwn(companionInputs, select.name) || companionInputs[select.name] === '') return false;
-            const stored = companionInputs[select.name];
-            return select.tomselect
-                ? !Object.hasOwn(select.tomselect.options, stored)
-                : !Array.from(select.options).some((option) => option.value === stored);
-        }
-    );
-}
-
-/**
  * Keep the member the page rendered as the verified one, which a failed verify rolls back to.
  *
  * Call it before any change of the select: with no option[selected], the browser shows its first option.
@@ -2162,7 +1786,7 @@ function _rememberRenderedModuleMember(select) {
 }
 
 /** Tables whose rows carry a Virtual Chassis member that the row's verify request decided. */
-const MEMBER_VERIFIED_TABLE_IDS = new Set(['librenms-interface-table', 'librenms-cable-table-vc']);
+const MEMBER_VERIFIED_TABLE_IDS = new Set(['librenms-cable-table-vc']);
 
 /**
  * Return whether a stored row names another Virtual Chassis member than the page renders.
@@ -2211,29 +1835,14 @@ function _showClearedSelectionNotice(table, count) {
 /**
  * Return whether a row is still part of the live page, so a late verify answer may change it.
  *
- * A tab swap replaces the rows, and an answer for a replaced row must not touch the new page,
- * the blocked set or the stored selection.
+ * A tab swap replaces the rows, and an answer for a replaced row must not touch the new page
+ * or the stored selection.
  *
  * @param {HTMLTableRowElement|null} row - The row a verify request was sent for.
  * @returns {boolean}
  */
 function _isLiveRow(row) {
     return Boolean(row && row.isConnected);
-}
-
-/**
- * Record how a restored row got selected, so the closure still releases a row it added.
- *
- * @param {HTMLInputElement} checkbox - The row checkbox.
- * @param {string} auto - The stored standing: 'required', 'member', or anything else for the user's.
- * @returns {void}
- */
-function _applySelectionMarker(checkbox, auto) {
-    if (auto === 'required') {
-        checkbox.dataset[REQUIRED_MARKER] = 'true';
-    } else if (auto === 'member') {
-        checkbox.dataset[MEMBER_MARKER] = 'true';
-    }
 }
 
 /**
@@ -2247,10 +1856,6 @@ function offPageSelectionKeys(table) {
     const visible = new Set();
     table.querySelectorAll('td input[name="select"]').forEach(function (checkbox) {
         visible.add(checkbox.value);
-    });
-    // An interface row the rules block has no checkbox, but it is on this page, not another one.
-    table.querySelectorAll('tr[data-rule-state][data-port-id]').forEach(function (row) {
-        visible.add(row.dataset.portId);
     });
     return Object.keys(selection).filter(function (key) {
         return !visible.has(key);
@@ -2299,7 +1904,6 @@ function updateOffPageSelectionNotice(table) {
             });
             writeStoredSelection(table, selection);
             updateOffPageSelectionNotice(table);
-            updateBulkActionButton();
         });
         notice.appendChild(clear);
         table.parentNode.insertBefore(notice, table);
@@ -2528,67 +2132,6 @@ document.addEventListener('htmx:confirm', function (e) {
     confirmSyncAction(e.detail.question, () => e.detail.issueRequest(true));
 });
 
-/**
- * Show a brief inline notice when a row's parent or aggregate is not on the visible page.
- *
- * The relationship is applied when that interface already exists in NetBox, but an interface
- * NetBox does not have yet is only created by syncing its own row, so the notice says where to
- * find it rather than promising it is handled. The selection survives the trip.
- *
- * The notice auto-dismisses after 5 seconds.
- *
- * @param {string} relatedName - Name of the required interface.
- * @param {string} kind - Relationship label, 'Parent' or 'LAG'.
- */
-function _showRequiredRowCrossPageNotice(relatedName, kind) {
-    const containerId = 'parent-cross-page-notices';
-    let container = document.getElementById(containerId);
-    if (!container) {
-        // Insert before the table (find a stable anchor inside the form)
-        const table = document.getElementById('librenms-interface-table') ||
-                      document.getElementById('librenms-interface-table-vm');
-        if (!table) return;
-        container = document.createElement('div');
-        container.id = containerId;
-        table.parentNode.insertBefore(container, table);
-    }
-
-    // Avoid duplicate notices for the same interface
-    if (container.querySelector('[data-required="' + CSS.escape(relatedName) + '"]')) return;
-
-    const notice = document.createElement('div');
-    notice.className = 'alert alert-info alert-dismissible py-1 px-2 small mb-1';
-    notice.dataset.required = relatedName;
-
-    // Build the notice via DOM nodes rather than innerHTML: the name is interface
-    // data and must never be interpreted as HTML (DOM-XSS). textContent escapes it.
-    const icon = document.createElement('i');
-    icon.className = 'mdi mdi-information-outline me-1';
-    notice.appendChild(icon);
-    notice.appendChild(document.createTextNode(kind + ' interface '));
-    const strong = document.createElement('strong');
-    strong.textContent = relatedName;
-    notice.appendChild(strong);
-    notice.appendChild(
-        document.createTextNode(
-            ' is not shown on this page (another page, or excluded by the filter). If it is not in NetBox yet,'
-            + ' show it and select it too; this page keeps your selection.'
-        )
-    );
-    const closeBtn = document.createElement('button');
-    closeBtn.type = 'button';
-    closeBtn.className = 'btn-close btn-sm';
-    closeBtn.setAttribute('data-bs-dismiss', 'alert');
-    closeBtn.setAttribute('aria-label', 'Close');
-    notice.appendChild(closeBtn);
-
-    container.appendChild(notice);
-
-    setTimeout(function () {
-        if (notice.parentNode) notice.parentNode.removeChild(notice);
-    }, 5000);
-}
-
 // ============================================
 // VIRTUAL CHASSIS & VRF HANDLING
 // ============================================
@@ -2599,31 +2142,8 @@ function _showRequiredRowCrossPageNotice(relatedName, kind) {
  */
 function initializeVCMemberSelect() {
     setTimeout(() => {
-        const interfaceTable = document.getElementById('librenms-interface-table');
         const cableTable = document.getElementById('librenms-cable-table-vc');
         const moduleTable = document.getElementById('librenms-module-table');
-
-        if (interfaceTable) {
-            // Only target VC member selects, exclude VLAN group selects
-            const interfaceSelects = interfaceTable.querySelectorAll('.form-select.tomselected:not(.vlan-group-select)');
-            interfaceSelects.forEach(select => {
-                if (select.tomselect && !select.dataset.interfaceSelectInitialized) {
-                    select.dataset.interfaceSelectInitialized = 'true';
-                    // Seed the rollback baseline HERE, before the change listener is attached:
-                    // at init time select.value still reflects the originally rendered (verified)
-                    // assignment. Seeding it lazily inside handleInterfaceChange instead would run
-                    // after select.value already equals the newly-selected member, so a verify
-                    // failure would "roll back" to the rejected member.
-                    if (typeof select._lastVerifiedMember === 'undefined') {
-                        const selectedOption = select.querySelector('option[selected]');
-                        select._lastVerifiedMember = selectedOption ? selectedOption.value : select.value;
-                    }
-                    select.tomselect.on('change', function (value) {
-                        handleInterfaceChange(select, value);
-                    });
-                }
-            });
-        }
 
         if (cableTable) {
             const cableSelects = cableTable.querySelectorAll('.form-select.tomselected');
@@ -2675,744 +2195,9 @@ function initializeVRFSelects() {
         });
     }, TOMSELECT_INIT_DELAY_MS);
 }
-
-/**
- * Initialize VLAN edit buttons that open the VLAN detail modal.
- * Each button carries per-VLAN data and VLAN group options as data attributes.
- */
-function initializeVlanGroupSelects() {
-    document.querySelectorAll('.vlan-edit-btn').forEach(btn => {
-        if (btn.dataset.vlanEditInitialized) return;
-        btn.dataset.vlanEditInitialized = 'true';
-
-        btn.addEventListener('click', function (e) {
-            e.preventDefault();
-            openVlanDetailModal(this);
-        });
-    });
-}
-
-// The warning icons carry their text only in the title, so the same text is their accessible name.
-const VLAN_MISSING_ICON = ' <i class="mdi mdi-alert text-danger" role="img" title="VLAN not in NetBox" aria-label="VLAN not in NetBox"></i>';
-const VLAN_MISSING_IN_GROUP_ICON = ' <i class="mdi mdi-alert text-danger" role="img"'
-    + ' title="VLAN not in selected group—use VLAN Sync first to create it"'
-    + ' aria-label="VLAN not in selected group—use VLAN Sync first to create it"></i>';
-
-/**
- * Open the VLAN detail modal for a specific interface.
- * Populates the modal table with per-VLAN rows and group dropdowns.
- *
- * @param {HTMLElement} btn - The edit button element with data attributes
- */
-function openVlanDetailModal(btn) {
-    const interfaceName = btn.dataset.interface;
-    const rowKey = btn.dataset.rowKey;
-    const deviceId = btn.dataset.deviceId;
-    const vlans = JSON.parse(btn.dataset.vlans);
-    const vlanGroups = JSON.parse(btn.dataset.vlanGroups);
-
-    // Set modal title
-    document.getElementById('vlanModalInterfaceName').textContent = interfaceName;
-
-    // Store current interface context on modal for save handler
-    const modal = document.getElementById('vlanDetailModal');
-    modal.dataset.currentInterface = interfaceName;
-    modal.dataset.currentRowKey = rowKey;
-    modal.dataset.currentDeviceId = deviceId;
-
-    // Clear any stale error from a previous save attempt
-    const staleAlert = modal.querySelector('.vlan-override-error');
-    if (staleAlert) { staleAlert.remove(); }
-
-    // Build table rows
-    const tbody = document.getElementById('vlanDetailTableBody');
-    tbody.innerHTML = '';
-
-    vlans.forEach(vlan => {
-        const tr = document.createElement('tr');
-
-        // VID cell
-        const tdVid = document.createElement('td');
-        const vidSpan = document.createElement('span');
-        vidSpan.className = vlan.css;
-        vidSpan.textContent = vlan.vid;
-        if (vlan.missing) {
-            vidSpan.innerHTML += VLAN_MISSING_ICON;
-        }
-        tdVid.appendChild(vidSpan);
-        tr.appendChild(tdVid);
-
-        // Type cell
-        const tdType = document.createElement('td');
-        tdType.textContent = vlan.type === 'U' ? 'Untagged' : 'Tagged';
-        tr.appendChild(tdType);
-
-        // VLAN Group dropdown cell
-        const tdGroup = document.createElement('td');
-
-        {
-            const select = document.createElement('select');
-            select.className = 'form-select form-select-sm vlan-modal-group-select';
-            select.dataset.vid = vlan.vid;
-            select.dataset.interface = interfaceName;
-            select.dataset.rowKey = rowKey;
-
-            vlanGroups.forEach(group => {
-                const option = document.createElement('option');
-                option.value = group.id;
-                option.textContent = group.scope ? `${group.name} (${group.scope})` : group.name;
-                if (String(group.id) === String(vlan.group_id)) {
-                    option.selected = true;
-                }
-                select.appendChild(option);
-            });
-
-            // On change, update the hidden input for this VLAN immediately
-            select.addEventListener('change', function () {
-                updateHiddenVlanGroupInput(rowKey, vlan.vid, this.value);
-
-                // Re-verify VLAN colors after group change
-                verifyVlanInGroup(this, deviceId, vlan.vid, vlan.type, this.value);
-            });
-
-            tdGroup.appendChild(select);
-        }
-        tr.appendChild(tdGroup);
-
-        tbody.appendChild(tr);
-    });
-
-    // Reset "apply to all" checkbox
-    const applyAllCheckbox = document.getElementById('applyVlanGroupToAll');
-    if (applyAllCheckbox) {
-        applyAllCheckbox.checked = false;
-    }
-
-    showModal(document.getElementById('vlanDetailModal'));
-}
-
-/**
- * Update the hidden input for a specific VLAN group assignment.
- *
- * @param {string} rowKey - Stable LibreNMS port ID
- * @param {number} vid - VLAN ID
- * @param {string} groupId - Selected group ID
- */
-function updateHiddenVlanGroupInput(rowKey, vid, groupId) {
-    const input = document.querySelector(
-        `input.vlan-group-hidden[name="vlan_group_${rowKey}_${vid}"]`
-    );
-    if (input) {
-        input.value = groupId;
-    }
-}
-
-/**
- * Verify if a VLAN exists in the selected group and update the modal row status.
- * Also updates the css property in the edit button's data-vlans so that when
- * the modal is saved, the inline summary can be re-rendered with correct colors.
- *
- * @param {HTMLSelectElement} select - The group dropdown in the modal
- * @param {string} deviceId - Device ID for API call
- * @param {number} vid - VLAN ID to verify
- * @param {string} vlanType - "U" for untagged, "T" for tagged
- * @param {string} groupId - Selected group ID
- */
-let pendingVlanVerifications = 0;
-
-function _vlanVerifyStart(saveBtn) {
-    pendingVlanVerifications++;
-    if (saveBtn) saveBtn.disabled = true;
-}
-
-function _vlanVerifyEnd(saveBtn) {
-    pendingVlanVerifications = Math.max(0, pendingVlanVerifications - 1);
-    if (saveBtn && pendingVlanVerifications === 0) saveBtn.disabled = false;
-}
-
-function verifyVlanInGroup(select, deviceId, vid, vlanType, groupId) {
-
-    const saveBtn = document.getElementById('saveVlanGroups');
-    _vlanVerifyStart(saveBtn);
-
-    // Capture rowKey before the async fetch to avoid stale closure if the modal
-    // is opened for a different interface while this request is in flight.
-    const modal = document.getElementById('vlanDetailModal');
-    const capturedRowKey = modal?.dataset.currentRowKey;
-
-    const csrfToken = getCsrfToken();
-    if (!csrfToken) {
-        _vlanVerifyEnd(saveBtn);  // don't leave the Save button stuck disabled
-        return;
-    }
-
-    fetch('/plugins/librenms_plugin/verify-vlan-group/', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'X-CSRFToken': csrfToken
-        },
-        body: JSON.stringify({
-            device_id: deviceId,
-            interface_name: select.dataset.interface,
-            vlan_group_id: groupId,
-            vid: String(vid),
-            vlan_type: vlanType
-        })
-    })
-        .then(response => {
-            if (!response.ok) {
-                return rejectWithRefusal(response, 'HTTP');
-            }
-            return response.json();
-        })
-        .then(data => {
-            if (select.value !== groupId) return;
-            if (data.status === 'success') {
-                const newCss = data.css_class || 'text-danger';
-                const isMissing = data.is_missing;
-
-                // Update the VID color and warning icon in the modal row
-                const row = select.closest('tr');
-                if (row) {
-                    const vidSpan = row.querySelector('td:first-child span');
-                    if (vidSpan) {
-                        vidSpan.className = newCss;
-                        // Update warning icon
-                        const existingIcon = vidSpan.querySelector('.mdi-alert');
-                        if (isMissing && !existingIcon) {
-                            vidSpan.innerHTML = vid + VLAN_MISSING_IN_GROUP_ICON;
-                        } else if (!isMissing && existingIcon) {
-                            vidSpan.textContent = String(vid);
-                        }
-                    }
-                }
-
-                // Store the updated CSS on the modal row for the save handler to read
-                if (row) {
-                    row.dataset.resolvedCss = newCss;
-                    row.dataset.resolvedMissing = isMissing ? 'true' : 'false';
-                }
-
-                // Update the css in the source edit button's data-vlans
-                if (capturedRowKey) {
-                    const btn = document.querySelector(`.vlan-edit-btn[data-row-key="${capturedRowKey}"]`);
-                    if (btn) {
-                        try {
-                            const btnVlans = JSON.parse(btn.dataset.vlans);
-                            const entry = btnVlans.find(v => String(v.vid) === String(vid));
-                            if (entry) {
-                                entry.css = newCss;
-                                entry.missing = isMissing;
-                            }
-                            btn.dataset.vlans = JSON.stringify(btnVlans);
-                        } catch (e) { /* skip */ }
-                    }
-                }
-            }
-        })
-        .catch(err => {
-            console.error('VLAN group verify failed:', err && err.message ? err.message : String(err));
-            showErrorToast(withFullStop(`The VLAN group check failed: ${err?.refusal || err?.message || err}`));
-        })
-        .finally(() => {
-            const saveBtn = document.getElementById('saveVlanGroups');
-            _vlanVerifyEnd(saveBtn);
-        });
-}
-
-/**
- * Initialize the VLAN modal save button.
- * Handles "Apply to all interfaces" when the checkbox is checked.
- */
-function initializeVlanModalSave() {
-    const saveBtn = document.getElementById('saveVlanGroups');
-    if (!saveBtn || saveBtn.dataset.initialized) return;
-    saveBtn.dataset.initialized = 'true';
-
-    saveBtn.addEventListener('click', function () {
-        const applyToAll = document.getElementById('applyVlanGroupToAll')?.checked;
-        const modalEl = document.getElementById('vlanDetailModal');
-        const currentRowKey = modalEl.dataset.currentRowKey;
-
-        // Collect all group selections and resolved CSS from the modal
-        const modalSelects = document.querySelectorAll('#vlanDetailTableBody .vlan-modal-group-select');
-        const vidGroupMap = {};
-        const vidCssMap = {};
-        const vidMissingMap = {};
-        modalSelects.forEach(select => {
-            vidGroupMap[select.dataset.vid] = select.value;
-            // Pick up resolved CSS from the verify endpoint (stored on the row)
-            const row = select.closest('tr');
-            if (row && row.dataset.resolvedCss) {
-                vidCssMap[select.dataset.vid] = row.dataset.resolvedCss;
-                vidMissingMap[select.dataset.vid] = row.dataset.resolvedMissing === 'true';
-            }
-        });
-
-        // Determine which buttons to update
-        const buttonsToUpdate = applyToAll
-            ? document.querySelectorAll('.vlan-edit-btn')
-            : document.querySelectorAll(`.vlan-edit-btn[data-row-key="${currentRowKey}"]`);
-
-        // Apply DOM mutations (btn.dataset.vlans, hidden inputs, summary spans)
-        // Called only after a successful server response when persisting, or immediately otherwise.
-        function applyButtonUpdates() {
-            buttonsToUpdate.forEach(btn => {
-                try {
-                    const btnVlans = JSON.parse(btn.dataset.vlans);
-                    const groups = JSON.parse(btn.dataset.vlanGroups);
-                    const btnRowKey = btn.dataset.rowKey;
-                    let changed = false;
-
-                    btnVlans.forEach(v => {
-                        if (vidGroupMap.hasOwnProperty(String(v.vid))) {
-                            const newGroupId = vidGroupMap[String(v.vid)];
-                            const matchedGroup = groups.find(g => String(g.id) === String(newGroupId));
-                            // A VC member can expose a different scoped group for the same VID.
-                            // Do not copy a source row's scoped group into a row that cannot select it.
-                            if (newGroupId && !matchedGroup) return;
-                            v.group_id = newGroupId;
-
-                            // Apply resolved missing/css state BEFORE computing group_name
-                            // so group_name reflects the verified state from the server.
-                            if (vidCssMap.hasOwnProperty(String(v.vid))) {
-                                v.css = vidCssMap[String(v.vid)];
-                                v.missing = vidMissingMap[String(v.vid)] || false;
-                            }
-
-                            if (v.missing) {
-                                v.group_name = 'Not in NetBox';
-                            } else {
-                                v.group_name = matchedGroup ? matchedGroup.name : '-- No Group (Global) --';
-                            }
-
-                            changed = true;
-
-                            // Update the hidden input for this VID on this interface
-                            const input = document.querySelector(
-                                `input.vlan-group-hidden[name="vlan_group_${btnRowKey}_${v.vid}"]`
-                            );
-                            if (input) {
-                                input.value = newGroupId;
-                            }
-                        }
-                    });
-
-                    if (changed) {
-                        btn.dataset.vlans = JSON.stringify(btnVlans);
-                        markFilterStaleRow(btn.closest('tr'));
-                        // Update the tooltip and re-render inline summary colors
-                        const summarySpan = btn.previousElementSibling;
-                        if (summarySpan && summarySpan.tagName === 'SPAN') {
-                            const tooltipLines = btnVlans.map(v =>
-                                v.missing
-                                    ? `VLAN ${v.vid}(${v.type}) \u2192 \u26A0 Not in NetBox`
-                                    : `VLAN ${v.vid}(${v.type}) \u2192 ${v.group_name}`
-                            );
-                            summarySpan.title = tooltipLines.join('\n');
-
-                            // Re-render inline VLAN summary with correct colors
-                            const MAX_INLINE = 3;
-                            const inlineParts = btnVlans.slice(0, MAX_INLINE).map(v => {
-                                const warning = v.missing
-                                    ? VLAN_MISSING_IN_GROUP_ICON
-                                    : '';
-                                return `<span class="${v.css}">${v.vid}(${v.type})${warning}</span>`;
-                            });
-                            let html = inlineParts.join(', ');
-                            if (btnVlans.length > MAX_INLINE) {
-                                const extra = btnVlans.length - MAX_INLINE;
-                                html += ` <span class="text-muted">+${extra} more</span>`;
-                            }
-                            summarySpan.innerHTML = html;
-                        }
-                    }
-                } catch (e) {
-                    // Skip buttons with invalid data
-                }
-            });
-        }
-
-        // Persist overrides in server cache so other table pages pick them up
-        if (applyToAll && Object.keys(vidGroupMap).length > 0) {
-            const deviceId = modalEl.dataset.currentDeviceId;
-            const csrfToken = getCsrfToken();
-            if (!csrfToken) {
-                // Can't persist without a CSRF token; surface it via the same error UI the
-                // fetch .catch uses rather than letting a `.value`-on-null TypeError abort silently.
-                let alertEl = modalEl.querySelector('.vlan-override-error');
-                if (!alertEl) {
-                    alertEl = document.createElement('div');
-                    alertEl.className = 'vlan-override-error alert alert-danger mt-2';
-                    modalEl.querySelector('.modal-body')?.appendChild(alertEl);
-                }
-                alertEl.textContent = 'Failed to save VLAN group overrides: CSRF token not found.';
-                return;
-            }
-            fetch('/plugins/librenms_plugin/save-vlan-group-overrides/', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-CSRFToken': csrfToken
-                },
-                body: JSON.stringify({
-                    device_id: deviceId,
-                    vid_group_map: vidGroupMap,
-                    server_key: syncServerKey() || null
-                })
-            }).then(response => {
-                if (!response.ok) {
-                    return fetchErrorMessage(response).then(msg => { throw new Error(`HTTP ${response.status}: ${msg}`); });
-                }
-                // Apply DOM mutations only after the server has persisted the overrides
-                applyButtonUpdates();
-                // Close modal on success
-                hideModal(modalEl);
-            }).catch(error => {
-                console.error('Failed to persist VLAN group overrides:', error.message);
-                let alertEl = modalEl.querySelector('.vlan-override-error');
-                if (!alertEl) {
-                    alertEl = document.createElement('div');
-                    alertEl.className = 'vlan-override-error alert alert-danger mt-2';
-                    modalEl.querySelector('.modal-body')?.appendChild(alertEl);
-                }
-                alertEl.textContent = 'Failed to save VLAN group overrides: ' + error.message;
-            });
-        } else {
-            // No server persist needed — apply DOM mutations and close immediately
-            applyButtonUpdates();
-            hideModal(modalEl);
-        }
-    });
-}
-
 // ============================================
 // VLAN SYNC TABLE GROUP VERIFICATION
 // ============================================
-
-/**
- * Initialize change listeners on the VLAN sync table's per-row group dropdowns.
- * When the user changes the VLAN group for a row, re-checks whether the VID
- * exists in the selected group and updates row colors accordingly.
- */
-function initializeVlanSyncGroupSelects() {
-    document.querySelectorAll('.vlan-sync-group-select').forEach(function (select) {
-        if (select.dataset.vlanSyncInitialized) return;
-        select.dataset.vlanSyncInitialized = 'true';
-
-        select.addEventListener('change', function () {
-            const vid = this.dataset.vlanId;
-            const vlanName = this.dataset.vlanName;
-            const groupId = this.value;
-
-            verifyVlanSyncGroup(this, vid, vlanName, groupId);
-        });
-    });
-}
-
-/**
- * Verify if a VLAN exists in the selected group and update the row colors.
- *
- * @param {HTMLSelectElement} select - The group dropdown element
- * @param {string} vid - VLAN ID
- * @param {string} vlanName - VLAN name from LibreNMS
- * @param {string} groupId - Selected VLAN group ID (empty string = global)
- */
-function verifyVlanSyncGroup(select, vid, vlanName, groupId) {
-    const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]');
-    if (!csrfToken) return;
-    // Only the latest group choice may repaint or roll back the row.
-    if (select._vlanGroupVerifyController) {
-        select._vlanGroupVerifyController.abort();
-    }
-    const controller = new AbortController();
-    select._vlanGroupVerifyController = controller;
-    // The row's colours and status show the verdict of the last verified group; the rendered group comes first.
-    if (typeof select._lastVerifiedGroup === 'undefined') {
-        const rendered = Array.from(select.options).find((option) => option.defaultSelected);
-        select._lastVerifiedGroup = rendered ? rendered.value : '';
-    }
-    const rollbackToLastVerified = () => {
-        if (select.tomselect && typeof select.tomselect.setValue === 'function') {
-            select.tomselect.setValue(select._lastVerifiedGroup, true);
-        } else {
-            select.value = select._lastVerifiedGroup;
-        }
-        const table = select.closest('table');
-        if (table) commitSelectionChange(table);
-    };
-
-    fetch('/plugins/librenms_plugin/verify-vlan-sync-group/', {
-        method: 'POST',
-        signal: controller.signal,
-        headers: {
-            'Content-Type': 'application/json',
-            'X-CSRFToken': csrfToken.value
-        },
-        body: JSON.stringify({
-            vid: String(vid),
-            name: vlanName,
-            vlan_group_id: groupId || null,
-            sync_actions: !!select.closest('form')
-        })
-    })
-        .then(response => {
-            if (!response.ok) {
-                return rejectWithRefusal(response, 'HTTP');
-            }
-            return response.json();
-        })
-        .then(data => {
-            // A tab swap replaced this row, and its table no longer owns the stored selection.
-            if (controller.signal.aborted || !_isLiveRow(select.closest('tr'))) return;
-            if (data.status !== 'success') {
-                rollbackToLastVerified();
-                return;
-            }
-            select._lastVerifiedGroup = groupId;
-
-            const row = select.closest('tr');
-            if (!row) return;
-
-            const cssClass = data.css_class || 'text-danger';
-
-            // Update the VLAN ID cell color
-            const vidCell = row.querySelector('td[data-col="vlan_id"] span');
-            if (vidCell) {
-                vidCell.className = cssClass;
-            }
-
-            // Update the Name cell color and tooltip
-            const nameCell = row.querySelector('td[data-col="name"] span');
-            if (nameCell) {
-                nameCell.className = cssClass;
-
-                // Add/remove name mismatch tooltip
-                if (data.exists_in_netbox && !data.name_matches && data.netbox_vlan_name) {
-                    nameCell.title = 'NetBox: ' + data.netbox_vlan_name + ' | LibreNMS: ' + vlanName;
-                } else {
-                    nameCell.title = '';
-                }
-            }
-
-            const statusCell = row.querySelector('td[data-col="status"]');
-            if (statusCell && data.status_html) {
-                statusCell.innerHTML = data.status_html;
-            }
-            markFilterStaleRow(row);
-        })
-        .catch(error => {
-            if (error.name === 'AbortError' || controller.signal.aborted || !_isLiveRow(select.closest('tr'))) return;
-            console.error('VLAN sync group verification error:', error);
-            rollbackToLastVerified();
-            showErrorToast(withFullStop(`The VLAN group check failed: ${error.refusal || error.message}`));
-        });
-}
-
-/**
- * Handle VC member selection change and verify interface mapping.
- * Fetches interface data from selected device and updates table row.
- *
- * @param {HTMLSelectElement} select - The VC member dropdown element
- * @param {string} value - Selected device ID
- */
-function handleInterfaceChange(select, value) {
-    const csrfToken = getCsrfToken();
-    if (!csrfToken) return;  // missing token → abort rather than throw on `.value`
-    // Abort any still-in-flight verification for this select: on rapid VC-member changes an
-    // older /verify-interface/ response can otherwise arrive after a newer one and repaint the
-    // row with stale cells/relationship controls. Mirrors handleModuleChange's AbortController.
-    if (select._interfaceVerifyController) {
-        select._interfaceVerifyController.abort();
-    }
-    const controller = new AbortController();
-    select._interfaceVerifyController = controller;
-
-    // Resolve the row from the changed <select> itself, not by data-interface: the same
-    // interface name can appear in both the main and OOB datasets, so a name lookup can
-    // post the wrong row's port_id and repaint the wrong row. closest('tr') is unique.
-    const row = select.closest('tr');
-
-    // Defensive fallback: the baseline is normally seeded at init time (initializeVCMemberSelect),
-    // before this change listener is attached, while select.value still holds the verified
-    // assignment. If for some reason it wasn't, seed it ONLY from the rendered <option selected> —
-    // NOT from select.value, which by the time this callback runs already equals the newly
-    // selected (unverified) member, so a verify failure would otherwise "roll back" to it.
-    if (typeof select._lastVerifiedMember === 'undefined') {
-        const selectedOption = select.querySelector('option[selected]');
-        select._lastVerifiedMember = selectedOption ? selectedOption.value : null;
-    }
-
-    // Disable this row's relationship buttons while the verify is in flight. A click landing
-    // before the response repaints the row would otherwise POST the freshly-selected member's
-    // objectId together with the previous member's stale relationship metadata carried by the
-    // old button markup, syncing the wrong relationship.
-    // Tag the buttons *this* flow disables with data-verify-locked so re-enabling can target
-    // exactly them by re-querying the live row, rather than replaying a captured list. Two
-    // reasons: (1) on rapid changes a second handler captures an empty set (the buttons are
-    // already disabled) and the first is aborted without re-enabling — re-querying the marker
-    // lets whichever request settles last restore them; (2) the relationship sync click handler
-    // also disables its own button mid-POST (and keeps it disabled on success), so we must not
-    // re-enable a button it owns — only ones we marked. We only lock currently-enabled buttons,
-    // so a button already disabled by an in-flight sync is left untouched.
-    if (row) {
-        row.querySelectorAll(
-            '.lag-sync-btn:not([disabled]), .parent-sync-btn:not([disabled]), .bridge-sync-btn:not([disabled])'
-        ).forEach((b) => {
-            b.disabled = true;
-            b.dataset.verifyLocked = '1';
-        });
-    }
-    const reenableRelationshipButtons = () => {
-        if (!row) return;
-        // Re-query so the request that settles last re-enables whatever is still verify-locked,
-        // even buttons a superseded (aborted) request had locked. Buttons whose cell a successful
-        // verify repainted are gone from the row (replaced by fresh enabled markup), so they're
-        // simply not found here.
-        row.querySelectorAll(
-            '.lag-sync-btn[data-verify-locked], .parent-sync-btn[data-verify-locked], .bridge-sync-btn[data-verify-locked]'
-        ).forEach((b) => {
-            delete b.dataset.verifyLocked;
-            b.disabled = false;
-        });
-    };
-
-    // On a verify failure (non-success payload or a non-abort error), roll the dropdown back to
-    // the last confirmed member so the visible selection matches the row's current HTML, then
-    // re-enable the controls — the row is now consistent again and the user can retry. With no
-    // confirmed baseline yet, keep the controls locked rather than re-enabling on an unverified
-    // selection, which would let a retry post stale relationship data from the previous member.
-    const rollbackToLastVerified = () => {
-        if (select._lastVerifiedMember != null) {
-            // The member control is TomSelect-enhanced, so assigning select.value alone
-            // leaves the visible dropdown showing the rejected member while the backing
-            // value rolls back — the next sync click would then post a different member
-            // than the user sees. Sync through the widget (mirrors initializeVCMemberSelect
-            // at the vcMemberSelect.tomselect.setValue call); pass silent=true so this
-            // programmatic reset doesn't re-fire the change handler.
-            if (select.tomselect && typeof select.tomselect.setValue === 'function') {
-                select.tomselect.setValue(select._lastVerifiedMember, true);
-            } else {
-                select.value = select._lastVerifiedMember;
-            }
-            reenableRelationshipButtons();
-        }
-        if (row) commitSelectionChange(row.closest('table'));
-    };
-
-    // The page query rides along, so a repainted Rebind button posts back with the same filters and page.
-    fetch('/plugins/librenms_plugin/verify-interface/' + window.location.search, {
-        method: 'POST',
-        signal: controller.signal,
-        headers: {
-            'Content-Type': 'application/json',
-            'X-CSRFToken': csrfToken
-        },
-        body: JSON.stringify({
-            device_id: value,
-            // Keep page-level migrated mode stable when the selected VC member changes.
-            origin_device_id: row?.closest('[data-interface-origin-device-id]')?.dataset.interfaceOriginDeviceId || null,
-            interface_name: select.dataset.interface,
-            // Stable port_id of this row so the server picks the correct cached row even when
-            // display names collide (host vs OOB controller); interface_name is the fallback.
-            port_id: row?.dataset.portId || null,
-            interface_name_field: document.querySelector('input[name="interface_name_field"]:checked')?.value || null,
-            server_key: syncServerKey() || null
-        })
-    })
-        .then(response => {
-            if (!response.ok) {
-                return rejectWithRefusal(response, 'Server error');
-            }
-            return response.json();
-        })
-        .then(data => {
-            // A tab swap replaced this row: the answer belongs to a page that no longer exists.
-            if (!_isLiveRow(row)) return;
-            // Reuse the row resolved above so the response patches the row the user changed,
-            // not the first same-named row on the page.
-            if (data.status === 'success' && row) {
-                const formattedRow = data.formatted_row;
-                // The member's platform decides the interface rules, so the checkbox follows it. A
-                // checkbox that stays is kept as it is, with its checked state and selection markers.
-                const selectionCell = row.querySelector('td[data-col="selection"]');
-                if (selectionCell && typeof formattedRow.selection !== 'undefined') {
-                    const hadCheckbox = Boolean(selectionCell.querySelector('input[name="select"]'));
-                    const hasCheckbox = formattedRow.selection.includes('name="select"');
-                    if (hadCheckbox !== hasCheckbox) selectionCell.innerHTML = formattedRow.selection;
-                }
-                row.querySelector('td[data-col="name"]').innerHTML = formattedRow.name;
-                row.querySelector('td[data-col="type"]').innerHTML = formattedRow.type;
-                row.querySelector('td[data-col="speed"]').innerHTML = formattedRow.speed;
-                row.querySelector('td[data-col="mac_address"]').innerHTML = formattedRow.mac_address;
-                row.querySelector('td[data-col="mtu"]').innerHTML = formattedRow.mtu;
-                row.querySelector('td[data-col="enabled"]').innerHTML = formattedRow.enabled;
-                row.querySelector('td[data-col="description"]').innerHTML = formattedRow.description;
-                const vlanCell = row.querySelector('td[data-col="vlans"]');
-                if (vlanCell && typeof formattedRow.vlans !== 'undefined') {
-                    vlanCell.innerHTML = formattedRow.vlans;
-                }
-                // The LibreNMS ID badge's colour is member-specific (it compares this port_id
-                // against the resolved member's stored librenms_id), so refresh it too —
-                // otherwise it keeps the previously-selected member's match/mismatch state.
-                const librenmsIdCell = row.querySelector('td[data-col="librenms_id"]');
-                if (librenmsIdCell && typeof formattedRow.librenms_id !== 'undefined') {
-                    librenmsIdCell.innerHTML = formattedRow.librenms_id;
-                }
-                // Parent/LAG relationship is device-specific, so refresh it too — otherwise
-                // it keeps the previously-selected member's status and sync button.
-                const parentCell = row.querySelector('td[data-col="parent"]');
-                if (parentCell && typeof formattedRow.parent !== 'undefined') {
-                    parentCell.innerHTML = formattedRow.parent;
-                }
-                // The row's own Sync button is shown only while the row differs from the
-                // resolved member, so a member switch that brings it into sync must clear it.
-                const actionsCell = row.querySelector('td[data-col="actions"]');
-                if (actionsCell && typeof formattedRow.actions !== 'undefined') {
-                    actionsCell.innerHTML = formattedRow.actions;
-                }
-                [
-                    ['parentPortId', 'librenms_parent_port_id'],
-                    ['parentName', 'librenms_parent_name'],
-                    ['memberOfLag', 'librenms_lag_port_id'],
-                    ['lagName', 'librenms_lag_name'],
-                    ['bridgePortId', 'librenms_bridge_port_id'],
-                    ['bridgeName', 'librenms_bridge_name'],
-                ].forEach(([datasetKey, responseKey]) => {
-                    row.dataset[datasetKey] = formattedRow[responseKey] ?? '';
-                });
-                initializeVlanGroupSelects();
-                initializeCheckboxListeners();
-                markFilterStaleRow(row);
-                // This member is now server-confirmed: record it as the rollback target and
-                // re-enable the relationship controls (the row HTML now matches this member).
-                select._lastVerifiedMember = value;
-                reenableRelationshipButtons();
-                commitSelectionChange(row.closest('table'), [{row: row, ruleState: formattedRow.rule_state}]);
-            } else {
-                // 2xx with data.status !== 'success' (application-level failure/conflict): the
-                // row was not repainted, so the verify-locked relationship buttons still carry
-                // the previous member's related port ID. Roll the dropdown back to the last
-                // confirmed member (restoring a consistent row) before re-enabling.
-                console.error('Interface verification rejected:', data.error || data.message || 'Unknown error');
-                rollbackToLastVerified();
-            }
-        })
-        .catch(error => {
-            // A superseded request was aborted on purpose — not an error to surface. Leave the
-            // buttons disabled: the newer handleInterfaceChange call already re-disabled them and
-            // owns re-enabling once its own verify settles.
-            if (error.name === 'AbortError' || !_isLiveRow(row)) return;
-            // A genuine verify failure (HTTP error / network) means the row was NOT repainted for
-            // the newly-selected member. Roll the dropdown back to the last confirmed member so
-            // the visible selection matches the unchanged row, then re-enable — rather than
-            // stranding the user on an unverified selection with locked controls.
-            console.error('Error verifying interface:', error.message);
-            rollbackToLastVerified();
-            showErrorToast(memberCheckFailure(error));
-        });
-}
 
 /**
  * Return the toast text for a member check that failed: the server's reason, then what the row keeps.
@@ -3467,7 +2252,6 @@ function handleCableChange(select, value) {
             button.disabled = false;
             delete button.dataset.verifyLocked;
         });
-        updateBulkActionButton();
     };
     const rollbackToLastVerified = () => {
         if (select._lastVerifiedMember != null) {
@@ -3859,75 +2643,6 @@ function handleModuleChange(select, value, options = {}) {
         });
 }
 
-/**
- * Initialize bulk VC member assignment functionality.
- * Applies selected VC member to all checked interfaces.
- */
-function initializeBulkEditApply() {
-    const applyButton = document.getElementById('apply-bulk-vc-member');
-    if (applyButton) {
-        applyButton.addEventListener('click', function () {
-            const vcMemberSelectElement = document.getElementById('bulk-vc-member-select');
-            if (!vcMemberSelectElement) return;
-            const selectedVcMemberId = vcMemberSelectElement.value;
-
-            // Get all selected checkboxes within the interface table
-            const interfaceTable = document.getElementById('librenms-interface-table');
-            if (!interfaceTable) return;
-            const selectedCheckboxes = interfaceTable.querySelectorAll(
-                'input[name="select"]:checked:not(:disabled)'
-            );
-
-            selectedCheckboxes.forEach(checkbox => {
-                const row = checkbox.closest('tr');
-                const vcMemberSelect = row.querySelector('.vc-member-select');
-                if (!vcMemberSelect || vcMemberSelect.value === selectedVcMemberId) return;
-                // Set the member silently and run the one verify handler, which ends in the commit.
-                if (vcMemberSelect.tomselect) {
-                    vcMemberSelect.tomselect.setValue(selectedVcMemberId, true);
-                } else {
-                    vcMemberSelect.value = selectedVcMemberId;
-                }
-                handleInterfaceChange(vcMemberSelect, selectedVcMemberId);
-            });
-
-            // Close the modal on 'Apply'
-            hideModal(document.getElementById('bulkVCMemberModal'));
-
-        });
-    }
-}
-
-/**
- * Initialize checkbox change listeners for bulk actions.
- * Enables/disables bulk action button based on selection.
- */
-function initializeCheckboxListeners() {
-    const interfaceTable = document.getElementById('librenms-interface-table');
-    if (!interfaceTable) return;
-    // Query live so a later row-level swap receives its own bulk-button listener.
-    const liveCheckboxes = () => interfaceTable.querySelectorAll('input[name="select"]:not(:disabled)');
-    // Idempotent across htmx:afterSwap re-runs — register the change handler once per checkbox.
-    liveCheckboxes().forEach(checkbox => {
-        if (checkbox.dataset.bulkChangeInitialized === 'true') return;
-        checkbox.dataset.bulkChangeInitialized = 'true';
-        checkbox.addEventListener('change', updateBulkActionButton);
-    });
-}
-
-/**
- * Update bulk action button enabled state based on checkbox selection.
- */
-function updateBulkActionButton() {
-    const interfaceTable = document.getElementById('librenms-interface-table');
-    if (!interfaceTable) return;
-    const anyChecked = interfaceTable.querySelectorAll('input[name="select"]:checked:not(:disabled)').length > 0;
-    const bulkButton = document.getElementById('bulk-vc-member-button');
-    if (bulkButton) {
-        bulkButton.disabled = !anyChecked;
-    }
-}
-
 // ============================================
 // FILTER STALE MARKS
 // ============================================
@@ -4275,11 +2990,6 @@ document.addEventListener('DOMContentLoaded', function () {
         });
     }
 });
-
-// Function to open the bulk VC modal
-function openBulkVCModal() {
-    showModal(document.getElementById('bulkVCMemberModal'));
-}
 
 // The longest wait for the preference save before the page loads with the other name field.
 const NAME_FIELD_SAVE_TIMEOUT_MS = 3000;
@@ -4850,17 +3560,12 @@ function initializeScripts() {
     initializeCheckboxes();
     initializeVCMemberSelect();
     initializeVRFSelects();
-    initializeVlanGroupSelects();
-    initializeVlanModalSave();
     initializeFilterDisclosures();
     initializeCountdowns();
-    initializeCheckboxListeners();
-    initializeBulkEditApply();
     updateInterfaceNameField();
     setInterfaceNameFieldFromURL();
     initializeNetBoxOnlyInterfaces();
     initializeSyncFormSpinners();
-    initializeVlanSyncGroupSelects();
     initializeVCReportButtons();
     initializeSyncCacheConsistency();
     initializeSyncTableFit();
@@ -5060,103 +3765,33 @@ document.body.addEventListener('htmx:timeout', function (event) {
     showHtmxModalError('The request timed out before the server answered.');
 });
 
-// Event delegation for interface relationship sync buttons.
-// Buttons are rendered inline in the interface table's data-col="parent" cell
-// (render_parent in tables/interfaces.py renders every relationship button there)
-// and carry the source and related LibreNMS port ids plus the NetBox owner.
-document.addEventListener('click', function (e) {
-    const btn = e.target.closest('.lag-sync-btn, .parent-sync-btn, .bridge-sync-btn');
-    if (!btn) return;
-    e.preventDefault();
-
-    const relation = btn.classList.contains('lag-sync-btn')
-        ? 'lag'
-        : (btn.classList.contains('bridge-sync-btn') ? 'bridge' : 'parent');
-    const portId = btn.dataset.portId || '';
-    const relatedPortId = relation === 'lag'
-        ? (btn.dataset.lagPortId || '')
-        : (relation === 'bridge' ? (btn.dataset.bridgePortId || '') : (btn.dataset.parentPortId || ''));
-    const url = btn.dataset.syncUrl || '';
-    // On a Virtual Chassis page the row carries a member-select dropdown; prefer the user's
-    // live selection over the server-rendered data-object-id (a name-based heuristic), so the
-    // sync POST lands on the member the user actually chose instead of the default member.
-    const row = btn.closest('tr');
-    const vcMemberSelect = row ? row.querySelector('.vc-member-select') : null;
-    // When the row has a member-select, its value is authoritative even when blank: an empty
-    // selection is a deliberate "no member chosen" state, so it must NOT fall back to the
-    // server-rendered default member (data-object-id) — that would post the sync to the previous
-    // member. Only fall back to data-object-id when there is no select at all (non-VC page).
-    const objectId =
-        vcMemberSelect ? vcMemberSelect.value : (btn.dataset.objectId || '');
-    const relatedKey = `${relation}_port_id`;
-
-    if (!portId || !relatedPortId || !objectId || !url) {
-        btn.innerHTML = '<i class="mdi mdi-alert text-danger"></i>';
-        // A blank objectId on a VC page means no member is selected. Give that case a specific
-        // instruction, and surface malformed relationship metadata with a general explanation.
-        btn.title = vcMemberSelect && !objectId
-            ? 'Select a VC member first.'
-            : 'Required relationship data is unavailable.';
-        return;
+// A relationship button is a draft command (sync_draft.js sends it in the page's order, bound to its row).
+// A success reads the tab again; a refusal marks the button with the server's reason.
+document.addEventListener('htmx:afterRequest', function (event) {
+    const btn = event.detail.elt;
+    if (!(btn instanceof Element) || !btn.matches('.lag-sync-btn, .parent-sync-btn, .bridge-sync-btn')) return;
+    if (event.detail.successful) return;
+    let reason = 'Request failed';
+    try {
+        reason = JSON.parse(event.detail.xhr.responseText).error || reason;
+    } catch (_) {
+        reason = event.detail.xhr.statusText || reason;
     }
+    const icon = document.createElement('i');
+    icon.className = 'mdi mdi-alert text-danger';
+    btn.replaceChildren(icon);
+    btn.title = reason;
+});
 
-    // Fail fast: a missing input OR an empty value both POST X-CSRFToken: "" → a guaranteed
-    // 403. Surface the cause instead of firing a state-changing request that can't succeed.
-    const csrf = getCsrfToken();
-    if (!csrf) {
-        btn.title = 'CSRF token not found. Please refresh the page and try again.';
-        return;
-    }
-
-    const serverKey = syncServerKey();
-
-    const body = new URLSearchParams({
-        csrfmiddlewaretoken: csrf,
-        port_id: portId,
-        [relatedKey]: relatedPortId,
-        interface_name_field: document.querySelector('input[name="interface_name_field"]:checked')?.value || '',
-        server_key: serverKey,
-    });
-
-    btn.disabled = true;
-    btn.innerHTML = '<i class="mdi mdi-loading mdi-spin"></i>';
-
-    fetch(url, {
-        method: 'POST',
-        headers: { 'X-CSRFToken': csrf, 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: body.toString(),
-    })
-        .then(function (r) {
-            if (!r.ok) {
-                // Surface the backend error text (403/500/HTML page) instead of a
-                // generic JSON parse failure.
-                return fetchErrorMessage(r).then(function (msg) {
-                    throw new Error(msg);
-                });
-            }
-            const transition = r.headers.get('X-LibreNMS-Cache-Transition');
-            if (transition) {
-                try {
-                    document.dispatchEvent(new CustomEvent('librenmsCacheChanged', { detail: JSON.parse(transition) }));
-                } catch (_) {
-                    document.dispatchEvent(new CustomEvent('librenmsCacheChanged'));
-                }
-            }
-            return r.json();
-        })
-        .then(function (data) {
-            if (data.status === 'success') {
-                btn.innerHTML = '<i class="mdi mdi-check text-success"></i>';
-                btn.title = data.message || 'Synced';
-            } else {
-                btn.disabled = false;
-                btn.innerHTML = '<i class="mdi mdi-alert text-danger"></i>';
-                btn.title = data.error || 'Sync failed';
-            }
-        })
-        .catch(function (e) {
-            btn.disabled = false;
-            btn.innerHTML = '<i class="mdi mdi-alert text-danger"></i>';
-            btn.title = e.message || 'Request failed';
-        });
+// Each opening of the VLAN groups dialog shows only its own row: the form of an earlier opening goes at the click,
+// and the dialog shows its loading state until sync_draft.js installs a read that no later write made stale.
+document.addEventListener('click', function (event) {
+    const content = document.getElementById('vlanDetailModalContent');
+    if (!content || !(event.target instanceof Element) || !event.target.closest('.vlan-edit-btn')) return;
+    const loading = document.createElement('div');
+    loading.className = 'modal-body text-center text-muted';
+    const spinner = document.createElement('i');
+    spinner.className = 'mdi mdi-loading mdi-spin';
+    loading.appendChild(spinner);
+    content.replaceChildren(loading);
 });

@@ -328,11 +328,14 @@ class TestRenderingTheMenu:
 
         assert _menu_state(_tab(client, device)) == FACTORY_STATE
 
-    def test_the_tab_swapped_in_after_a_sync_keeps_the_saved_choice(self, client):
+    def test_the_tab_read_after_a_sync_keeps_the_saved_choice(self, client):
+        from netbox_librenms_plugin.tests.interface_sync_post_helpers import select_interface_rows
+
         device = self._device("sync-options-swap")
         client.force_login(_user("sync-options-swap-user"))
         saved = {"auto_select_lag_members": False, "exclude_columns": ["mac_address", "mtu"]}
         assert _save(client, saved).status_code == 200
+        draft = select_interface_rows(client, device, [PORT_ID])
 
         response = client.post(
             reverse(
@@ -340,14 +343,15 @@ class TestRenderingTheMenu:
                 kwargs={"object_type": "device", "object_id": device.pk},
             )
             + "?interface_name_field=ifName",
-            {"server_key": SERVER_KEY, "select": [str(PORT_ID)], "exclude_columns": ["mac_address", "mtu"]},
+            {"server_key": SERVER_KEY, "exclude_columns": ["mac_address", "mtu"], **draft},
             HTTP_HX_REQUEST="true",
         )
 
         assert response.status_code == 200
-        html = response.content.decode()
-        assert "Selected interfaces synced successfully." in html
-        assert _menu_state(html) == saved
+        assert "Selected interfaces synced successfully." in response.content.decode()
+        assert Interface.objects.filter(device=device, name="eth0").exists()
+        # The sync answer carries no table: the page reads the tab again, which renders the saved choice.
+        assert _menu_state(_tab(client, device)) == saved
 
     def test_a_saved_choice_is_not_shown_to_another_user(self, client):
         device = self._device("sync-options-other")

@@ -5,7 +5,6 @@ Every test renders the real tab through a real request from a seeded snapshot. T
 come from real ``InterfaceTypeMapping`` rows and the real owner platform.
 """
 
-import json
 import re
 from html import unescape
 from urllib.parse import parse_qs
@@ -27,8 +26,10 @@ from netbox_librenms_plugin.tests.conftest import (
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import port_pair, seed_interfaces_snapshot
+from netbox_librenms_plugin.tests.view_test_helpers import draft_command, draft_tab
 
 SERVER_KEY = "default"
+QUERY = {"interface_name_field": "ifName"}
 IGNORE = InterfaceTypeMapping.ACTION_IGNORE
 RULE_TABLE = "netbox_librenms_plugin_interfacetypemapping"
 # The short pill label stays on one line; its title says which member to select and why.
@@ -98,6 +99,17 @@ def _row_tag(row):
 
 def _cell(row, column):
     return re.search(rf'<td[^>]*data-col="{column}"[^>]*>(.*?)</td>', row, flags=re.S).group(1)
+
+
+def _read_row(client, owner, port_id, *, member=None, **params):
+    """Return the row read of *port_id* after the choice of *member*, through the row's ``hx-get`` URL."""
+    shown = draft_tab(client, owner, "interfaces", **QUERY, **params)
+    if member is not None:
+        chosen = draft_command(client, shown, "data-choice-url", row=str(port_id), field="member", value=member.pk)
+        assert chosen.status_code == 204
+    response = client.get(unescape(shown.rows[str(port_id)]["hx-get"]))
+    assert response.status_code == 200
+    return unescape(response.content.decode())
 
 
 def _vlan_ports():
@@ -374,66 +386,50 @@ class TestVirtualChassisOwners:
         assert sorted(_rows(hidden)) == [720]
         assert 'data-rule-state="ignored"' in _row_tag(shown[721])
 
-    def test_the_verify_repaint_decides_with_the_selected_member(self, superuser_client):
+    def test_the_row_read_decides_with_the_chosen_member(self, superuser_client):
         first, second = self._chassis("rule-tab-verify")
         _seed(first, [_port(600, "Vlan10", if_type="propVirtual")])
         InterfaceTypeMapping.objects.create(
             action=IGNORE, platform=first.platform, name_pattern="^Vlan", librenms_type="propVirtual"
         )
 
-        def _verify(member):
-            response = superuser_client.post(
-                reverse("plugins:netbox_librenms_plugin:verify_interface"),
-                json.dumps(
-                    {
-                        "device_id": member.pk,
-                        "origin_device_id": first.pk,
-                        "port_id": 600,
-                        "interface_name_field": "ifName",
-                        "server_key": SERVER_KEY,
-                    }
-                ),
-                content_type="application/json",
+        def _read(member):
+            shown = draft_tab(superuser_client, first, "interfaces", **QUERY, interfaces_show_ignored="1")
+            chosen = draft_command(
+                superuser_client, shown, "data-choice-url", row="600", field="member", value=member.pk
             )
+            assert chosen.status_code == 204
+            response = superuser_client.get(unescape(shown.rows["600"]["hx-get"]))
             assert response.status_code == 200
-            return response.json()["formatted_row"]
+            return unescape(response.content.decode())
 
-        on_first, on_second = _verify(first), _verify(second)
+        on_first, on_second = _read(first), _read(second)
 
-        assert on_first["rule_state"] == "ignored"
-        assert on_first["selection"] == ""
-        assert on_second["rule_state"] == ""
-        assert 'name="select"' in on_second["selection"]
+        assert 'data-rule-state="ignored"' in _row_tag(on_first)
+        assert 'name="select"' not in on_first and "data-evidence=" not in on_first
+        assert 'data-rule-state=""' in _row_tag(on_second)
+        assert 'name="select"' in on_second and "data-evidence=" in on_second
 
-    def test_a_rule_broken_after_the_render_answers_the_verify_with_a_json_error(self, superuser_client):
-        """The member select posts with fetch() and parses JSON, so a redirect would lose the rule's name."""
+    def test_a_rule_broken_after_the_render_answers_the_row_read_with_the_rule(self, superuser_client):
+        """The row read after a member choice evaluates the rules, so its answer names the broken rule."""
         first, second = self._chassis("rule-tab-verify-broken")
         _seed(first, [_port(610, "Gi1/0/1")])
         rule = InterfaceTypeMapping.objects.get(platform=first.platform)
+        shown = draft_tab(superuser_client, first, "interfaces", **QUERY, interfaces_show_ignored="1")
         InterfaceTypeMapping.objects.filter(pk=rule.pk).update(name_pattern="(")
 
-        response = superuser_client.post(
-            reverse("plugins:netbox_librenms_plugin:verify_interface"),
-            json.dumps(
-                {
-                    "device_id": second.pk,
-                    "origin_device_id": first.pk,
-                    "port_id": 610,
-                    "interface_name_field": "ifName",
-                    "server_key": SERVER_KEY,
-                }
-            ),
-            content_type="application/json",
-        )
+        chosen = draft_command(superuser_client, shown, "data-choice-url", row="610", field="member", value=second.pk)
+        response = superuser_client.get(unescape(shown.rows["610"]["hx-get"]), HTTP_HX_REQUEST="true")
 
-        assert response.status_code == 409
-        assert list(response.json()) == ["error"]
-        assert f"(ID {rule.pk}) stores an invalid name_pattern: (." in response.json()["error"]
+        assert chosen.status_code == 204
+        assert response.status_code == 200
+        assert response["HX-Reswap"] == "none"
+        assert f"(ID {rule.pk}) stores an invalid name_pattern: (." in unescape(response.content.decode())
 
 
 @pytest.mark.django_db
 class TestAnIncompleteRecordIsBlocked:
-    """The table and the verify repaint run the writer's check, so they never offer a sync it refuses."""
+    """The table and the row read run the writer's check, so they never offer a sync it refuses."""
 
     @staticmethod
     def _incomplete_port(port_id):
@@ -456,30 +452,18 @@ class TestAnIncompleteRecordIsBlocked:
         assert 'name="select"' not in row
         assert 'name="sync_one"' not in row
 
-    def test_the_verify_repaint_asks_for_a_refresh(self, superuser_client):
+    def test_the_row_read_asks_for_a_refresh(self, superuser_client):
         _vc, (first, _second) = make_virtual_chassis_members("rule-tab-incomplete-verify")
         seed_stored_mapping(first, {SERVER_KEY: {"id": 68}})
         first.save()
         _seed(first, [self._incomplete_port(801)])
 
-        response = superuser_client.post(
-            reverse("plugins:netbox_librenms_plugin:verify_interface"),
-            json.dumps(
-                {
-                    "device_id": first.pk,
-                    "port_id": 801,
-                    "interface_name_field": "ifName",
-                    "server_key": SERVER_KEY,
-                }
-            ),
-            content_type="application/json",
-        )
+        row = _read_row(superuser_client, first, 801, member=first)
 
-        formatted = response.json()["formatted_row"]
-        assert formatted["rule_state"] == "incomplete"
-        assert formatted["selection"] == ""
-        assert "Refresh needed" in formatted["actions"]
-        assert 'name="sync_one"' not in formatted["actions"]
+        assert 'data-rule-state="incomplete"' in _row_tag(row)
+        assert 'name="select"' not in row and "data-evidence=" not in row
+        assert "Refresh needed" in _cell(row, "actions")
+        assert 'name="sync_one"' not in row
 
 
 @pytest.mark.django_db
@@ -533,7 +517,7 @@ class TestTheRulePillSitsInTheActionsCell:
         assert OWNER_PILL in _cell(row, "actions")
         assert f'title="{OWNER_HINT}' in _cell(row, "actions")
 
-    def test_the_verify_repaint_puts_the_pill_in_the_actions_cell(self, superuser_client):
+    def test_the_row_read_puts_the_pill_in_the_actions_cell(self, superuser_client):
         platform = _platform("rule-tab-pill-verify")
         InterfaceTypeMapping.objects.create(action=IGNORE, platform=platform, name_pattern="^Gi")
         _vc, (first, _second) = make_virtual_chassis_members("rule-tab-pill-verify")
@@ -542,31 +526,18 @@ class TestTheRulePillSitsInTheActionsCell:
         first.save()
         _seed(first, [_port(40, "ae0", if_type="ieee8023adLag"), _port(41, "Gi1/0/1")], [port_pair(41, 40)])
 
-        response = superuser_client.post(
-            reverse("plugins:netbox_librenms_plugin:verify_interface"),
-            json.dumps(
-                {
-                    "device_id": first.pk,
-                    "origin_device_id": first.pk,
-                    "port_id": 41,
-                    "interface_name_field": "ifName",
-                    "server_key": SERVER_KEY,
-                }
-            ),
-            content_type="application/json",
-        )
+        row = _read_row(superuser_client, first, 41, interfaces_show_ignored="1")
 
-        assert response.status_code == 200
-        formatted = response.json()["formatted_row"]
-        assert formatted["rule_state"] == "ignored"
-        assert "LAG" in formatted["parent"] and "ae0" in formatted["parent"]
-        assert "Ignored" not in formatted["parent"]
-        assert "Ignored" in formatted["actions"]
-        assert "lag-sync-btn" not in formatted["parent"]
+        assert 'data-rule-state="ignored"' in _row_tag(row)
+        relationships = _cell(row, "parent")
+        assert "LAG" in relationships and "ae0" in relationships
+        assert "Ignored" not in relationships
+        assert "Ignored" in _cell(row, "actions")
+        assert "lag-sync-btn" not in relationships
 
 
 @pytest.mark.django_db
-def test_the_tab_renders_every_blocked_port_for_the_browser_walk(superuser_client):
+def test_the_tab_offers_no_selection_of_a_blocked_port(superuser_client):
     platform = _platform("rule-tab-blocked")
     InterfaceTypeMapping.objects.create(action=IGNORE, platform=platform, name_pattern="^Vlan")
     InterfaceTypeMapping.objects.create(platform=platform, name_pattern="^Te", netbox_type="10gbase-x-sfpp")
@@ -576,10 +547,10 @@ def test_the_tab_renders_every_blocked_port_for_the_browser_walk(superuser_clien
     del incomplete["ifSpeed"]
     _seed(device, [_port(900, "eth0"), _port(901, "Vlan10", if_type="propVirtual"), _port(902, "Te1/1"), incomplete])
 
-    html = _tab(superuser_client, device)
+    shown = draft_tab(superuser_client, device, "interfaces", **QUERY, interfaces_show_ignored="1")
 
-    blocked = json.loads(re.search(r'data-blocked-port-ids="(\[.*?\])"', html).group(1))
-    assert sorted(blocked) == ["901", "902", "903"]
+    assert sorted(key for key, attrs in shown.rows.items() if attrs.get("data-evidence")) == ["900"]
+    assert sorted(shown.rows) == ["900", "901", "902", "903"]
 
 
 @pytest.mark.django_db

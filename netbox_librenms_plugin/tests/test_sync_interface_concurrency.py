@@ -17,11 +17,18 @@ from netbox_librenms_plugin.tests.conftest import (
     configure_default_librenms_server,
     configured_server_key,
     make_virtual_chassis_members,
+    map_device_to_librenms,
     run_in_threads,
 )
-from netbox_librenms_plugin.tests.interface_sync_post_helpers import SYNCED, post_interface_sync, seed_ports
+from netbox_librenms_plugin.tests.interface_sync_post_helpers import (
+    SERVER_KEY,
+    SYNCED,
+    post_interface_sync,
+    seed_ports,
+    select_interface_rows,
+)
 from netbox_librenms_plugin.tests.source_snapshot_helpers import port_pair, port_vlans, seed_interfaces_snapshot
-from netbox_librenms_plugin.tests.view_test_helpers import messages_on
+from netbox_librenms_plugin.tests.view_test_helpers import bind_relationship, messages_on
 from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE
 
 
@@ -74,6 +81,7 @@ def test_selected_vc_target_is_locked_through_interface_sync(settings, monkeypat
 
     configure_default_librenms_server(settings)
     _vc, (page_device, target_device) = make_virtual_chassis_members("sync-target-lock")
+    map_device_to_librenms(page_device, 71, server_key=SERVER_KEY)
     user = make_superuser("sync-target-lock-user")
     validation_done = Event()
     release_sync = Event()
@@ -104,9 +112,7 @@ def test_selected_vc_target_is_locked_through_interface_sync(settings, monkeypat
             with connection.cursor() as cursor:
                 cursor.execute("SET lock_timeout = '500ms'")
                 cursor.execute("SET statement_timeout = '5s'")
-            return _post_from_this_thread(
-                user.pk, page_device, [101], extra={"device_selection_101": str(target_device.pk)}
-            )
+            return _post_from_this_thread(user.pk, page_device, [101], members={101: target_device.pk})
         finally:
             close_old_connections()
 
@@ -135,16 +141,17 @@ def test_selected_vc_target_is_locked_through_interface_sync(settings, monkeypat
     assert Interface.objects.filter(device=target_device, name="Gi0/1").exists()
 
 
-def _run_vlan_scope_sync(*, move_target, suffix, settings):
+def _run_vlan_scope_sync(*, move_target, suffix, settings, monkeypatch):
     """Run one VLAN-scope sync, optionally commit a target site change inside the lock window, and return its interface."""
     from dcim.models import Device, Site
     from django.contrib.auth import get_user_model
     from django.contrib.contenttypes.models import ContentType
     from django.core.cache import cache
     from django.db import close_old_connections, connection
+    from django.test import Client
     from ipam.models import VLAN, VLANGroup
 
-    from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser, post
+    from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
     from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
@@ -180,12 +187,20 @@ def _run_vlan_scope_sync(*, move_target, suffix, settings):
     cache_key = source_cache.snapshot_key(page_device, Resource.INTERFACES, server_key)
     target_lock_reached = Event()
     release_sync = Event()
+    client = Client()
+    client.force_login(user)
+    draft = select_interface_rows(
+        client, page_device, [10], members={10: target_device.pk}, vlan_groups={10: {100: vlan_group.pk}}
+    )
+    real_lock = SyncInterfacesView._lock_selected_device_targets
 
-    class PausingSyncInterfacesView(SyncInterfacesView):
-        def _lock_selected_device_targets(self, obj):
-            target_lock_reached.set()
-            assert release_sync.wait(5), "test did not release the interface sync"
-            return super()._lock_selected_device_targets(obj)
+    def pausing_lock(self, obj):
+        target_lock_reached.set()
+        assert release_sync.wait(5), "test did not release the interface sync"
+        return real_lock(self, obj)
+
+    # Installed after the selection, so only the sync POST pauses.
+    monkeypatch.setattr(SyncInterfacesView, "_lock_selected_device_targets", pausing_lock)
 
     def sync_interface():
         close_old_connections()
@@ -193,23 +208,16 @@ def _run_vlan_scope_sync(*, move_target, suffix, settings):
             with connection.cursor() as cursor:
                 cursor.execute("SET lock_timeout = '5s'")
                 cursor.execute("SET statement_timeout = '5s'")
-            thread_user = get_user_model().objects.get(pk=user.pk)
-            request = make_request(
-                "post",
-                {
-                    "select": ["10"],
-                    "server_key": server_key,
-                    "device_selection_10": str(target_device.pk),
-                    "vlan_group_10_100": str(vlan_group.pk),
-                    "exclude_columns": ["mac_address", "mtu", "speed", "type"],
-                },
-                user=thread_user,
+            thread_client = Client()
+            thread_client.force_login(get_user_model().objects.get(pk=user.pk))
+            response = post_interface_sync(
+                thread_client,
+                page_device,
+                [10],
+                htmx=False,
+                draft=draft,
+                exclude_columns=("mac_address", "mtu", "speed", "type"),
             )
-            request.GET = request.GET.copy()
-            request.GET["interface_name_field"] = "ifName"
-            view = PausingSyncInterfacesView()
-            view._librenms_api = LibreNMSAPI(server_key=server_key)
-            response = post(view, request, object_type="device", object_id=page_device.pk)
             assert response.status_code == 302
         finally:
             close_old_connections()
@@ -243,24 +251,24 @@ def _run_vlan_scope_sync(*, move_target, suffix, settings):
     return target_device.interfaces.get(name="Ethernet2")
 
 
-def test_vlan_scope_assigns_the_selected_group_without_a_race(settings):
-    """Positive control: the posted vlan_group key really does assign the VLAN."""
-    interface = _run_vlan_scope_sync(move_target=False, suffix="no-race", settings=settings)
+def test_vlan_scope_assigns_the_selected_group_without_a_race(settings, monkeypatch):
+    """Positive control: the chosen VLAN group really does assign the VLAN."""
+    interface = _run_vlan_scope_sync(move_target=False, suffix="no-race", settings=settings, monkeypatch=monkeypatch)
 
     assert [vlan.vid for vlan in interface.tagged_vlans.all()] == [100]
 
 
-def test_vlan_scope_is_built_after_the_selected_vc_target_is_locked(settings):
+def test_vlan_scope_is_built_after_the_selected_vc_target_is_locked(settings, monkeypatch):
     """A site change must not commit between VLAN scope resolution and interface sync."""
-    interface = _run_vlan_scope_sync(move_target=True, suffix="race", settings=settings)
+    interface = _run_vlan_scope_sync(move_target=True, suffix="race", settings=settings, monkeypatch=monkeypatch)
 
-    # Meaningful only because the control above assigns VLAN 100 through the same POST key.
+    # Meaningful only because the control above assigns VLAN 100 through the same VLAN group choice.
     assert list(interface.tagged_vlans.all()) == []
 
 
 def test_auto_selected_owner_is_revalidated_after_vc_position_changes(client, settings):
-    """The owner of a row with no posted member comes from the chassis positions read under the lock."""
-    from dcim.models import Device, Interface
+    """A row approved with its inferred owner is refused after the chassis positions change, and syncs when selected again."""
+    from dcim.models import Interface
 
     from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
 
@@ -279,102 +287,108 @@ def test_auto_selected_owner_is_revalidated_after_vc_position_changes(client, se
         "ifMtu": 1500,
         "ifAdminStatus": "up",
     }
-    # The page was rendered while old_position_two held position 2; the chassis changed since.
+    map_device_to_librenms(page_device, 71, server_key=SERVER_KEY)
     seed_ports(page_device, [port])
-    Device.objects.filter(pk=old_position_two.pk).update(vc_position=None)
-    Device.objects.filter(pk=new_position_two.pk).update(vc_position=2)
-    Device.objects.filter(pk=old_position_two.pk).update(vc_position=3)
     client.force_login(make_superuser("sync-auto-position-user"))
+    # The page showed the row while old_position_two held position 2; the chassis changed since.
+    draft = select_interface_rows(client, page_device, [10])
+    # Saved as an edit saves them, so the tab's rows cache sees the change.
+    for member, position in ((old_position_two, None), (new_position_two, 2), (old_position_two, 3)):
+        member.vc_position = position
+        member.save()
 
-    post_interface_sync(client, page_device, [10], htmx=False, exclude_columns=())
+    refused = post_interface_sync(client, page_device, [10], htmx=False, exclude_columns=(), draft=draft)
 
+    assert [level for level, _text in messages_on(refused.wsgi_request)] == ["warning"]
+    assert not Interface.objects.filter(name="Ethernet2/1").exists()
+
+    again = post_interface_sync(client, page_device, [10], htmx=False, exclude_columns=())
+
+    assert [level for level, _text in messages_on(again.wsgi_request)] == ["success"]
     assert Interface.objects.filter(device=new_position_two, name="Ethernet2/1").exists()
     assert not Interface.objects.filter(device=old_position_two, name="Ethernet2/1").exists()
 
 
-def test_inaccessible_selected_target_is_not_locked(settings):
-    """A forged inaccessible target must not block work on that Device."""
-    from dcim.models import Device, Interface
+def _forged_member_sync(client, page_device, forged_target, user):
+    """Refuse a member choice of *forged_target*, then sync row 10 while another transaction locks that Device."""
+    from dcim.models import Device
     from django.db import close_old_connections, connection, transaction
+
+    from netbox_librenms_plugin.tests.view_test_helpers import draft_command, draft_tab
+
+    client.force_login(user)
+    shown = draft_tab(client, page_device, "interfaces", interface_name_field="ifName")
+    refused = draft_command(client, shown, "data-choice-url", row="10", field="member", value=str(forged_target.pk))
+    # A Device outside a Virtual Chassis has no member choice.
+    assert refused.status_code == 400
+    draft = select_interface_rows(client, page_device, [10])
+
+    def sync_the_row():
+        close_old_connections()
+        try:
+            with connection.cursor() as cursor:
+                # Below the caller's future.result(timeout=5): if this test regresses and the row
+                # IS locked, the lock timeout must fire first so the failure names the real cause.
+                cursor.execute("SET lock_timeout = '500ms'")
+                cursor.execute("SET statement_timeout = '5s'")
+            return _post_from_this_thread(
+                user.pk,
+                page_device,
+                [10],
+                draft=draft,
+                exclude_columns=("vlans", "mac_address", "description", "mtu", "speed", "type"),
+            )
+        finally:
+            close_old_connections()
+
+    with bounded_executor(max_workers=1) as executor:
+        with transaction.atomic():
+            Device.objects.select_for_update().get(pk=forged_target.pk)
+            future = executor.submit(sync_the_row)
+            return future.result(timeout=5)
+
+
+def test_inaccessible_selected_target_is_not_locked(client, settings):
+    """A member choice of an inaccessible Device is refused, and the sync does not wait on that Device."""
+    from dcim.models import Device, Interface
 
     from netbox_librenms_plugin.tests.conftest import make_device
     from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
 
     configure_default_librenms_server(settings)
-    page_device = make_device("restricted-target-page")
+    page_device = make_device("restricted-target-page", librenms_cf={SERVER_KEY: {"id": 71}})
     inaccessible_target = make_device("restricted-target-hidden")
     user = make_user_with_perms("restricted-target-user", [("add", Interface), ("change", Interface)])
     user = grant(user, "view", Device, constraints={"id": page_device.pk})
     seed_ports(page_device, [{**_PORT_KEYS_UNSET, "port_id": 10, "ifName": "Ethernet1", "ifAdminStatus": "up"}])
 
-    def sync_forged_target():
-        close_old_connections()
-        try:
-            with connection.cursor() as cursor:
-                # Below the caller's future.result(timeout=5): if this test regresses and the row
-                # IS locked, the lock timeout must fire first so the failure names the real cause.
-                cursor.execute("SET lock_timeout = '500ms'")
-                cursor.execute("SET statement_timeout = '5s'")
-            return _post_from_this_thread(
-                user.pk,
-                page_device,
-                [10],
-                extra={"device_selection_10": str(inaccessible_target.pk)},
-                exclude_columns=("vlans", "mac_address", "description", "mtu", "speed", "type"),
-            )
-        finally:
-            close_old_connections()
+    texts = _forged_member_sync(client, page_device, inaccessible_target, user)
 
-    with bounded_executor(max_workers=1) as executor:
-        with transaction.atomic():
-            Device.objects.select_for_update().get(pk=inaccessible_target.pk)
-            future = executor.submit(sync_forged_target)
-            texts = future.result(timeout=5)
-
-    # The row is refused without a wait on the target: the sync ran, not the lock-conflict answer.
-    assert texts == ["1 interface(s) skipped: Ethernet1 (selected target unavailable)."]
+    # The sync ran without a wait on the locked Device, not the lock-conflict answer.
+    assert texts == [SYNCED]
+    assert Interface.objects.filter(device=page_device, name="Ethernet1").exists()
+    assert not Interface.objects.filter(device=inaccessible_target).exists()
 
 
-def test_viewable_outside_selected_target_is_not_locked(settings):
-    """A target outside the page Device scope must not be locked."""
-    from dcim.models import Device
-    from django.db import close_old_connections, connection, transaction
+def test_viewable_outside_selected_target_is_not_locked(client, settings):
+    """A member choice of a viewable Device outside the page Device scope is refused, and the sync does not lock it."""
+    from dcim.models import Interface
 
     from netbox_librenms_plugin.tests.conftest import make_device
     from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
 
     configure_default_librenms_server(settings)
-    page_device = make_device("outside-target-page")
+    page_device = make_device("outside-target-page", librenms_cf={SERVER_KEY: {"id": 71}})
     outside_target = make_device("outside-target-device")
     user = make_superuser("outside-target-user")
     seed_ports(page_device, [{**_PORT_KEYS_UNSET, "port_id": 10, "ifName": "Ethernet1", "ifAdminStatus": "up"}])
 
-    def sync_forged_target():
-        close_old_connections()
-        try:
-            with connection.cursor() as cursor:
-                # Below the caller's future.result(timeout=5): if this test regresses and the row
-                # IS locked, the lock timeout must fire first so the failure names the real cause.
-                cursor.execute("SET lock_timeout = '500ms'")
-                cursor.execute("SET statement_timeout = '5s'")
-            return _post_from_this_thread(
-                user.pk,
-                page_device,
-                [10],
-                extra={"device_selection_10": str(outside_target.pk)},
-                exclude_columns=("vlans", "mac_address", "description", "mtu", "speed", "type"),
-            )
-        finally:
-            close_old_connections()
+    texts = _forged_member_sync(client, page_device, outside_target, user)
 
-    with bounded_executor(max_workers=1) as executor:
-        with transaction.atomic():
-            Device.objects.select_for_update().get(pk=outside_target.pk)
-            future = executor.submit(sync_forged_target)
-            texts = future.result(timeout=5)
-
-    # The row is refused without a wait on the target: the sync ran, not the lock-conflict answer.
-    assert texts == ["1 interface(s) skipped: Ethernet1 (selected target unavailable)."]
+    # The sync ran without a wait on the locked Device, not the lock-conflict answer.
+    assert texts == [SYNCED]
+    assert Interface.objects.filter(device=page_device, name="Ethernet1").exists()
+    assert not Interface.objects.filter(device=outside_target).exists()
 
 
 def test_selected_vc_targets_lock_chassis_before_devices(client, settings):
@@ -385,8 +399,10 @@ def test_selected_vc_targets_lock_chassis_before_devices(client, settings):
 
     configure_default_librenms_server(settings)
     _virtual_chassis, (page_device, target_device) = make_virtual_chassis_members("bulk-lock-order")
+    map_device_to_librenms(page_device, 71, server_key=SERVER_KEY)
     seed_ports(page_device, [{**_PORT_KEYS_UNSET, "port_id": 10, "ifName": "Ethernet1"}])
     client.force_login(make_superuser("bulk-lock-order-user"))
+    draft = select_interface_rows(client, page_device, [10], members={10: target_device.pk})
     locked_selects = []
 
     def record_locked_select(execute, sql, params, many, context):
@@ -395,7 +411,7 @@ def test_selected_vc_targets_lock_chassis_before_devices(client, settings):
         return execute(sql, params, many, context)
 
     with connection.execute_wrapper(record_locked_select):
-        post_interface_sync(client, page_device, [10], htmx=False, extra={"device_selection_10": str(target_device.pk)})
+        post_interface_sync(client, page_device, [10], htmx=False, draft=draft)
 
     chassis_lock = next(index for index, sql in enumerate(locked_selects) if "dcim_virtualchassis" in sql)
     device_lock = next(index for index, sql in enumerate(locked_selects) if '"dcim_device"' in sql)
@@ -408,11 +424,13 @@ def test_vm_sync_serializes_duplicate_display_name_resolution(settings, monkeypa
     from virtualization.models import VMInterface
 
     from netbox_librenms_plugin.tests.conftest import make_vm
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
     from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
     server_key = configure_default_librenms_server(settings)
     vm = make_vm("vm-duplicate-name-lock")
+    seed_stored_mapping(vm, {server_key: {"id": 71}}, save=True)
     VMInterface.objects.create(virtual_machine=vm, name="Ethernet")
     user = make_superuser("vm-duplicate-name-lock-user")
     resolved = {10: Event(), 11: Event()}
@@ -537,7 +555,7 @@ def test_relationship_write_locks_virtual_chassis_members_through_validation():
             view._prepare_related = pause_before_validation
             response = post(
                 view,
-                request,
+                bind_relationship(request, aggregate_device, server_key=server_key),
                 object_type="device",
                 object_id=member_device.pk,
             )
@@ -601,8 +619,12 @@ def test_inline_relationship_rechecks_migrated_donor_after_lock():
     child.save()
     parent.save()
     user = make_superuser("relationship-migrated-user")
-    # The child name is the parent name plus ".100", which makes it a sub-interface.
-    ports = [{"port_id": 10, "ifName": child.name}, {"port_id": 20, "ifName": parent.name}]
+    # The child name is the parent name plus ".100", which makes it a sub-interface. The rows are complete
+    # records, so the page offers the inline action whose binding the request carries.
+    ports = [
+        {**_PORT_KEYS_UNSET, "port_id": 10, "ifName": child.name},
+        {**_PORT_KEYS_UNSET, "port_id": 20, "ifName": parent.name},
+    ]
     seed_interfaces_snapshot(donor, ports, [port_pair(10, 20)], server_key=server_key)
     cache_key = source_cache.snapshot_key(donor, Resource.INTERFACES, server_key)
     donor_locked = Event()
@@ -640,7 +662,9 @@ def test_inline_relationship_rechecks_migrated_donor_after_lock():
             )
             view = PausingSyncInterfaceParentView()
             view._librenms_api = LibreNMSAPI(server_key=server_key)
-            return post(view, request, object_type="device", object_id=donor.pk)
+            return post(
+                view, bind_relationship(request, donor, server_key=server_key), object_type="device", object_id=donor.pk
+            )
         finally:
             close_old_connections()
 
@@ -711,7 +735,12 @@ def test_inline_relationship_does_not_lock_unrelated_interfaces():
                 assert release_relationship.wait(5), "test did not release the relationship transaction"
 
             view._prepare_related = pause_before_validation
-            response = post(view, request, object_type="device", object_id=device.pk)
+            response = post(
+                view,
+                bind_relationship(request, device, server_key=server_key),
+                object_type="device",
+                object_id=device.pk,
+            )
             assert response.status_code == 200, response.content
         finally:
             close_old_connections()
@@ -757,7 +786,7 @@ def test_bulk_relationship_pass_skips_scope_locks_without_selected_edges(client,
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
     server_key = configure_default_librenms_server(settings)
-    device = make_device("bulk-unrelated-edge")
+    device = make_device("bulk-unrelated-edge", librenms_cf={server_key: {"id": 71}})
     selected = make_interface(device, "Ethernet1")
     child = make_interface(device, "Ethernet2.100", iface_type="virtual")
     parent = make_interface(device, "Ethernet2")
@@ -803,7 +832,7 @@ def test_bulk_relationship_pass_does_not_lock_unrelated_interfaces(settings):
 
     server_key = configure_default_librenms_server(settings)
 
-    device = make_device("bulk-targeted-edge")
+    device = make_device("bulk-targeted-edge", librenms_cf={server_key: {"id": 71}})
     child = make_interface(device, "Ethernet1.100", iface_type="virtual")
     parent = make_interface(device, "Ethernet1")
     unrelated = make_interface(device, "Ethernet99")
@@ -907,13 +936,15 @@ def test_concurrent_cross_model_port_claim_refuses_without_partial_writes(settin
     from netbox_librenms_plugin.interface_rules import InterfaceRuleMatcher
     from netbox_librenms_plugin.interface_sync import resolve_or_create_interface_from_port
     from netbox_librenms_plugin.tests.conftest import make_cluster, make_device, make_interface, make_superuser, make_vm
-    from netbox_librenms_plugin.tests.test_interface_port_binding_cross_model import _port, _sync
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
+    from netbox_librenms_plugin.tests.test_interface_port_binding_cross_model import _port
     from netbox_librenms_plugin.server_mappings import LibreNMSPortBindingBusy
     from netbox_librenms_plugin.views.sync.modules import _bind_interface_librenms_id
 
     server_key = configure_default_librenms_server(settings)
     device = make_device("claim-device", librenms_cf={server_key: {"id": 71}})
     vm = make_vm("claim-vm", make_cluster("claim-cluster"))
+    seed_stored_mapping(vm, {server_key: {"id": 72}}, save=True)
     winner, loser = (device, vm) if winner_kind == "device" else (vm, device)
     winner_model = Interface if winner_kind == "device" else VMInterface
     loser_model = VMInterface if winner_kind == "device" else Interface
@@ -921,6 +952,10 @@ def test_concurrent_cross_model_port_claim_refuses_without_partial_writes(settin
     loser_interface = make_interface(device, "eth0") if loser_path == "module" else None
     client = Client()
     client.force_login(user)
+    if loser_path == "sync":
+        seed_ports(loser, [_port("009301", "eth0")])
+        # The loser selects its row before the winner holds the claim.
+        draft = select_interface_rows(client, loser, [9301])
 
     def competing_write():
         close_old_connections()
@@ -933,7 +968,7 @@ def test_concurrent_cross_model_port_claim_refuses_without_partial_writes(settin
                     server_key,
                     Interface.objects.all(),
                 )
-            return _sync(client, loser, "virtualmachine" if winner_kind == "device" else "device", "009301")
+            return post_interface_sync(client, loser, [9301], htmx=False, draft=draft)
         finally:
             connections.close_all()
 
@@ -1022,6 +1057,7 @@ def test_direct_actions_refuse_a_concurrent_port_claim_without_leftovers(setting
         _seed,
     )
     from netbox_librenms_plugin.tests.test_interface_port_binding_cross_model import _cable_scenario
+    from netbox_librenms_plugin.tests.view_test_helpers import row_action_fields
     from netbox_librenms_plugin.server_mappings import claim_librenms_port_binding
 
     server_key = configure_default_librenms_server(settings)
@@ -1042,6 +1078,7 @@ def test_direct_actions_refuse_a_concurrent_port_claim_without_leftovers(setting
             "interface_name_field": "ifName",
             "rebind_one": str(port_id),
             f"rebind_expected_port_{port_id}": str(STALE_PORT),
+            **row_action_fields(client, owner, "interfaces", port_id, interface_name_field="ifName"),
         }
     else:
         server_key, owner, existing, remote, row_id = _cable_scenario(librenms_server, settings, "claim-cable")

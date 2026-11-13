@@ -315,24 +315,26 @@ def test_filter_controls_submit_the_get_form(page, field, value):
     assert query["tab"] == ["interfaces"]
 
 
-def test_sync_actions_submit_selected_rows_and_toolbar_options(page):
+def test_the_toolbar_sync_button_submits_the_sync_form(page):
     load_tab(page, "interface", "interface_sync")
-    page.locator("#test-rows td").evaluate("e => e.innerHTML = '<input type=checkbox name=select value=17 checked>'")
+    # The sync answer carries only messages, into the modal content that every NetBox page has.
+    page.evaluate(
+        "document.body.insertAdjacentElement('beforeend', Object.assign(document.createElement('div'), {id: 'htmx-modal-content'}))"
+    )
     posted = []
     page.route(
         "**/endpoint/sync_selected_interfaces/**",
-        lambda route: (
-            posted.append(route.request),
-            route.fulfill(body=render_tab("interface", "interface_sync", partial=True)),
-        )[-1],
+        lambda route: (posted.append(route.request), route.fulfill(body="", headers={"HX-Reswap": "none"}))[-1],
     )
     _add_page_scripts(page)
     page.evaluate("initializeScripts()")
-    button = page.locator('button[form="interface-sync-form"]')
     assert page.locator("#autoSelectLagMembers").evaluate("e => e.form.id") == "interface-sync-form"
-    button.click()
+    page.locator('button[form="interface-sync-form"]').click()
     page.wait_for_function("document.querySelector('button[form=interface-sync-form]') !== null")
-    assert parse_qs(posted[0].post_data)["select"] == ["17"]
+    for _attempt in range(40):
+        if posted:
+            break
+        page.wait_for_timeout(50)
     assert parse_qs(posted[0].post_data)["server_key"] == ["secondary"]
 
 

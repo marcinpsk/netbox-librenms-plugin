@@ -25,10 +25,12 @@ from netbox_librenms_plugin.tests.conftest import (
     make_ip,
     make_superuser,
     make_vm,
+    map_device_to_librenms,
 )
-from netbox_librenms_plugin.tests.interface_sync_post_helpers import seed_ports
+from netbox_librenms_plugin.tests.interface_sync_post_helpers import post_interface_sync, seed_ports
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import Failed
+from netbox_librenms_plugin.tests.view_test_helpers import draft_command, draft_tab, row_action_fields
 from netbox_librenms_plugin.utils import reported_name_owners, synced_interface_names
 
 
@@ -81,14 +83,21 @@ def _device(name):
     return make_device(name, librenms_cf={SERVER_KEY: {"id": 71}})
 
 
-def _rebind(client, owner, port_id, *, expected=STALE_PORT, object_type="device", extra=None):
-    data = {"server_key": SERVER_KEY, "rebind_one": str(port_id), **(extra or {})}
+def _rebind(client, owner, port_id, *, expected=STALE_PORT, member=None, fields=None):
+    """Post the Rebind button of the row *port_id* with the draft fields that its page shows."""
+    if member is not None:
+        shown = draft_tab(client, owner, "interfaces", interface_name_field="ifName")
+        chosen = draft_command(client, shown, "data-choice-url", row=str(port_id), field="member", value=str(member.pk))
+        assert chosen.status_code == 204
+    if fields is None:
+        fields = row_action_fields(client, owner, "interfaces", port_id, interface_name_field="ifName")
+    data = {"server_key": SERVER_KEY, "rebind_one": str(port_id), **fields}
     if expected is not None:
         data[f"rebind_expected_port_{port_id}"] = str(expected)
     return client.post(
         reverse(
             "plugins:netbox_librenms_plugin:rebind_interface_port",
-            kwargs={"object_type": object_type, "object_id": owner.pk},
+            kwargs={"object_type": owner._meta.model_name, "object_id": owner.pk},
         )
         + "?interface_name_field=ifName",
         data,
@@ -96,17 +105,12 @@ def _rebind(client, owner, port_id, *, expected=STALE_PORT, object_type="device"
 
 
 def _sync(client, device, port_id):
-    return client.post(
-        reverse(
-            "plugins:netbox_librenms_plugin:sync_selected_interfaces",
-            kwargs={"object_type": "device", "object_id": device.pk},
-        ),
-        {
-            "server_key": SERVER_KEY,
-            "interface_name_field": "ifName",
-            "select": [str(port_id)],
-            "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed", "type"],
-        },
+    return post_interface_sync(
+        client,
+        device,
+        [port_id],
+        htmx=False,
+        exclude_columns=["vlans", "mac_address", "description", "mtu", "speed", "type"],
     )
 
 
@@ -358,9 +362,10 @@ class TestRebind:
         client.force_login(make_superuser("name-owner-rebind-changed-user"))
         row = _row_html(device, client, HOST_PORT)
         assert f'name="rebind_expected_port_{HOST_PORT}" value="{STALE_PORT}"' in row
+        fields = row_action_fields(client, device, "interfaces", HOST_PORT, interface_name_field="ifName")
         seed_stored_mapping(interface, {} if new_binding is None else {SERVER_KEY: new_binding}, save=True)
 
-        response = _rebind(client, device, HOST_PORT, expected=STALE_PORT)
+        response = _rebind(client, device, HOST_PORT, expected=STALE_PORT, fields=fields)
 
         assert _binding(interface) == new_binding
         assert len(_messages(response, "danger")) == 1
@@ -429,12 +434,7 @@ class TestRebind:
         _seed(viewed_member, [_port(HOST_PORT, "eth0")])
         client.force_login(make_superuser("name-owner-rebind-migrated-user"))
 
-        response = _rebind(
-            client,
-            viewed_member,
-            HOST_PORT,
-            extra={f"device_selection_{HOST_PORT}": str(target_member.pk)},
-        )
+        response = _rebind(client, viewed_member, HOST_PORT, member=target_member)
 
         assert _binding(interface) == STALE_PORT
         assert len(_messages(response, "danger")) == 1
@@ -460,12 +460,14 @@ class TestRebind:
 
     def test_rebind_on_a_virtual_machine(self, client, settings):
         configure_default_librenms_server(settings)
-        vm = make_vm("name-owner-rebind-vm", make_cluster("name-owner-rebind-cluster"))
+        vm = map_device_to_librenms(
+            make_vm("name-owner-rebind-vm", make_cluster("name-owner-rebind-cluster")), 71, server_key=SERVER_KEY
+        )
         interface = _bound_interface(vm, "eth0", STALE_PORT)
         _seed(vm, [_port(HOST_PORT, "eth0")])
         client.force_login(make_superuser("name-owner-rebind-vm-user"))
 
-        response = _rebind(client, vm, HOST_PORT, object_type="virtualmachine")
+        response = _rebind(client, vm, HOST_PORT)
 
         assert response.status_code == 302
         assert _binding(interface) == HOST_PORT

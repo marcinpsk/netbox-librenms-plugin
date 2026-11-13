@@ -181,11 +181,17 @@ class TestInterfaceNameGateModel:
     @staticmethod
     def _post_sync(client, settings, vm, port):
         """Seed *port* for *vm* and post the sync of that one row through the real URL, as a superuser."""
-        from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server, make_superuser
+        from netbox_librenms_plugin.tests.conftest import (
+            configure_default_librenms_server,
+            make_superuser,
+            map_device_to_librenms,
+        )
         from netbox_librenms_plugin.tests.interface_sync_post_helpers import post_interface_sync, seed_ports
         from netbox_librenms_plugin.tests.view_test_helpers import message_texts
 
         configure_default_librenms_server(settings)
+        # The sync tab and its draft answer only for a subject that the server maps.
+        map_device_to_librenms(vm, 71, server_key="default")
         client.force_login(make_superuser(f"{vm.name}-user"))
         seed_ports(vm, [port])
         response = post_interface_sync(client, vm, [port["port_id"]], htmx=False)

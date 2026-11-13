@@ -33,7 +33,12 @@ from netbox_librenms_plugin.tests.source_snapshot_helpers import (
     port_vlans,
     seed_interfaces_snapshot,
 )
+from django.contrib.auth import get_user
 from netbox_librenms_plugin.tests.view_test_helpers import (
+    bind_relationship,
+    draft_command,
+    relationship_binding,
+    draft_tab,
     grant,
     make_request,
     make_user_with_perms,
@@ -138,14 +143,58 @@ def _sync_view(request=None):
     return view
 
 
-def _post_sync(client, settings, owner, ports, port_ids, *, user=None, port_stack=(), oob_ports=None, **post_kwargs):
-    """Seed *ports* for *owner* and post its interface sync through the real URL, as *user* or a superuser."""
+def _mapped(owner):
+    """Map *owner* to the default server unless a mapping links it already: the sync tab needs a mapped subject."""
+    from netbox_librenms_plugin.server_mappings import mapped_device_servers
+
+    if "default" not in mapped_device_servers(owner, active_server="default"):
+        seed_mapping(owner, "default", own=900_000 + owner.pk)
+    return owner
+
+
+def _sign_in(client, settings, owner, user=None):
+    """Sign *client* in as *user* or a superuser, and map *owner* for its sync tab."""
     from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
 
     configure_default_librenms_server(settings)
     client.force_login(user or make_superuser(f"{owner.name}-user"))
+    _mapped(owner)
+
+
+def _post_sync(client, settings, owner, ports, port_ids, *, user=None, port_stack=(), oob_ports=None, **post_kwargs):
+    """Seed *ports* for *owner*, select *port_ids* through its draft and post its interface sync, as *user* or a superuser."""
+    _sign_in(client, settings, owner, user)
     seed_ports(owner, ports, port_stack, oob_ports=oob_ports)
     return post_interface_sync(client, owner, port_ids, htmx=False, **post_kwargs)
+
+
+def _shown(client, owner, **query):
+    """Render the interfaces tab of *owner* from the user's draft."""
+    return draft_tab(client, owner, "interfaces", **{"interface_name_field": "ifName", **query})
+
+
+def _offers_selection(client, owner, row_key, **query):
+    """Return whether the interfaces tab offers a selection of row *row_key*: every row with the key carries evidence."""
+    from netbox_librenms_plugin.tests._html_helpers import open_tags
+
+    html = _shown(client, owner, **query).html
+    rows = [attrs for attrs in open_tags(html, "tr") if attrs.get("data-row-key") == str(row_key)]
+    return bool(rows) and all(attrs.get("data-evidence") for attrs in rows)
+
+
+def _member_choice(client, owner, row_key, member_pk):
+    """Post the member choice command of row *row_key* as the tab does; return the response."""
+    return draft_command(
+        client, _shown(client, owner), "data-choice-url", row=str(row_key), field="member", value=str(member_pk)
+    )
+
+
+def _evidence(client, owner, row_key, **query):
+    """Return the evidence payload that the tab renders for row *row_key*."""
+    from netbox_librenms_plugin.selection_draft import read_evidence
+    from netbox_librenms_plugin.views.base.interfaces_view import INTERFACE_TAB
+
+    return read_evidence(INTERFACE_TAB, _shown(client, owner, **query).rows[str(row_key)]["data-evidence"])
 
 
 NO_SNAPSHOT_WARNING = "No cached data found. Please refresh the data before syncing."
@@ -266,7 +315,7 @@ class TestSyncInterfaceParentViewPermissions:
         view = make_view(SyncInterfaceParentView)
         _seed_relationship(vm, "sub_interfaces", 10, 11, child.name, parent.name)
 
-        response = _post(view, request, object_type="virtualmachine", object_id=vm.pk)
+        response = _post(view, bind_relationship(request, vm), object_type="virtualmachine", object_id=vm.pk)
 
         assert response.status_code == 200, response.content
         child.refresh_from_db()
@@ -313,17 +362,6 @@ def _js_block(source, start_anchor, end_anchor=None):
     return source[start : source.index(end_anchor, start)]
 
 
-def test_relationship_handler_reuses_shared_csrf_helper():
-    import re
-
-    handler = _js_block(_js_source(), "// Event delegation for interface relationship sync buttons.")
-    # Regexes tolerate spacing/quote reformatting; the tokens themselves are the contract.
-    assert re.search(r"const\s+csrf\s*=\s*getCsrfToken\(\)", handler), "handler must use the shared getCsrfToken()"
-    assert not re.search(r"querySelector\(\s*['\"]\[name=csrfmiddlewaretoken\]", handler), (
-        "handler must not re-query the raw csrf input"
-    )
-
-
 def test_interface_preference_save_checks_csrf_and_http_status():
     """Preference persistence must report missing CSRF and rejected HTTP responses."""
     handler = _js_block(
@@ -335,63 +373,6 @@ def test_interface_preference_save_checks_csrf_and_http_status():
     assert "const csrfToken = getCsrfToken();" in handler
     assert "missing CSRF token" in handler
     assert "if (!response.ok)" in handler
-
-
-def test_interface_member_verify_rebinds_replaced_vlan_controls():
-    """Replacing the VLAN cell must bind the new edit button before the user can click it."""
-    handler = _js_block(
-        _js_source(),
-        "function handleInterfaceChange(select, value)",
-        "function handleCableChange(select, value)",
-    )
-    vlan_repaint = "vlanCell.innerHTML = formattedRow.vlans;"
-    assert vlan_repaint in handler
-    assert "initializeVlanGroupSelects();" in handler[handler.index(vlan_repaint) :]
-
-
-def test_interface_member_verify_posts_the_origin_page_device():
-    """The verify response must preserve page-level migrated mode across a member change."""
-    handler = _js_block(
-        _js_source(),
-        "function handleInterfaceChange(select, value)",
-        "function handleCableChange(select, value)",
-    )
-    assert "origin_device_id:" in handler
-    assert "[data-interface-origin-device-id]" in handler
-
-
-def test_vlan_apply_all_skips_groups_unavailable_to_a_target_row():
-    handler = _js_block(
-        _js_source(),
-        "function applyButtonUpdates()",
-        "// Persist overrides in server cache",
-    )
-
-    assert "const matchedGroup = groups.find" in handler
-    assert "if (newGroupId && !matchedGroup) return;" in handler
-
-
-def test_cross_page_parent_does_not_copy_child_member_target():
-    """An off-page parent is resolved independently instead of inheriting the child's owner."""
-    handler = _js_block(
-        _js_source(),
-        "function refreshRequiredSelections()",
-        "function _propagateToLagMembers(",
-    )
-
-    assert "_showRequiredRowCrossPageNotice" in handler
-    assert "auto_parent_port_id" not in handler
-    assert "device_selection_" not in handler
-
-
-def test_interface_verify_application_failure_is_reported():
-    """A 2xx rejection must expose its server-provided reason before rollback."""
-    rejected = _js_block(
-        _js_source(),
-        "// 2xx with data.status !== 'success'",
-        "rollbackToLastVerified();",
-    )
-    assert "console.error('Interface verification rejected:', data.error || data.message" in rejected
 
 
 def test_cable_verify_application_failure_is_reported():
@@ -407,49 +388,6 @@ def test_cable_verify_application_failure_is_reported():
     assert handler.index(rejection_log) < handler.index("rollbackToLastVerified();", handler.index(rejection_log))
 
 
-def test_relationship_sync_missing_data_shows_alert_icon():
-    """A relationship button with incomplete data must show a visible failure state."""
-    rejected = _js_block(
-        _js_source(),
-        "if (!portId || !relatedPortId || !objectId || !url)",
-        "// Fail fast: a missing input",
-    )
-    assert "btn.innerHTML = '<i class=\"mdi mdi-alert text-danger\"></i>'" in rejected
-    assert "Required relationship data is unavailable." in rejected
-
-
-def test_cross_page_parent_notice_close_button_has_accessible_name():
-    """The icon-only notice close button must expose its purpose to screen readers."""
-    import re
-
-    notice = _js_block(
-        _js_source(),
-        "function _showRequiredRowCrossPageNotice(relatedName, kind)",
-        "// VIRTUAL CHASSIS & VRF HANDLING",
-    )
-    assert re.search(
-        r"closeBtn\.setAttribute\(\s*['\"]aria-label['\"]\s*,\s*['\"]Close['\"]\s*\)",
-        notice,
-    )
-
-
-def test_relationship_rows_are_matched_without_interpolated_selectors():
-    """
-    Requirement resolution indexes the rows instead of building a selector per port id.
-
-    The behaviour this protects (a port id that carries selector metacharacters still cascades)
-    is exercised for real in tests/browser/test_sync_cache_browser.py; this pins the structure
-    that makes it safe: no port id reaches a selector at all.
-    """
-    source = _js_source()
-    handler = _js_block(source, "function refreshRequiredSelections()", "function _propagateToLagMembers(")
-
-    assert "querySelectorAll(" not in handler, "requirement lookups must go through the row index"
-    assert 'data-member-of-lag="' not in source, "member lookups must go through the member index"
-    # The one CSS.escape left keys the cross-page notice on an interface name, not on a port id.
-    assert source.count("CSS.escape(") == 1, "no port id may be interpolated into a selector"
-
-
 def test_interface_select_all_has_one_change_handler():
     source = _js_source()
     assert source.count("toggleAll.addEventListener('change'") == 1
@@ -457,16 +395,11 @@ def test_interface_select_all_has_one_change_handler():
 
 def test_interface_bulk_selection_ignores_disabled_rows():
     """Client bulk actions must match the browser form contract for disabled controls."""
-    source = _js_source()
-    table_handler = _js_block(source, "function initializeTableCheckboxes(tableId)", "function initializeCheckboxes()")
-    bulk_handler = _js_block(source, "function initializeBulkEditApply()", "function initializeCheckboxListeners()")
-    listeners = _js_block(source, "function initializeCheckboxListeners()", "function updateBulkActionButton()")
-    button_state = _js_block(source, "function updateBulkActionButton()", "// FILTER STALE MARKS")
+    table_handler = _js_block(
+        _js_source(), "function initializeTableCheckboxes(tableId)", "function initializeCheckboxes()"
+    )
 
     assert 'td input[name="select"]:not(:disabled)' in table_handler
-    assert 'input[name="select"]:checked:not(:disabled)' in bulk_handler
-    assert 'input[name="select"]:not(:disabled)' in listeners
-    assert 'input[name="select"]:checked:not(:disabled)' in button_state
 
 
 # ===========================================================================
@@ -516,27 +449,21 @@ class TestSyncInterfacesViewGetObject:
 
 
 # ===========================================================================
-# SyncInterfacesView.get_selected_port_ids
+# SyncInterfacesView.post with no selected row
 # ===========================================================================
 
 
-class TestSyncInterfacesViewGetSelectedPortIds:
-    def test_empty_selection_returns_none(self):
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+def test_a_submit_with_no_selected_row_reports_it_and_writes_nothing(client, settings):
+    from dcim.models import Interface
 
-        view = object.__new__(SyncInterfacesView)
-        req = _make_request(post_data={})
-        result = view.get_selected_port_ids(req)
-        assert result is None
-        assert message_texts(req, "error") == ["No interfaces selected for synchronization."]
+    device = make_device("empty-selection")
+    _sign_in(client, settings, device)
+    seed_ports(device, [{**_PORT_KEYS_UNSET, "ifName": "Gi0/1", "port_id": 10}])
 
-    def test_with_selection_returns_set(self):
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+    response = post_interface_sync(client, device, [], htmx=False)
 
-        view = object.__new__(SyncInterfacesView)
-        req = _make_request(post_data={"select": ["10", "11"]})
-        result = view.get_selected_port_ids(req)
-        assert result == {10, 11}
+    assert message_texts(response.wsgi_request, "error") == ["No interfaces selected for synchronization."]
+    assert not Interface.objects.filter(device=device).exists()
 
 
 # ===========================================================================
@@ -864,7 +791,12 @@ class TestInterfaceContextOOBRows:
                 "parent_name": "Ethernet1",
             }
         )
-        response = _post(make_view(SyncInterfaceParentView), request, object_type="device", object_id=device.pk)
+        response = _post(
+            make_view(SyncInterfaceParentView),
+            bind_relationship(request, device),
+            object_type="device",
+            object_id=device.pk,
+        )
 
         assert response.status_code == 200, response.content
         child.refresh_from_db()
@@ -895,7 +827,9 @@ class TestInterfaceContextOOBRows:
 
         response = _post(
             make_view(SyncInterfaceParentView),
-            _make_request({"port_id": "10", "interface_name_field": "ifName", "parent_port_id": "20"}),
+            bind_relationship(
+                _make_request({"port_id": "10", "interface_name_field": "ifName", "parent_port_id": "20"}), device
+            ),
             object_type="device",
             object_id=device.pk,
         )
@@ -942,9 +876,15 @@ class TestInterfaceContextOOBRows:
                 "parent_name": "Parent1",
             }
         )
-        response = _post(make_view(SyncInterfaceParentView), request, object_type="device", object_id=device.pk)
+        response = _post(
+            make_view(SyncInterfaceParentView),
+            bind_relationship(request, device),
+            object_type="device",
+            object_id=device.pk,
+        )
 
-        assert response.status_code == 404
+        # The page offers no action for the row, so a post carries no binding and writes nothing.
+        assert response.status_code == 409
         source.refresh_from_db()
         assert source.parent_id is None
 
@@ -979,7 +919,12 @@ class TestInterfaceContextOOBRows:
             }
         )
 
-        response = _post(make_view(SyncInterfaceParentView), request, object_type="device", object_id=device.pk)
+        response = _post(
+            make_view(SyncInterfaceParentView),
+            bind_relationship(request, device),
+            object_type="device",
+            object_id=device.pk,
+        )
 
         assert response.status_code == 409
         child.refresh_from_db()
@@ -1008,7 +953,12 @@ class TestInterfaceContextOOBRows:
         assert interface_rows(device)["port_stack_relationships"]["sub_interfaces"] == {}
         request = _make_request({"port_id": "10", "interface_name_field": "ifName", "parent_port_id": "20"})
 
-        response = _post(make_view(SyncInterfaceParentView), request, object_type="device", object_id=device.pk)
+        response = _post(
+            make_view(SyncInterfaceParentView),
+            bind_relationship(request, device),
+            object_type="device",
+            object_id=device.pk,
+        )
 
         assert response.status_code == 409
         child.refresh_from_db()
@@ -1036,9 +986,15 @@ class TestInterfaceContextOOBRows:
         assert "lag-sync-btn" not in str(context["table"].render_parent(None, _row(rows, 10)))
 
         request = _make_request({"port_id": "10", "interface_name_field": "ifName", "lag_port_id": "20"})
-        response = _post(make_view(SyncInterfaceLagView), request, object_type="device", object_id=member1.pk)
+        response = _post(
+            make_view(SyncInterfaceLagView),
+            bind_relationship(request, member1),
+            object_type="device",
+            object_id=member1.pk,
+        )
 
-        assert response.status_code == 404
+        # The page offers no action for the row, so a post carries no binding and writes nothing.
+        assert response.status_code == 409
         source.refresh_from_db()
         first_aggregate.refresh_from_db()
         second_aggregate.refresh_from_db()
@@ -1069,9 +1025,15 @@ class TestInterfaceContextOOBRows:
         assert "lag-sync-btn" not in str(context["table"].render_parent(None, _row(rows, 10)))
 
         request = _make_request({"port_id": "10", "interface_name_field": "ifName", "lag_port_id": "20"})
-        response = _post(make_view(SyncInterfaceLagView), request, object_type="device", object_id=member1.pk)
+        response = _post(
+            make_view(SyncInterfaceLagView),
+            bind_relationship(request, member1),
+            object_type="device",
+            object_id=member1.pk,
+        )
 
-        assert response.status_code == 404
+        # The page offers no action for the row, so a post carries no binding and writes nothing.
+        assert response.status_code == 409
         source.refresh_from_db()
         assert source.lag_id is None
 
@@ -1098,19 +1060,23 @@ class TestInterfaceContextOOBRows:
         assert "parent-sync-btn" not in str(context["table"].render_parent(None, _row(rows, 10)))
 
         request = _make_request({"port_id": "10", "interface_name_field": "ifName", "parent_port_id": "20"})
-        response = _post(make_view(SyncInterfaceParentView), request, object_type="device", object_id=device.pk)
+        response = _post(
+            make_view(SyncInterfaceParentView),
+            bind_relationship(request, device),
+            object_type="device",
+            object_id=device.pk,
+        )
 
         assert response.status_code == 409
         source.refresh_from_db()
         assert source.parent_id is None
 
-    def test_duplicate_cached_source_port_id_is_disabled_and_verify_rejects_it(self):
-        import json
-
+    def test_duplicate_cached_source_port_id_is_disabled_and_not_selectable(self, client, settings):
         from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
-        from netbox_librenms_plugin.views.object_sync.devices import SingleInterfaceVerifyView
 
         device = make_device("duplicate-cached-source-id")
+        user = make_superuser("duplicate-cached-source-id")
+        _sign_in(client, settings, device, user)
         source = make_interface(device, "Ethernet1.100", iface_type="virtual")
         parent = make_interface(device, "Ethernet1")
         seed_mapping(source, own=10, save=False)
@@ -1125,39 +1091,19 @@ class TestInterfaceContextOOBRows:
                 {"port_id": 20, "ifName": parent.name, "ifType": "ethernetCsmacd"},
             ],
         )
-        user = make_superuser("duplicate-cached-source-id")
-
         _context, rows = _render(_make_request(user=user), device)
 
         duplicates = [row for row in rows if row["ifName"] in (source.name, "duplicate-source")]
         assert len(duplicates) == 2
         assert all(row["sync_target_resolvable"] is False for row in duplicates)
+        assert not _offers_selection(client, device, 10)
 
-        verify_request = make_request(
-            "post",
-            json.dumps(
-                {
-                    "device_id": device.pk,
-                    "interface_name": "duplicate-source",
-                    "interface_name_field": "ifName",
-                    "port_id": 10,
-                }
-            ),
-            user=user,
-            path="/verify/",
-            content_type="application/json",
-        )
-        response = make_view(SingleInterfaceVerifyView, verify_request).post(verify_request)
-
-        assert response.status_code == 404
-
-    def test_missing_port_id_disables_member_selection_and_verify_rejects_it(self):
-        import json
-
+    def test_missing_port_id_disables_member_selection_and_has_no_draft_row(self, client, settings):
         from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
-        from netbox_librenms_plugin.views.object_sync.devices import SingleInterfaceVerifyView
 
         _virtual_chassis, (page_device, _member) = make_virtual_chassis_members("missing-row-port-id")
+        user = make_superuser("missing-row-port-id")
+        _sign_in(client, settings, page_device, user)
         seed_interfaces_snapshot(
             page_device,
             [
@@ -1165,31 +1111,16 @@ class TestInterfaceContextOOBRows:
                 {"port_id": None, "ifName": "Gi0/2", "ifDescr": "Ethernet", "ifType": "ethernetCsmacd"},
             ],
         )
-        user = make_superuser("missing-row-port-id")
-
         context, rows = _render(_make_request(user=user), page_device, "ifDescr")
 
         (second_row,) = [row for row in rows if row["ifName"] == "Gi0/2"]
         assert second_row["sync_target_resolvable"] is False
         assert "disabled" in str(context["table"].render_device_selection(None, second_row))
-
-        verify_request = make_request(
-            "post",
-            json.dumps(
-                {
-                    "device_id": page_device.pk,
-                    "interface_name": "Ethernet",
-                    "interface_name_field": "ifDescr",
-                    "port_id": None,
-                }
-            ),
-            user=user,
-            path="/verify/",
-            content_type="application/json",
-        )
-        response = make_view(SingleInterfaceVerifyView, verify_request).post(verify_request)
-
-        assert response.status_code == 404
+        # A row without a port ID has no draft row, so no command can name it.
+        shown = _shown(client, page_device, interface_name_field="ifDescr")
+        assert shown.rows == {}
+        refused = draft_command(client, shown, "data-choice-url", row="None", field="member", value=str(page_device.pk))
+        assert refused.status_code == 400
 
     def test_duplicate_source_port_id_has_no_inline_action(self):
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
@@ -1214,9 +1145,15 @@ class TestInterfaceContextOOBRows:
         assert "lag-sync-btn" not in str(context["table"].render_parent(None, _row(rows, 10)))
 
         request = _make_request({"port_id": "10", "interface_name_field": "ifName", "lag_port_id": "20"})
-        response = _post(make_view(SyncInterfaceLagView), request, object_type="device", object_id=device.pk)
+        response = _post(
+            make_view(SyncInterfaceLagView),
+            bind_relationship(request, device),
+            object_type="device",
+            object_id=device.pk,
+        )
 
-        assert response.status_code == 404
+        # The page offers no action for the row, so a post carries no binding and writes nothing.
+        assert response.status_code == 409
         source.refresh_from_db()
         duplicate_source.refresh_from_db()
         assert source.lag_id is None
@@ -1251,9 +1188,15 @@ class TestInterfaceContextOOBRows:
             {"port_id": "10", "interface_name_field": "ifName", "parent_port_id": "20"},
             user=user,
         )
-        response = _post(make_view(SyncInterfaceParentView), request, object_type="device", object_id=device.pk)
+        response = _post(
+            make_view(SyncInterfaceParentView),
+            bind_relationship(request, device),
+            object_type="device",
+            object_id=device.pk,
+        )
 
-        assert response.status_code == 404
+        # The page offers no action for the row, so a post carries no binding and writes nothing.
+        assert response.status_code == 409
         child.refresh_from_db()
         assert child.parent_id is None
 
@@ -1322,7 +1265,12 @@ class TestInterfaceContextOOBRows:
             user=user,
         )
         with pytest.raises(Http404):
-            _post(make_view(SyncInterfaceParentView), request, object_type="device", object_id=hidden_member.pk)
+            _post(
+                make_view(SyncInterfaceParentView),
+                bind_relationship(request, hidden_member),
+                object_type="device",
+                object_id=hidden_member.pk,
+            )
 
         source.refresh_from_db()
         assert source.parent_id is None
@@ -1347,7 +1295,7 @@ class TestInterfaceContextOOBRows:
 
 
 class TestInterfaceContextVirtualChassisOwner:
-    def test_logical_row_uses_stable_id_owner_for_render_and_sync(self):
+    def test_logical_row_uses_stable_id_owner_for_render_and_sync(self, client, settings):
         from dcim.models import Device, Interface
 
         _virtual_chassis, (page_device, other_member) = make_virtual_chassis_members("logical-row-owner")
@@ -1369,6 +1317,7 @@ class TestInterfaceContextVirtualChassisOwner:
             "ifMtu": 1500,
             "ifAdminStatus": "up",
         }
+        _mapped(page_device)
         seed_interfaces_snapshot(page_device, [port])
 
         context, rows = _render(_make_request(), page_device)
@@ -1381,15 +1330,15 @@ class TestInterfaceContextVirtualChassisOwner:
             "logical-row-owner",
             [("view", Device), ("add", Interface), ("change", Interface)],
         )
-        post_request = _make_request(
-            post_data={
-                "select": ["10"],
-                "device_selection_10": str(selected_member_id),
-                "exclude_columns": ["vlans", "mac_address", "mtu", "speed", "type"],
-            },
-            user=user,
+        _sign_in(client, settings, page_device, user)
+        response = post_interface_sync(
+            client,
+            page_device,
+            [10],
+            htmx=False,
+            members={10: selected_member_id},
+            exclude_columns=("vlans", "mac_address", "mtu", "speed", "type"),
         )
-        response = _post(_sync_view(), post_request, object_type="device", object_id=page_device.pk)
 
         assert response.status_code == 302
         correct.refresh_from_db()
@@ -1418,13 +1367,10 @@ class TestInterfaceContextVirtualChassisOwner:
         assert rendered_row["netbox_interface"] is None
         assert rendered_row["selected_object_id"] == page_device.pk
 
-    def test_remote_vc_row_uses_its_owner_rack_vlan_group(self):
+    def test_remote_vc_row_uses_its_owner_rack_vlan_group(self, client, settings):
         from dcim.models import Rack
         from django.contrib.contenttypes.models import ContentType
-        from django.core.cache import cache
         from ipam.models import VLAN, VLANGroup
-
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
         _virtual_chassis, (member1, member2) = make_virtual_chassis_members("row-vlan-owner")
         rack1 = Rack.objects.create(name="Row VLAN Rack 1", site=member1.site, status="active")
@@ -1451,10 +1397,12 @@ class TestInterfaceContextVirtualChassisOwner:
         interface = make_interface(member2, "Ethernet2")
         seed_mapping(interface, own=10, save=False)
         interface.save()
+        _sign_in(client, settings, member1)
         seed_interfaces_snapshot(
             member1,
             [
                 {
+                    **_PORT_KEYS_UNSET,
                     "port_id": 10,
                     "ifName": "Ethernet2",
                     "ifType": "ethernetCsmacd",
@@ -1464,13 +1412,19 @@ class TestInterfaceContextVirtualChassisOwner:
             ],
         )
 
-        overrides_key = make_view(DeviceInterfaceTableView).get_vlan_overrides_key(member1, "default")
-        cache.set(overrides_key, {"100": str(group1.pk)})
-        try:
-            _context, rows = _render(_make_request(), member1)
-        finally:
-            cache.delete(overrides_key)
+        # The rack 1 group of the page member is not a group of the row's owner, so the choice stores nothing.
+        response = draft_command(
+            client,
+            _shown(client, member1),
+            "data-vlan-groups-url",
+            row="10",
+            group_100=str(group1.pk),
+            apply_to_all="1",
+        )
+        _context, rows = _render(_make_request(), member1)
 
+        assert response.status_code == 204
+        assert _evidence(client, member1, 10)["vlan_groups"] == {"100": str(group2.pk)}
         port = _row(rows, 10)
         assert port["selected_object_id"] == member2.pk
         assert port["vlan_group_map"][100]["group_id"] == str(group2.pk)
@@ -1482,28 +1436,19 @@ class TestInterfaceContextVirtualChassisOwner:
         assert port["vlan_group_map"][100]["group_id"] == ""
         assert port["missing_vlans"] == [100]
 
-    def test_verify_response_preserves_apply_to_all_vlan_group(self, client):
-        """A row verify must apply the cached group before rendering its hidden input."""
-        import json
+    def test_a_row_read_shows_the_apply_to_all_vlan_group(self, client, settings):
+        """A row read after an "apply to all" VLAN group choice renders the row with that group."""
+        from html import unescape
 
-        from django.core.cache import cache
-        from django.urls import reverse
         from ipam.models import VLANGroup
 
-        from netbox_librenms_plugin.tests.conftest import configured_server_key
-        from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
-        from netbox_librenms_plugin.views.object_sync.devices import SingleInterfaceVerifyView
+        from netbox_librenms_plugin.selection_draft import read_evidence
+        from netbox_librenms_plugin.tests._html_helpers import open_tags
+        from netbox_librenms_plugin.views.base.interfaces_view import INTERFACE_TAB
 
-        device = make_device("verify-vlan-group-override")
-        default_group = VLANGroup.objects.create(
-            name="Verify VLAN Group A",
-            slug="verify-vlan-group-a",
-        )
-        override_group = VLANGroup.objects.create(
-            name="Verify VLAN Group B",
-            slug="verify-vlan-group-b",
-        )
-        server_key = configured_server_key()
+        device = make_device("apply-all-row-read")
+        VLANGroup.objects.create(name="Row Read VLAN Group A", slug="row-read-vlan-group-a")
+        override_group = VLANGroup.objects.create(name="Row Read VLAN Group B", slug="row-read-vlan-group-b")
         port = {
             "port_id": 10,
             "ifName": "Ethernet1",
@@ -1516,33 +1461,64 @@ class TestInterfaceContextVirtualChassisOwner:
             "ifAdminStatus": "up",
             **port_vlans(None, 100),
         }
-        seed_interfaces_snapshot(device, [port], server_key=server_key)
-        overrides_key = SingleInterfaceVerifyView().get_vlan_overrides_key(device, server_key)
-        cache.set(overrides_key, {"100": str(override_group.pk)})
-        client.force_login(make_superuser("verify-vlan-group-override"))
+        _sign_in(client, settings, device)
+        seed_interfaces_snapshot(device, [port])
+        shown = _shown(client, device)
 
-        try:
-            response = client.post(
-                reverse("plugins:netbox_librenms_plugin:verify_interface"),
-                data=json.dumps(
-                    {
-                        "device_id": device.pk,
-                        "interface_name_field": "ifName",
-                        "port_id": 10,
-                        "server_key": server_key,
-                    }
-                ),
-                content_type="application/json",
-            )
-        finally:
-            cache.delete(overrides_key)
+        choice = draft_command(
+            client, shown, "data-vlan-groups-url", row="10", group_100=str(override_group.pk), apply_to_all="1"
+        )
+        response = client.get(unescape(shown.rows["10"]["hx-get"]))
 
+        assert choice.status_code == 204
         assert response.status_code == 200, response.content
-        vlan_html = json.loads(response.content)["formatted_row"]["vlans"]
-        assert f'name="vlan_group_10_100" value="{override_group.pk}"' in vlan_html
-        assert f'value="{default_group.pk}"' not in vlan_html
+        (row,) = [attrs for attrs in open_tags(response.content.decode(), "tr") if attrs.get("data-row-key") == "10"]
+        assert read_evidence(INTERFACE_TAB, row["data-evidence"])["vlan_groups"] == {"100": str(override_group.pk)}
 
-    def test_remote_vc_target_sync_uses_its_rack_vlan_lookup(self):
+    def test_vlan_apply_to_all_skips_a_group_that_a_target_row_does_not_offer(self, client, settings):
+        """An "apply to all" group choice sets the group only on the rows whose owner offers it."""
+        from dcim.models import Rack
+        from django.contrib.contenttypes.models import ContentType
+        from ipam.models import VLAN, VLANGroup
+
+        _virtual_chassis, (member1, member2) = make_virtual_chassis_members("apply-all-owner")
+        rack_type = ContentType.objects.get_for_model(Rack)
+        groups = []
+        for index, member in enumerate((member1, member2), start=1):
+            rack = Rack.objects.create(name=f"Apply All Rack {index}", site=member.site, status="active")
+            member.rack = rack
+            member.save()
+            group = VLANGroup.objects.create(
+                name=f"Apply All Group {index}", slug=f"apply-all-group-{index}", scope_type=rack_type, scope_id=rack.pk
+            )
+            VLAN.objects.create(vid=100, name=f"Apply All VLAN {index}", group=group, status="active")
+            groups.append(group)
+            interface = make_interface(member, f"Ethernet{index}")
+            seed_mapping(interface, own=10 + index, save=False)
+            interface.save()
+        _sign_in(client, settings, member1)
+        seed_interfaces_snapshot(
+            member1,
+            [
+                {**_PORT_KEYS_UNSET, "port_id": 10 + index, "ifName": f"Ethernet{index}", **port_vlans(None, 100)}
+                for index in (1, 2)
+            ],
+        )
+
+        response = draft_command(
+            client,
+            _shown(client, member1),
+            "data-vlan-groups-url",
+            row="11",
+            group_100=str(groups[0].pk),
+            apply_to_all="1",
+        )
+
+        assert response.status_code == 204
+        assert _evidence(client, member1, 11)["vlan_groups"] == {"100": str(groups[0].pk)}
+        assert _evidence(client, member1, 12)["vlan_groups"] == {"100": str(groups[1].pk)}
+
+    def test_remote_vc_target_sync_uses_its_rack_vlan_lookup(self, client, settings):
         from dcim.models import Device, Interface, Rack
         from django.contrib.contenttypes.models import ContentType
         from ipam.models import VLAN, VLANGroup
@@ -1573,6 +1549,14 @@ class TestInterfaceContextVirtualChassisOwner:
         interface = make_interface(member2, "Ethernet2")
         seed_mapping(interface, own=10, save=False)
         interface.save()
+        # The sync path reads VLANs through the caller's restricted queryset, so this user needs
+        # the IPAM view grants for the rack-scoped group selection under test to run at all.
+        user = make_user_with_perms(
+            "sync-vlan-owner",
+            [("view", Device), ("add", Interface), ("change", Interface), ("view", VLANGroup), ("view", VLAN)],
+        )
+        _sign_in(client, settings, member1, user)
+        exclude = ("mac_address", "description", "mtu", "speed", "type")
 
         def seed(**vlans):
             seed_interfaces_snapshot(
@@ -1593,25 +1577,17 @@ class TestInterfaceContextVirtualChassisOwner:
         context, rows = _render(_make_request(), member1)
         (row,) = rows
         assert row["port_id"] == 10
-        assert 'name="device_selection_10"' in str(context["table"].render_device_selection(None, row))
-        assert 'name="vlan_group_10_100"' in str(context["table"].render_vlans(None, row))
-        # The sync path reads VLANs through the caller's restricted queryset, so this user needs
-        # the IPAM view grants for the rack-scoped group selection under test to run at all.
-        user = make_user_with_perms(
-            "sync-vlan-owner",
-            [("view", Device), ("add", Interface), ("change", Interface), ("view", VLANGroup), ("view", VLAN)],
-        )
-        request = _make_request(
-            post_data={
-                "select": ["10"],
-                "device_selection_10": str(member2.pk),
-                "vlan_group_10_100": str(group2.pk),
-                "exclude_columns": ["mac_address", "description", "mtu", "speed", "type"],
-            },
-            user=user,
-        )
+        assert _offers_selection(client, member1, 10)
 
-        response = _post(_sync_view(), request, object_type="device", object_id=member1.pk)
+        response = post_interface_sync(
+            client,
+            member1,
+            [10],
+            htmx=False,
+            members={10: member2.pk},
+            vlan_groups={10: {100: group2.pk}},
+            exclude_columns=exclude,
+        )
 
         assert response.status_code == 302
         interface.refresh_from_db()
@@ -1621,35 +1597,27 @@ class TestInterfaceContextVirtualChassisOwner:
         interface.mode = ""
         interface.untagged_vlan = None
         interface.save(update_fields=["mode", "untagged_vlan"])
-        stale_request = _make_request(
-            post_data={
-                "select": ["10"],
-                "device_selection_10": str(member2.pk),
-                "vlan_group_10_100": str(group1.pk),
-                "exclude_columns": ["mac_address", "description", "mtu", "speed", "type"],
-            },
-            user=user,
-        )
         seed(**port_vlans(None, 100))
+        # The rack 1 group is not a group of the row's owner, so the command stores no choice for it.
+        stale_choice = draft_command(
+            client, _shown(client, member1), "data-vlan-groups-url", row="10", group_100=str(group1.pk)
+        )
 
-        stale_response = _post(_sync_view(), stale_request, object_type="device", object_id=member1.pk)
+        stale_response = post_interface_sync(
+            client, member1, [10], htmx=False, members={10: member2.pk}, exclude_columns=exclude
+        )
 
+        assert stale_choice.status_code == 204
         assert stale_response.status_code == 302
         interface.refresh_from_db()
         assert interface.untagged_vlan_id == expected_vlan.pk
 
-        clear_request = _make_request(
-            post_data={
-                "select": ["10"],
-                "device_selection_10": str(member2.pk),
-                "exclude_columns": ["mac_address", "description", "mtu", "speed", "type"],
-            },
-            user=user,
-        )
         # LibreNMS now reports no VLAN on the port.
         seed(**port_vlans())
 
-        clear_response = _post(_sync_view(), clear_request, object_type="device", object_id=member1.pk)
+        clear_response = post_interface_sync(
+            client, member1, [10], htmx=False, members={10: member2.pk}, exclude_columns=exclude
+        )
 
         assert clear_response.status_code == 302
         interface.refresh_from_db()
@@ -1663,11 +1631,10 @@ class TestInterfaceContextVirtualChassisOwner:
 
 
 class TestSyncInterfacesViewPost:
-    def test_integrity_error_at_the_outer_commit_is_reported_not_a_500(self, monkeypatch):
+    def test_integrity_error_at_the_outer_commit_is_reported_not_a_500(self, client, settings, monkeypatch):
         """A deferred foreign-key IntegrityError at the outer atomic commit redirects instead of returning a 500."""
         from django.db import IntegrityError
 
-        from netbox_librenms_plugin.tests.view_test_helpers import make_superuser, message_texts
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device("outer-commit-integrity")
@@ -1682,26 +1649,29 @@ class TestSyncInterfacesViewPost:
             "ifMtu": 1500,
             "ifAdminStatus": "up",
         }
-        request = _make_request(
-            post_data={"select": ["10"], "exclude_columns": ["mac_address", "description", "mtu", "speed", "type"]},
-            user=make_superuser("outer-commit-integrity"),
-        )
-        view = _sync_view()
-        seed_ports(device, [port])
 
         def raise_integrity_error(*args, **kwargs):
             raise IntegrityError("deferred FK violated at COMMIT")
 
         monkeypatch.setattr(SyncInterfacesView, "_sync_interface_relationships", raise_integrity_error)
-        response = _post(view, request, object_type="device", object_id=device.pk)
+        response = _post_sync(
+            client,
+            settings,
+            device,
+            [port],
+            [10],
+            exclude_columns=("mac_address", "description", "mtu", "speed", "type"),
+        )
 
         assert response.status_code == 302
-        assert any("rolled back by a concurrent change" in text for text in message_texts(request, "error"))
+        assert any(
+            "rolled back by a concurrent change" in text for text in message_texts(response.wsgi_request, "error")
+        )
 
     @pytest.mark.parametrize("source", ["host", "oob"])
-    def test_vlan_maps_cover_only_selected_row_owners(self, source):
+    def test_vlan_maps_cover_only_selected_row_owners(self, client, settings, monkeypatch, source):
         """One selected row must not build VLAN scope maps for unrelated chassis members."""
-        from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
+        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         _virtual_chassis, (page_device, target_device, _unrelated_member) = make_virtual_chassis_members(
             "selected-vlan-owner-scope",
@@ -1718,25 +1688,35 @@ class TestSyncInterfacesViewPost:
             "ifMtu": 1500,
             "ifAdminStatus": "up",
         }
-        request = _make_request(
-            post_data={
-                "select": ["10"],
-                "device_selection_10": str(target_device.pk),
-                "exclude_columns": ["mac_address", "description", "mtu", "speed", "type"],
-            },
-            user=make_superuser("selected-vlan-owner-scope"),
-        )
-        view = _sync_view()
+        maps_by_owner = []
+        real_prepare = SyncInterfacesView._prepare_vlan_lookup_maps
+
+        def observed_prepare(self, *args, **kwargs):
+            # This only records the owners of the maps that the real attempt builds.
+            result = real_prepare(self, *args, **kwargs)
+            maps_by_owner.append(set(self._lookup_maps_by_owner))
+            return result
+
+        monkeypatch.setattr(SyncInterfacesView, "_prepare_vlan_lookup_maps", observed_prepare)
         if source == "oob":
             _link_oob(page_device)
-            seed_ports(page_device, [], oob_ports=[port])
+            ports, oob_ports = [], [port]
         else:
-            seed_ports(page_device, [port])
+            ports, oob_ports = [port], None
 
-        response = _post(view, request, object_type="device", object_id=page_device.pk)
+        response = _post_sync(
+            client,
+            settings,
+            page_device,
+            ports,
+            [10],
+            oob_ports=oob_ports,
+            members={10: target_device.pk},
+            exclude_columns=("mac_address", "description", "mtu", "speed", "type"),
+        )
 
         assert response.status_code == 302
-        assert set(view._lookup_maps_by_owner) == {target_device.pk}
+        assert maps_by_owner == [{target_device.pk}]
 
     def test_auto_selected_owner_materializes_only_port_id_candidates(self, client, settings, monkeypatch):
         """One inferred row must not hydrate every Interface in a large chassis."""
@@ -1812,7 +1792,7 @@ class TestSyncInterfacesViewPost:
         assert inferred == [{port_id: target_device.pk for port_id in port_ids}]
         assert max(parameter_counts) < 2_000
 
-    def test_excluding_type_does_not_promote_or_link_a_non_lag_aggregate(self):
+    def test_excluding_type_does_not_promote_or_link_a_non_lag_aggregate(self, client, settings):
         """The relationship pass must honor the form's explicit Type exclusion."""
         from dcim.models import Device, Interface
 
@@ -1826,25 +1806,36 @@ class TestSyncInterfacesViewPost:
             "bulk-exclude-lag-type",
             [("view", Device), ("add", Interface), ("change", Interface)],
         )
-        request = _make_request(
-            post_data={
-                "select": ["10"],
-                "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed", "type"],
-            },
-            user=user,
-        )
-        view = _sync_view()
+        _sign_in(client, settings, device, user)
         seed_ports(
             device,
             [
-                {"port_id": 10, "ifName": member.name, "ifType": "ethernetCsmacd", "ifAdminStatus": "up"},
-                {"port_id": 20, "ifName": aggregate.name, "ifType": "ieee8023adLag", "ifAdminStatus": "up"},
+                {
+                    **_PORT_KEYS_UNSET,
+                    "port_id": 10,
+                    "ifName": member.name,
+                    "ifType": "ethernetCsmacd",
+                    "ifAdminStatus": "up",
+                },
+                {
+                    **_PORT_KEYS_UNSET,
+                    "port_id": 20,
+                    "ifName": aggregate.name,
+                    "ifType": "ieee8023adLag",
+                    "ifAdminStatus": "up",
+                },
             ],
             [port_pair(10, 20)],
         )
         assert interface_rows(device)["port_stack_relationships"]["lag_members"] == {10: 20}
 
-        response = _post(view, request, object_type="device", object_id=device.pk)
+        response = post_interface_sync(
+            client,
+            device,
+            [10],
+            htmx=False,
+            exclude_columns=("vlans", "mac_address", "description", "mtu", "speed", "type"),
+        )
 
         assert response.status_code == 302
         member.refresh_from_db()
@@ -1852,7 +1843,7 @@ class TestSyncInterfacesViewPost:
         assert aggregate.type == "other"
         assert member.lag_id is None
 
-    def test_bulk_relink_repairs_an_aggregate_edited_back_to_a_non_lag_type(self):
+    def test_bulk_relink_repairs_an_aggregate_edited_back_to_a_non_lag_type(self, client, settings):
         """An already-linked member must still repair a stale aggregate type."""
         from dcim.models import Device, Interface
 
@@ -1871,14 +1862,7 @@ class TestSyncInterfacesViewPost:
             "bulk-lag-type-repair",
             [("view", Device), ("add", Interface), ("change", Interface)],
         )
-        request = _make_request(
-            post_data={
-                "select": ["10"],
-                "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed"],
-            },
-            user=user,
-        )
-        view = _sync_view()
+        _sign_in(client, settings, device, user)
         seed_ports(
             device,
             [
@@ -1900,7 +1884,9 @@ class TestSyncInterfacesViewPost:
             [port_pair(10, 20)],
         )
 
-        response = _post(view, request, object_type="device", object_id=device.pk)
+        response = post_interface_sync(
+            client, device, [10], htmx=False, exclude_columns=("vlans", "mac_address", "description", "mtu", "speed")
+        )
 
         assert response.status_code == 302
         member.refresh_from_db()
@@ -1908,7 +1894,7 @@ class TestSyncInterfacesViewPost:
         assert member.lag_id == aggregate.pk
         assert aggregate.type == "lag"
 
-    def test_bulk_parent_link_resolves_a_unique_unbound_related_name(self):
+    def test_bulk_parent_link_resolves_a_unique_unbound_related_name(self, client, settings):
         from dcim.models import Device, Interface
 
         device = make_device("bulk-unbound-related-parent")
@@ -1920,14 +1906,7 @@ class TestSyncInterfacesViewPost:
             "bulk-unbound-related-parent",
             [("view", Device), ("add", Interface), ("change", Interface)],
         )
-        request = _make_request(
-            post_data={
-                "select": ["11"],
-                "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed", "type"],
-            },
-            user=user,
-        )
-        view = _sync_view()
+        _sign_in(client, settings, device, user)
         seed_ports(
             device,
             [
@@ -1942,7 +1921,13 @@ class TestSyncInterfacesViewPost:
             ],
         )
 
-        response = _post(view, request, object_type="device", object_id=device.pk)
+        response = post_interface_sync(
+            client,
+            device,
+            [11],
+            htmx=False,
+            exclude_columns=("vlans", "mac_address", "description", "mtu", "speed", "type"),
+        )
 
         assert response.status_code == 302
         child.refresh_from_db()
@@ -1950,7 +1935,7 @@ class TestSyncInterfacesViewPost:
         assert child.parent_id == parent.pk
         assert stored_mapping_for_test(parent) is None
 
-    def test_cross_page_parent_keeps_unsubmitted_vlan_group(self):
+    def test_cross_page_parent_keeps_unsubmitted_vlan_group(self, client, settings):
         from dcim.models import Device, Interface
         from ipam.models import VLAN, VLANGroup
 
@@ -1973,15 +1958,7 @@ class TestSyncInterfacesViewPost:
             "cross-page-parent-vlan",
             [("view", Device), ("add", Interface), ("change", Interface)],
         )
-        request = _make_request(
-            post_data={
-                "select": ["11"],
-                "auto_select_lag_members": "1",
-                "exclude_columns": ["mac_address", "description", "mtu", "speed", "type"],
-            },
-            user=user,
-        )
-        view = _sync_view()
+        _sign_in(client, settings, device, user)
         seed_ports(
             device,
             [
@@ -2003,7 +1980,14 @@ class TestSyncInterfacesViewPost:
             ],
         )
 
-        response = _post(view, request, object_type="device", object_id=device.pk)
+        response = post_interface_sync(
+            client,
+            device,
+            [11],
+            htmx=False,
+            exclude_columns=("mac_address", "description", "mtu", "speed", "type"),
+            extra={"auto_select_lag_members": "1"},
+        )
 
         assert response.status_code == 302
         parent.refresh_from_db()
@@ -2012,7 +1996,7 @@ class TestSyncInterfacesViewPost:
         assert parent.untagged_vlan_id != wrong_vlan.pk
         assert child.parent_id == parent.pk
 
-    def test_selected_lag_includes_member_from_another_page(self):
+    def test_selected_lag_includes_member_from_another_page(self, client, settings, monkeypatch):
         from dcim.models import Device, Interface
         from django.db import connection
         from django.test.utils import CaptureQueriesContext
@@ -2030,27 +2014,18 @@ class TestSyncInterfacesViewPost:
             "cross-page-lag-member",
             [("view", Device), ("add", Interface), ("change", Interface)],
         )
-        request = _make_request(
-            post_data={
-                "select": ["100"],
-                "device_selection_100": str(page_device.pk),
-                "auto_select_lag_members": "1",
-                "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed", "type"],
-            },
-            user=user,
-        )
+        target_lookup_queries = []
+        real_relationships = SyncInterfacesView._sync_interface_relationships
 
-        class QueryCheckedSyncInterfacesView(SyncInterfacesView):
-            target_lookup_queries = None
+        def query_checked_relationships(self, obj, *args, **kwargs):
+            with CaptureQueriesContext(connection) as captured:
+                for port_id in self._selected_port_ids:
+                    self._resolve_row_target_device(obj, port_id=port_id)
+            target_lookup_queries.append(len(captured))
+            return real_relationships(self, obj, *args, **kwargs)
 
-            def _sync_interface_relationships(self, obj, *args, **kwargs):
-                with CaptureQueriesContext(connection) as captured:
-                    for port_id in self._selected_port_ids:
-                        self._resolve_row_target_device(obj, port_id=port_id)
-                self.target_lookup_queries = len(captured)
-                return super()._sync_interface_relationships(obj, *args, **kwargs)
-
-        view = make_view(QueryCheckedSyncInterfacesView)
+        monkeypatch.setattr(SyncInterfacesView, "_sync_interface_relationships", query_checked_relationships)
+        _sign_in(client, settings, page_device, user)
         seed_ports(
             page_device,
             [
@@ -2072,7 +2047,15 @@ class TestSyncInterfacesViewPost:
             [port_pair(10, 100)],
         )
 
-        response = _post(view, request, object_type="device", object_id=page_device.pk)
+        response = post_interface_sync(
+            client,
+            page_device,
+            [100],
+            htmx=False,
+            members={100: page_device.pk},
+            exclude_columns=("vlans", "mac_address", "description", "mtu", "speed", "type"),
+            extra={"auto_select_lag_members": "1"},
+        )
 
         assert response.status_code == 302
         aggregate.refresh_from_db()
@@ -2080,10 +2063,10 @@ class TestSyncInterfacesViewPost:
         assert member.lag_id == aggregate.pk
         assert aggregate.device_id == page_device.pk
         assert member.device_id == member_device.pk
-        assert view.target_lookup_queries == 0
+        assert target_lookup_queries == [0]
 
     @pytest.mark.parametrize("physical_ifname", ["ge-2/0/0", "2/1/1"])
-    def test_off_page_physical_member_uses_ifname_owner_in_ifdescr_mode(self, physical_ifname):
+    def test_off_page_physical_member_uses_ifname_owner_in_ifdescr_mode(self, client, settings, physical_ifname):
         from dcim.models import Device, Interface
 
         _virtual_chassis, (page_device, member_device) = make_virtual_chassis_members("ifdescr-cross-page-member")
@@ -2094,17 +2077,7 @@ class TestSyncInterfacesViewPost:
             "ifdescr-cross-page-member",
             [("view", Device), ("add", Interface), ("change", Interface)],
         )
-        request = _make_request(
-            post_data={
-                "select": ["100"],
-                "device_selection_100": str(member_device.pk),
-                "auto_select_lag_members": "1",
-                "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed", "type"],
-            },
-            get_data={"interface_name_field": "ifDescr"},
-            user=user,
-        )
-        view = _sync_view()
+        _sign_in(client, settings, page_device, user)
         seed_ports(
             page_device,
             [
@@ -2128,14 +2101,23 @@ class TestSyncInterfacesViewPost:
             [port_pair(10, 100)],
         )
 
-        response = _post(view, request, object_type="device", object_id=page_device.pk)
+        response = post_interface_sync(
+            client,
+            page_device,
+            [100],
+            htmx=False,
+            members={100: member_device.pk},
+            exclude_columns=("vlans", "mac_address", "description", "mtu", "speed", "type"),
+            interface_name_field="ifDescr",
+            extra={"auto_select_lag_members": "1"},
+        )
 
         assert response.status_code == 302
         created_member = Interface.objects.get(device=member_device, name="uplink")
         assert created_member.lag_id == aggregate.pk
         assert not Interface.objects.filter(device=page_device, name="uplink").exists()
 
-    def test_same_page_lag_link_can_span_virtual_chassis_members(self):
+    def test_same_page_lag_link_can_span_virtual_chassis_members(self, client, settings):
         from dcim.models import Device, Interface
 
         _virtual_chassis, (page_device, other_member) = make_virtual_chassis_members("cross-member-lag")
@@ -2149,17 +2131,7 @@ class TestSyncInterfacesViewPost:
             "cross-member-lag",
             [("view", Device), ("add", Interface), ("change", Interface)],
         )
-        request = _make_request(
-            post_data={
-                "select": ["100", "10"],
-                "device_selection_100": str(page_device.pk),
-                "device_selection_10": str(other_member.pk),
-                "auto_select_lag_members": "1",
-                "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed", "type"],
-            },
-            user=user,
-        )
-        view = _sync_view()
+        _sign_in(client, settings, page_device, user)
         seed_ports(
             page_device,
             [
@@ -2181,7 +2153,15 @@ class TestSyncInterfacesViewPost:
             [port_pair(10, 100)],
         )
 
-        response = _post(view, request, object_type="device", object_id=page_device.pk)
+        response = post_interface_sync(
+            client,
+            page_device,
+            [100, 10],
+            htmx=False,
+            members={100: page_device.pk, 10: other_member.pk},
+            exclude_columns=("vlans", "mac_address", "description", "mtu", "speed", "type"),
+            extra={"auto_select_lag_members": "1"},
+        )
 
         assert response.status_code == 302
         aggregate.refresh_from_db()
@@ -2190,7 +2170,7 @@ class TestSyncInterfacesViewPost:
         assert aggregate.device_id == page_device.pk
         assert member.device_id == other_member.pk
 
-    def test_same_page_parent_link_can_span_virtual_chassis_members(self):
+    def test_same_page_parent_link_can_span_virtual_chassis_members(self, client, settings):
         from dcim.models import Device, Interface
 
         _virtual_chassis, (page_device, other_member) = make_virtual_chassis_members("cross-member-parent")
@@ -2204,17 +2184,7 @@ class TestSyncInterfacesViewPost:
             "cross-member-parent",
             [("view", Device), ("add", Interface), ("change", Interface)],
         )
-        request = _make_request(
-            post_data={
-                "select": ["11", "10"],
-                "device_selection_11": str(other_member.pk),
-                "device_selection_10": str(page_device.pk),
-                "auto_select_lag_members": "1",
-                "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed", "type"],
-            },
-            user=user,
-        )
-        view = _sync_view()
+        _sign_in(client, settings, page_device, user)
         seed_ports(
             page_device,
             [
@@ -2235,7 +2205,15 @@ class TestSyncInterfacesViewPost:
             ],
         )
 
-        response = _post(view, request, object_type="device", object_id=page_device.pk)
+        response = post_interface_sync(
+            client,
+            page_device,
+            [11, 10],
+            htmx=False,
+            members={11: other_member.pk, 10: page_device.pk},
+            exclude_columns=("vlans", "mac_address", "description", "mtu", "speed", "type"),
+            extra={"auto_select_lag_members": "1"},
+        )
 
         assert response.status_code == 302
         parent.refresh_from_db()
@@ -2244,7 +2222,7 @@ class TestSyncInterfacesViewPost:
         assert parent.device_id == page_device.pk
         assert child.device_id == other_member.pk
 
-    def test_invalid_selected_parent_target_does_not_fall_back_to_another_member(self):
+    def test_invalid_selected_parent_target_does_not_fall_back_to_another_member(self, client, settings):
         from dcim.models import Device, Interface
 
         _virtual_chassis, (page_device, other_member) = make_virtual_chassis_members("invalid-parent-target")
@@ -2259,34 +2237,39 @@ class TestSyncInterfacesViewPost:
             "invalid-parent-target",
             [("view", Device), ("add", Interface), ("change", Interface)],
         )
-        request = _make_request(
-            post_data={
-                "select": ["11", "10"],
-                "device_selection_11": str(page_device.pk),
-                "device_selection_10": str(outside_device.pk),
-                "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed", "type"],
-            },
-            user=user,
-        )
-        view = _sync_view()
+        _sign_in(client, settings, page_device, user)
         seed_ports(
             page_device,
             [
-                {"port_id": 10, "ifName": "Ethernet1", "ifType": "ethernetCsmacd", "ifAdminStatus": "up"},
-                {"port_id": 11, "ifName": "Ethernet1.100", "ifType": "l2vlan", "ifAdminStatus": "up"},
+                {
+                    **_PORT_KEYS_UNSET,
+                    "port_id": 10,
+                    "ifName": "Ethernet1",
+                    "ifType": "ethernetCsmacd",
+                    "ifAdminStatus": "up",
+                },
+                {
+                    **_PORT_KEYS_UNSET,
+                    "port_id": 11,
+                    "ifName": "Ethernet1.100",
+                    "ifType": "l2vlan",
+                    "ifAdminStatus": "up",
+                },
             ],
         )
         assert interface_rows(page_device)["port_stack_relationships"]["sub_interfaces"] == {11: 10}
 
-        response = _post(view, request, object_type="device", object_id=page_device.pk)
+        # A device outside the chassis is no member choice, so the row keeps the member that holds its port.
+        response = _member_choice(client, page_device, 10, outside_device.pk)
 
-        assert response.status_code == 302
+        assert response.status_code == 404
+        assert _evidence(client, page_device, 10)["member"] == other_member.pk
         child.refresh_from_db()
         existing_parent.refresh_from_db()
         assert child.parent_id is None
         assert existing_parent.device_id == other_member.pk
 
-    def test_auto_selected_view_only_parent_keeps_its_existing_member_owner(self):
+    def test_auto_selected_view_only_parent_keeps_its_existing_member_owner(self, client, settings):
         from dcim.models import Device, Interface
 
         _virtual_chassis, (page_device, other_member) = make_virtual_chassis_members("view-only-parent-owner")
@@ -2302,16 +2285,7 @@ class TestSyncInterfacesViewPost:
         )
         user = grant(user, "change", Interface, constraints={"pk": child.pk})
         user = grant(user, "view", Interface, constraints={"pk": parent.pk})
-        request = _make_request(
-            post_data={
-                "select": ["11"],
-                "device_selection_11": str(page_device.pk),
-                "auto_select_lag_members": "1",
-                "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed", "type"],
-            },
-            user=user,
-        )
-        view = _sync_view()
+        _sign_in(client, settings, page_device, user)
         seed_ports(
             page_device,
             [
@@ -2332,7 +2306,15 @@ class TestSyncInterfacesViewPost:
             ],
         )
 
-        response = _post(view, request, object_type="device", object_id=page_device.pk)
+        response = post_interface_sync(
+            client,
+            page_device,
+            [11],
+            htmx=False,
+            members={11: page_device.pk},
+            exclude_columns=("vlans", "mac_address", "description", "mtu", "speed", "type"),
+            extra={"auto_select_lag_members": "1"},
+        )
 
         assert response.status_code == 302
         child.refresh_from_db()
@@ -2340,7 +2322,7 @@ class TestSyncInterfacesViewPost:
         assert child.parent_id == parent.pk
         assert parent.device_id == other_member.pk
 
-    def test_auto_selected_unbound_logical_parent_without_owner_signal_is_skipped(self):
+    def test_auto_selected_unbound_logical_parent_without_owner_signal_is_skipped(self, client, settings):
         from dcim.models import Device, Interface
 
         _virtual_chassis, (page_device, child_member) = make_virtual_chassis_members("unbound-logical-parent-owner")
@@ -2351,28 +2333,27 @@ class TestSyncInterfacesViewPost:
             "unbound-logical-parent-owner",
             [("view", Device), ("add", Interface), ("change", Interface)],
         )
-        request = _make_request(
-            post_data={
-                "select": ["11"],
-                "device_selection_11": str(child_member.pk),
-                "auto_select_lag_members": "1",
-                "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed", "type"],
-            },
-            user=user,
-        )
-        view = _sync_view()
         # The L3 child pairs with Vlan100, a parent its name does not imply.
+        _sign_in(client, settings, page_device, user)
         seed_ports(
             page_device,
             [
-                {"port_id": 10, "ifName": "Vlan100", "ifType": "l3ipvlan", "ifAdminStatus": "up"},
-                {"port_id": 11, "ifName": child.name, "ifType": "ipForward", "ifAdminStatus": "up"},
+                {**_PORT_KEYS_UNSET, "port_id": 10, "ifName": "Vlan100", "ifType": "l3ipvlan", "ifAdminStatus": "up"},
+                {**_PORT_KEYS_UNSET, "port_id": 11, "ifName": child.name, "ifType": "ipForward", "ifAdminStatus": "up"},
             ],
             [port_pair(11, 10)],
         )
         assert interface_rows(page_device)["port_stack_relationships"]["sub_interfaces"] == {11: 10}
 
-        response = _post(view, request, object_type="device", object_id=page_device.pk)
+        response = post_interface_sync(
+            client,
+            page_device,
+            [11],
+            htmx=False,
+            members={11: child_member.pk},
+            exclude_columns=("vlans", "mac_address", "description", "mtu", "speed", "type"),
+            extra={"auto_select_lag_members": "1"},
+        )
 
         assert response.status_code == 302
         child.refresh_from_db()
@@ -2381,7 +2362,7 @@ class TestSyncInterfacesViewPost:
             device__virtual_chassis=page_device.virtual_chassis, name="Vlan100"
         ).exists()
 
-    def test_off_page_parent_selection_expands_to_all_ancestors(self):
+    def test_off_page_parent_selection_expands_to_all_ancestors(self, client, settings):
         from dcim.models import Device, Interface
 
         from netbox_librenms_plugin.models import InterfaceTypeMapping
@@ -2393,16 +2374,8 @@ class TestSyncInterfacesViewPost:
             "nested-off-page-parent",
             [("view", Device), ("add", Interface), ("change", Interface)],
         )
-        request = _make_request(
-            post_data={
-                "select": ["12"],
-                "auto_select_lag_members": "1",
-                "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed"],
-            },
-            user=user,
-        )
-        view = _sync_view()
         # Each name is its parent's name plus a ".N" suffix, so the assessment derives both edges.
+        _sign_in(client, settings, device, user)
         seed_ports(
             device,
             [
@@ -2430,7 +2403,14 @@ class TestSyncInterfacesViewPost:
             ],
         )
 
-        response = _post(view, request, object_type="device", object_id=device.pk)
+        response = post_interface_sync(
+            client,
+            device,
+            [12],
+            htmx=False,
+            exclude_columns=("vlans", "mac_address", "description", "mtu", "speed"),
+            extra={"auto_select_lag_members": "1"},
+        )
 
         assert response.status_code == 302
         grandparent = Interface.objects.get(device=device, name="Ethernet1")
@@ -2439,7 +2419,7 @@ class TestSyncInterfacesViewPost:
         assert parent.parent_id == grandparent.pk
         assert child.parent_id == parent.pk
 
-    def test_selected_row_with_blank_active_name_is_skipped(self):
+    def test_selected_row_with_blank_active_name_is_skipped(self, client, settings):
         from dcim.models import Device, Interface
 
         device = make_device("blank-selected-interface-name")
@@ -2453,34 +2433,48 @@ class TestSyncInterfacesViewPost:
             "blank-selected-interface-name",
             [("view", Device), ("add", Interface), ("change", Interface)],
         )
-        request = _make_request(
-            post_data={
-                "select": ["11"],
-                "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed", "type"],
-            },
-            get_data={"interface_name_field": "ifDescr"},
-            user=user,
-        )
-        view = _sync_view()
         # The L3 child pairs with Ethernet1, but it reports no ifDescr.
+        _sign_in(client, settings, device, user)
         seed_ports(
             device,
             [
-                {"port_id": 11, "ifName": "Ethernet2", "ifDescr": None, "ifType": "ipForward", "ifAdminStatus": "up"},
-                {"port_id": 10, "ifName": "Ethernet1", "ifDescr": "Ethernet1", "ifAdminStatus": "up"},
+                {
+                    **_PORT_KEYS_UNSET,
+                    "port_id": 11,
+                    "ifName": "Ethernet2",
+                    "ifDescr": None,
+                    "ifType": "ipForward",
+                    "ifAdminStatus": "up",
+                },
+                {
+                    **_PORT_KEYS_UNSET,
+                    "port_id": 10,
+                    "ifName": "Ethernet1",
+                    "ifDescr": "Ethernet1",
+                    "ifAdminStatus": "up",
+                },
             ],
             [port_pair(11, 10)],
         )
         assert interface_rows(device, "ifDescr")["port_stack_relationships"]["sub_interfaces"] == {11: 10}
 
-        response = _post(view, request, object_type="device", object_id=device.pk)
+        response = post_interface_sync(
+            client,
+            device,
+            [11],
+            htmx=False,
+            exclude_columns=("vlans", "mac_address", "description", "mtu", "speed", "type"),
+            interface_name_field="ifDescr",
+        )
 
         assert response.status_code == 302
         child.refresh_from_db()
         assert child.parent_id is None
-        assert message_texts(request, "warning") == ["1 interface(s) skipped: (unnamed) (interface name is blank)."]
+        assert message_texts(response.wsgi_request, "warning") == [
+            "1 interface(s) skipped: (unnamed) (interface name is blank)."
+        ]
 
-    def test_duplicate_display_name_sync_uses_selected_port_id_and_target(self):
+    def test_duplicate_display_name_sync_uses_selected_port_id_and_target(self, client, settings):
         from dcim.models import Device, Interface
 
         _virtual_chassis, (member1, member2) = make_virtual_chassis_members("stable-selection")
@@ -2497,17 +2491,7 @@ class TestSyncInterfacesViewPost:
             "stable-interface-selection",
             [("view", Device), ("add", Interface), ("change", Interface)],
         )
-        request = _make_request(
-            post_data={
-                "select": ["10"],
-                "device_selection_10": str(member1.pk),
-                "device_selection_11": str(member2.pk),
-                "exclude_columns": ["vlans", "mac_address", "mtu", "speed", "type"],
-            },
-            get_data={"interface_name_field": "ifDescr"},
-            user=user,
-        )
-        view = _sync_view()
+        _sign_in(client, settings, member1, user)
         seed_ports(
             member1,
             [
@@ -2530,7 +2514,15 @@ class TestSyncInterfacesViewPost:
             ],
         )
 
-        response = _post(view, request, object_type="device", object_id=member1.pk)
+        response = post_interface_sync(
+            client,
+            member1,
+            [10],
+            htmx=False,
+            members={10: member1.pk, 11: member2.pk},
+            exclude_columns=("vlans", "mac_address", "mtu", "speed", "type"),
+            interface_name_field="ifDescr",
+        )
 
         assert response.status_code == 302
         selected_interface.refresh_from_db()
@@ -2538,7 +2530,7 @@ class TestSyncInterfacesViewPost:
         assert selected_interface.description == "new selected"
         assert untouched_interface.description == "old untouched"
 
-    def test_same_device_duplicate_display_name_does_not_rebind_existing_port(self):
+    def test_same_device_duplicate_display_name_does_not_rebind_existing_port(self, client, settings):
         from dcim.models import Device, Interface
 
         device = make_device("same-device-stable-selection")
@@ -2551,19 +2543,12 @@ class TestSyncInterfacesViewPost:
             "same-device-stable-selection",
             [("view", Device), ("add", Interface), ("change", Interface)],
         )
-        request = _make_request(
-            post_data={
-                "select": ["11"],
-                "exclude_columns": ["vlans", "mac_address", "mtu", "speed", "type"],
-            },
-            get_data={"interface_name_field": "ifDescr"},
-            user=user,
-        )
-        view = _sync_view()
+        _sign_in(client, settings, device, user)
         seed_ports(
             device,
             [
                 {
+                    **_PORT_KEYS_UNSET,
                     "port_id": 10,
                     "ifName": "Ethernet1",
                     "ifDescr": "Ethernet",
@@ -2571,6 +2556,7 @@ class TestSyncInterfacesViewPost:
                     "ifAdminStatus": "up",
                 },
                 {
+                    **_PORT_KEYS_UNSET,
                     "port_id": 11,
                     "ifName": "Ethernet2",
                     "ifDescr": "Ethernet",
@@ -2580,16 +2566,23 @@ class TestSyncInterfacesViewPost:
             ],
         )
 
-        response = _post(view, request, object_type="device", object_id=device.pk)
+        response = post_interface_sync(
+            client,
+            device,
+            [11],
+            htmx=False,
+            exclude_columns=("vlans", "mac_address", "mtu", "speed", "type"),
+            interface_name_field="ifDescr",
+        )
 
         assert response.status_code == 302
-        _assert_snapshot_read(request)
+        _assert_snapshot_read(response.wsgi_request)
         existing.refresh_from_db()
         assert read_mapping(existing).own_id("default") == 10
         assert existing.description == "original port"
         assert Interface.objects.filter(device=device, name="Ethernet").count() == 1
 
-    def test_same_vm_duplicate_display_name_does_not_rebind_existing_port(self):
+    def test_same_vm_duplicate_display_name_does_not_rebind_existing_port(self, client, settings):
         from virtualization.models import VirtualMachine, VMInterface
 
         vm = make_vm("same-vm-stable-selection")
@@ -2601,19 +2594,12 @@ class TestSyncInterfacesViewPost:
             "same-vm-stable-selection",
             [("view", VirtualMachine), ("add", VMInterface), ("change", VMInterface)],
         )
-        request = _make_request(
-            post_data={
-                "select": ["11"],
-                "exclude_columns": ["vlans", "mac_address", "mtu", "speed", "type"],
-            },
-            get_data={"interface_name_field": "ifDescr"},
-            user=user,
-        )
-        view = _sync_view()
+        _sign_in(client, settings, vm, user)
         seed_ports(
             vm,
             [
                 {
+                    **_PORT_KEYS_UNSET,
                     "port_id": 10,
                     "ifName": "Ethernet1",
                     "ifDescr": "Ethernet",
@@ -2621,6 +2607,7 @@ class TestSyncInterfacesViewPost:
                     "ifAdminStatus": "up",
                 },
                 {
+                    **_PORT_KEYS_UNSET,
                     "port_id": 11,
                     "ifName": "Ethernet2",
                     "ifDescr": "Ethernet",
@@ -2630,10 +2617,17 @@ class TestSyncInterfacesViewPost:
             ],
         )
 
-        response = _post(view, request, object_type="virtualmachine", object_id=vm.pk)
+        response = post_interface_sync(
+            client,
+            vm,
+            [11],
+            htmx=False,
+            exclude_columns=("vlans", "mac_address", "mtu", "speed", "type"),
+            interface_name_field="ifDescr",
+        )
 
         assert response.status_code == 302
-        _assert_snapshot_read(request)
+        _assert_snapshot_read(response.wsgi_request)
         existing.refresh_from_db()
         assert read_mapping(existing).own_id("default") == 10
         assert existing.description == "original port"
@@ -2649,7 +2643,9 @@ class TestSyncInterfacesViewPost:
             None,
         ],
     )
-    def test_corrupt_same_name_binding_is_not_claimed_by_selected_port(self, object_type, stored_entry):
+    def test_corrupt_same_name_binding_is_not_claimed_by_selected_port(
+        self, client, settings, object_type, stored_entry
+    ):
         from dcim.models import Device, Interface
         from virtualization.models import VirtualMachine, VMInterface
 
@@ -2670,19 +2666,12 @@ class TestSyncInterfacesViewPost:
             save=True,
         )
         user = make_user_with_perms(f"corrupt-name-fallback-{object_type}", permissions)
-        request = _make_request(
-            post_data={
-                "select": ["11"],
-                "exclude_columns": ["vlans", "mac_address", "mtu", "speed", "type"],
-            },
-            get_data={"interface_name_field": "ifDescr"},
-            user=user,
-        )
-        view = _sync_view()
+        _sign_in(client, settings, obj, user)
         seed_ports(
             obj,
             [
                 {
+                    **_PORT_KEYS_UNSET,
                     "port_id": 11,
                     "ifName": "Ethernet1",
                     "ifDescr": "Ethernet",
@@ -2692,17 +2681,24 @@ class TestSyncInterfacesViewPost:
             ],
         )
 
-        response = _post(view, request, object_type=object_type, object_id=obj.pk)
+        response = post_interface_sync(
+            client,
+            obj,
+            [11],
+            htmx=False,
+            exclude_columns=("vlans", "mac_address", "mtu", "speed", "type"),
+            interface_name_field="ifDescr",
+        )
 
         assert response.status_code == 302
-        _assert_snapshot_read(request)
+        _assert_snapshot_read(response.wsgi_request)
         existing.refresh_from_db()
         assert stored_mapping_for_test(existing) == {"default": stored_entry}
         assert read_mapping(existing).own_id("default") is None
         assert existing.description == "original description"
         assert interface_model.objects.filter(**owner_filter, name="Ethernet").count() == 1
 
-    def test_sync_selected_interfaces_syncs_oob_rows_but_not_a_shared_lom(self):
+    def test_sync_selected_interfaces_syncs_oob_rows_but_not_a_shared_lom(self, client, settings):
         """An OOB controller is a second LibreNMS device but the same device in NetBox.
 
         Its ports are modelled as interfaces on the host. The exception is a shared LOM, where one
@@ -2717,26 +2713,25 @@ class TestSyncInterfacesViewPost:
             "oob-row-not-syncable",
             [("view", Device), ("add", Interface), ("change", Interface)],
         )
-        request = _make_request(
-            post_data={
-                "select": ["99"],
-                "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed", "type"],
-            },
-            user=user,
-        )
-        view = _sync_view()
         _link_oob(device)
+        _sign_in(client, settings, device, user)
         seed_ports(device, [], oob_ports=[{**_PORT_KEYS_UNSET, "ifName": "eth0", "port_id": 99, "ifAdminStatus": "up"}])
 
-        response = _post(view, request, object_type="device", object_id=device.pk)
+        response = post_interface_sync(
+            client,
+            device,
+            [99],
+            htmx=False,
+            exclude_columns=("vlans", "mac_address", "description", "mtu", "speed", "type"),
+        )
 
         assert response.status_code == 302
         assert Interface.objects.filter(device=device, name="eth0").exists(), (
             "the OOB controller's port must be modellable as an interface on the host device"
         )
 
-    @pytest.mark.parametrize("selected_ports", [["9402"], ["9401", "9402"]])
-    def test_oob_sync_can_use_a_name_owned_by_another_chassis_member(self, selected_ports):
+    @pytest.mark.parametrize("selected_ports", [[9402], [9401, 9402]])
+    def test_oob_sync_can_use_a_name_owned_by_another_chassis_member(self, client, settings, selected_ports):
         from dcim.models import Device, Interface, VirtualChassis
 
         master = make_device("oob-sync-scope-master")
@@ -2753,22 +2748,18 @@ class TestSyncInterfacesViewPost:
             "oob-sync-scope",
             [("view", Device), ("add", Interface), ("change", Interface)],
         )
-        request = _make_request(
-            post_data={
-                "select": selected_ports,
-                "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed", "type"],
-            },
-            user=user,
-        )
-        view = _sync_view()
         _link_oob(master)
-        seed_ports(
+
+        response = _post_sync(
+            client,
+            settings,
             master,
             [{**_PORT_KEYS_UNSET, "ifName": "eth0", "port_id": 9401, "ifType": "ethernetCsmacd"}],
+            selected_ports,
+            user=user,
             oob_ports=[{**_PORT_KEYS_UNSET, "ifName": "eth0", "port_id": 9402, "ifType": "ethernetCsmacd"}],
+            exclude_columns=("vlans", "mac_address", "description", "mtu", "speed", "type"),
         )
-
-        response = _post(view, request, object_type="device", object_id=master.pk)
 
         assert response.status_code == 302
         master_interface = Interface.objects.get(device=master, name="eth0")
@@ -2780,7 +2771,7 @@ class TestSyncInterfacesViewPost:
         "case",
         ["host_both", "host_unselected", "alone", "explicit_page", "bound_page", "bound_member", "hidden_member"],
     )
-    def test_oob_writes_and_collisions_use_the_displayed_chassis_owner(self, case):
+    def test_oob_writes_and_collisions_use_the_displayed_chassis_owner(self, client, settings, case):
         from dcim.models import Device, Interface
 
         from netbox_librenms_plugin.tests.view_test_helpers import grant
@@ -2801,25 +2792,29 @@ class TestSyncInterfacesViewPost:
             bound = make_interface(page if case == "bound_page" else member, "old-port-name")
             seed_mapping(bound, own=9412, save=False)
             bound.save()
-        post_data = {
-            "select": ["9411", "9412"] if case == "host_both" else ["9412"],
-            "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed", "type"],
-        }
-        if case == "explicit_page":
-            post_data["device_selection_9412"] = str(page.pk)
-        request = _make_request(post_data=post_data, user=user)
+        _sign_in(client, settings, page, user)
         seed_ports(page, host_rows, oob_ports=oob_rows)
 
-        context, rows = _render(request, page)
+        context, rows = _render(_make_request(user=user), page)
         assert context["table"] is not None
         if case != "hidden_member":
             assert _row(rows, 9412)["selected_object_id"] == (page.pk if case == "bound_page" else member.pk)
 
-        response = _post(_sync_view(), request, object_type="device", object_id=page.pk)
-        assert response.status_code == 302
         if case == "hidden_member":
+            # The row's owner is a member the user cannot view, so the tab offers no selection of it.
+            assert not _offers_selection(client, page, 9412)
             assert not Interface.objects.filter(device__in=[page, member]).exists()
-        elif case in ("host_both", "host_unselected"):
+            return
+        response = post_interface_sync(
+            client,
+            page,
+            [9411, 9412] if case == "host_both" else [9412],
+            htmx=False,
+            members={9412: page.pk} if case == "explicit_page" else None,
+            exclude_columns=("vlans", "mac_address", "description", "mtu", "speed", "type"),
+        )
+        assert response.status_code == 302
+        if case in ("host_both", "host_unselected"):
             assert not Interface.objects.filter(device=page).exists()
             oob = Interface.objects.get(device=member, name=f"{name}-oob")
             assert read_mapping(oob).own_id("default") == 9412
@@ -2874,8 +2869,8 @@ class TestSyncInterfacesViewPost:
         assert resolved == iface, "the OOB row owns this interface by port_id"
         assert port["exists_in_netbox"] is True
 
-    @pytest.mark.parametrize("selected_port_id", ["98", "99"])
-    def test_a_shared_lom_row_is_reported_only_when_selected(self, selected_port_id):
+    @pytest.mark.parametrize("selected_port_id", [98, 99])
+    def test_a_shared_lom_row_is_reported_only_when_selected(self, client, settings, selected_port_id):
         """One physical port reported on both sides must not become two NetBox interfaces."""
         from dcim.models import Device, Interface
 
@@ -2884,37 +2879,33 @@ class TestSyncInterfacesViewPost:
             "oob-shared-lom",
             [("view", Device), ("add", Interface), ("change", Interface)],
         )
-        request = _make_request(
-            post_data={
-                "select": [selected_port_id],
-                "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed", "type"],
-            },
-            user=user,
-        )
-        view = _sync_view()
         _link_oob(device)
         # The host and the OOB controller report one MAC: a shared LOM port.
         mac = "aa:bb:cc:00:00:99"
-        seed_ports(
+
+        response = _post_sync(
+            client,
+            settings,
             device,
             [{**_PORT_KEYS_UNSET, "ifName": "lom0", "port_id": 99, "ifAdminStatus": "up", "ifPhysAddress": mac}],
+            [selected_port_id],
+            user=user,
             oob_ports=[
                 {**_PORT_KEYS_UNSET, "ifName": "lom0", "port_id": 98, "ifAdminStatus": "up", "ifPhysAddress": mac}
             ],
+            exclude_columns=("vlans", "mac_address", "description", "mtu", "speed", "type"),
         )
 
-        response = _post(view, request, object_type="device", object_id=device.pk)
-
         assert response.status_code == 302
-        assert Interface.objects.filter(device=device, name="lom0").exists() is (selected_port_id == "99")
-        warnings = message_texts(request, "warning")
-        assert any("shared LOM" in text for text in warnings) is (selected_port_id == "98")
+        assert Interface.objects.filter(device=device, name="lom0").exists() is (selected_port_id == 99)
+        warnings = message_texts(response.wsgi_request, "warning")
+        assert any("shared LOM" in text for text in warnings) is (selected_port_id == 98)
         assert not any("derived interface name" in text for text in warnings), (
             "the shared physical port must not be treated as a renameable name conflict"
         )
 
     @pytest.mark.parametrize("viewable", [True, False])
-    def test_oob_port_does_not_adopt_an_unbound_host_interface_by_name(self, viewable):
+    def test_oob_port_does_not_adopt_an_unbound_host_interface_by_name(self, client, settings, viewable):
         from dcim.models import Device, Interface
 
         device = make_device("oob-name-collision")
@@ -2927,17 +2918,16 @@ class TestSyncInterfacesViewPost:
         )
         if viewable:
             user = grant(user, "view", Interface)
-        request = _make_request(
-            post_data={"select": ["98"], "exclude_columns": ["vlans", "mac_address"]},
-            user=user,
-        )
-        view = _sync_view()
         _link_oob(device)
         # The host row is absent from LibreNMS, but its unbound NetBox interface remains.
         # This reaches the existing-interface guard after the snapshot collision check.
-        seed_ports(
+        response = _post_sync(
+            client,
+            settings,
             device,
             [],
+            [98],
+            user=user,
             oob_ports=[
                 {
                     **_PORT_KEYS_UNSET,
@@ -2947,20 +2937,20 @@ class TestSyncInterfacesViewPost:
                     "ifAlias": "controller interface",
                 },
             ],
+            exclude_columns=("vlans", "mac_address"),
         )
-
-        response = _post(view, request, object_type="device", object_id=device.pk)
 
         host_interface.refresh_from_db()
         assert response.status_code == 302
-        _assert_snapshot_read(request)
+        _assert_snapshot_read(response.wsgi_request)
         assert host_interface.description == "host interface"
         assert read_mapping(host_interface).own_id("default") is None
         assert Interface.objects.filter(device=device, name="lom0").count() == 1
         assert not Interface.objects.filter(device=device, name="lom0-oob").exists()
-        assert ("host interface already uses this name" in " ".join(message_texts(request, "warning"))) is viewable
+        warnings = message_texts(response.wsgi_request, "warning")
+        assert ("host interface already uses this name" in " ".join(warnings)) is viewable
 
-    def test_an_oob_row_uses_a_derived_name_when_only_it_is_selected(self):
+    def test_an_oob_row_uses_a_derived_name_when_only_it_is_selected(self, client, settings):
         """The host owns its bare name even when only the OOB row is selected.
 
         The host and its OOB controller are two LibreNMS devices but one NetBox device, so both
@@ -2978,29 +2968,28 @@ class TestSyncInterfacesViewPost:
         )
         # Only the OOB row is selected. The host row is present in the snapshot but unselected,
         # which is exactly the case where the collision used to go unnoticed.
-        request = _make_request(
-            post_data={
-                "select": ["8502"],
-                "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed", "type"],
-            },
-            user=user,
-        )
-        view = _sync_view()
         _link_oob(device)
+        _sign_in(client, settings, device, user)
         seed_ports(
             device,
             [{**_PORT_KEYS_UNSET, "ifName": "eth0", "port_id": 8501, "ifAdminStatus": "up"}],
             oob_ports=[{**_PORT_KEYS_UNSET, "ifName": "eth0", "port_id": 8502, "ifAdminStatus": "up"}],
         )
 
-        response = _post(view, request, object_type="device", object_id=device.pk)
+        response = post_interface_sync(
+            client,
+            device,
+            [8502],
+            htmx=False,
+            exclude_columns=("vlans", "mac_address", "description", "mtu", "speed", "type"),
+        )
 
         assert response.status_code == 302
         derived = Interface.objects.get(device=device, name="eth0-oob")
         assert read_mapping(derived).own_id("default") == 8502
         assert not Interface.objects.filter(device=device, name="eth0").exists()
 
-    def test_a_host_oob_name_collision_syncs_under_the_derived_name(self):
+    def test_a_host_oob_name_collision_syncs_under_the_derived_name(self, client, settings):
         """A host-owned bare name derives an OOB name instead of reporting a skip."""
         from dcim.models import Device, Interface
 
@@ -3009,28 +2998,27 @@ class TestSyncInterfacesViewPost:
             "oob-collision-reported",
             [("view", Device), ("add", Interface), ("change", Interface)],
         )
-        request = _make_request(
-            post_data={
-                "select": ["8602"],
-                "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed", "type"],
-            },
-            user=user,
-        )
-        view = _sync_view()
         _link_oob(device)
+        _sign_in(client, settings, device, user)
         seed_ports(
             device,
             [{**_PORT_KEYS_UNSET, "ifName": "mgmt0", "port_id": 8601, "ifAdminStatus": "up"}],
             oob_ports=[{**_PORT_KEYS_UNSET, "ifName": "mgmt0", "port_id": 8602, "ifAdminStatus": "up"}],
         )
 
-        _post(view, request, object_type="device", object_id=device.pk)
+        response = post_interface_sync(
+            client,
+            device,
+            [8602],
+            htmx=False,
+            exclude_columns=("vlans", "mac_address", "description", "mtu", "speed", "type"),
+        )
 
         interface = Interface.objects.get(device=device, name="mgmt0-oob")
         assert read_mapping(interface).own_id("default") == 8602
-        assert message_texts(request, "warning") == []
+        assert message_texts(response.wsgi_request, "warning") == []
 
-    def test_the_host_row_can_still_sync_its_own_name_after_an_oob_collision(self):
+    def test_the_host_row_can_still_sync_its_own_name_after_an_oob_collision(self, client, settings):
         """Host precedence is only real if the host row still gets its name afterwards."""
         from dcim.models import Device, Interface
 
@@ -3041,23 +3029,20 @@ class TestSyncInterfacesViewPost:
         )
 
         def _sync(selected):
-            request = _make_request(
-                post_data={
-                    "select": selected,
-                    "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed", "type"],
-                },
-                user=user,
-            )
-            seed_ports(
+            _post_sync(
+                client,
+                settings,
                 device,
                 [{**_PORT_KEYS_UNSET, "ifName": "eth1", "port_id": 8701, "ifAdminStatus": "up"}],
+                selected,
+                user=user,
                 oob_ports=[{**_PORT_KEYS_UNSET, "ifName": "eth1", "port_id": 8702, "ifAdminStatus": "up"}],
+                exclude_columns=("vlans", "mac_address", "description", "mtu", "speed", "type"),
             )
-            _post(_sync_view(), request, object_type="device", object_id=device.pk)
 
         # The OOB row goes first, so ordering cannot be what saves the host.
-        _sync(["8702"])
-        _sync(["8701"])
+        _sync([8702])
+        _sync([8701])
 
         host_interface = Interface.objects.filter(device=device, name="eth1").first()
         assert host_interface is not None, "the host row must still be able to create its interface"
@@ -3065,7 +3050,7 @@ class TestSyncInterfacesViewPost:
         oob_interface = Interface.objects.get(device=device, name="eth1-oob")
         assert read_mapping(oob_interface).own_id("default") == 8702
 
-    def test_an_unselected_shared_lom_row_is_not_reported_as_skipped(self):
+    def test_an_unselected_shared_lom_row_is_not_reported_as_skipped(self, client, settings):
         """A skip warning must describe a row the operator asked to sync.
 
         The shared-LOM skip used to run before the selection check, so an untouched OOB row
@@ -3079,15 +3064,8 @@ class TestSyncInterfacesViewPost:
             "oob-unselected-lom",
             [("view", Device), ("add", Interface), ("change", Interface)],
         )
-        request = _make_request(
-            post_data={
-                "select": ["8801"],
-                "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed", "type"],
-            },
-            user=user,
-        )
-        view = _sync_view()
         _link_oob(device)
+        _sign_in(client, settings, device, user)
         # An unselected host port and the OOB controller report one MAC: a shared LOM port.
         mac = "aa:bb:cc:00:88:02"
         seed_ports(
@@ -3102,16 +3080,24 @@ class TestSyncInterfacesViewPost:
         )
         assert _row(interface_rows(device)["ports"], 8802)["_dedup_conflict"] is True
 
-        _post(view, request, object_type="device", object_id=device.pk)
+        response = post_interface_sync(
+            client,
+            device,
+            [8801],
+            htmx=False,
+            exclude_columns=("vlans", "mac_address", "description", "mtu", "speed", "type"),
+        )
 
         assert Interface.objects.filter(device=device, name="swp1").exists()
-        assert not any("lom1" in text for text in message_texts(request, "warning")), (
+        assert not any("lom1" in text for text in message_texts(response.wsgi_request, "warning")), (
             "an unselected row must not be reported as skipped"
         )
 
     @pytest.mark.parametrize("viewable", [True, False])
     @pytest.mark.parametrize("bound_elsewhere", [True, False])
-    def test_an_existing_bound_name_derives_oob_without_a_host_snapshot(self, viewable, bound_elsewhere):
+    def test_an_existing_bound_name_derives_oob_without_a_host_snapshot(
+        self, client, settings, viewable, bound_elsewhere
+    ):
         """A different bound port keeps the bare name unavailable to the OOB row."""
         from dcim.models import Device, Interface
 
@@ -3132,15 +3118,8 @@ class TestSyncInterfacesViewPost:
             from netbox_librenms_plugin.tests.view_test_helpers import grant
 
             user = grant(user, "view", Interface)
-        request = _make_request(
-            post_data={
-                "select": ["8902"],
-                "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed", "type"],
-            },
-            user=user,
-        )
-        view = _sync_view()
         _link_oob(device)
+        _sign_in(client, settings, device, user)
         # Only the OOB row remains; the host port is gone from LibreNMS.
         seed_ports(
             device,
@@ -3148,11 +3127,17 @@ class TestSyncInterfacesViewPost:
             oob_ports=[{**_PORT_KEYS_UNSET, "ifName": "eno1", "port_id": 8902, "ifAdminStatus": "up"}],
         )
 
-        _post(view, request, object_type="device", object_id=device.pk)
+        response = post_interface_sync(
+            client,
+            device,
+            [8902],
+            htmx=False,
+            exclude_columns=("vlans", "mac_address", "description", "mtu", "speed", "type"),
+        )
 
         host_interface.refresh_from_db()
         assert read_mapping(host_interface).own_id("default") == 8901, "the host interface keeps its own port binding"
-        warnings = message_texts(request, "warning")
+        warnings = message_texts(response.wsgi_request, "warning")
         if bound_elsewhere:
             assert not Interface.objects.filter(device=device, name="eno1-oob").exists()
             assert warnings == [
@@ -3165,7 +3150,8 @@ class TestSyncInterfacesViewPost:
             assert read_mapping(oob_interface).own_id("default") == 8902
             assert warnings == []
 
-    def test_duplicate_normalized_selected_port_id_is_rejected_before_writes(self):
+    def test_duplicate_normalized_selected_port_id_is_not_selectable(self, client, settings):
+        """A port ID that the snapshot holds twice offers no selection, so no submit can write either row."""
         from dcim.models import Device, Interface
 
         device = make_device("duplicate-normalized-selected-id")
@@ -3173,32 +3159,19 @@ class TestSyncInterfacesViewPost:
             "duplicate-normalized-selected-id",
             [("view", Device), ("add", Interface), ("change", Interface)],
         )
-        request = _make_request(
-            post_data={
-                "select": ["10"],
-                "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed", "type"],
-            },
-            user=user,
-        )
-        view = _sync_view()
+        _sign_in(client, settings, device, user)
         seed_ports(
             device,
             [
-                {"port_id": 10, "ifName": "eth0", "ifAdminStatus": "up"},
-                {"port_id": "010", "ifName": "eth1", "ifAdminStatus": "up"},
+                {**_PORT_KEYS_UNSET, "port_id": 10, "ifName": "eth0", "ifAdminStatus": "up"},
+                {**_PORT_KEYS_UNSET, "port_id": "010", "ifName": "eth1", "ifAdminStatus": "up"},
             ],
         )
 
-        response = _post(view, request, object_type="device", object_id=device.pk)
-
-        assert response.status_code == 302
+        assert not _offers_selection(client, device, 10)
         assert not Interface.objects.filter(device=device).exists()
-        assert message_texts(request, "warning") == [
-            "Selected LibreNMS port IDs are duplicated in the cached interface data. "
-            "Refresh LibreNMS data and resolve the duplicate IDs before syncing."
-        ]
 
-    def test_duplicate_normalized_related_port_id_is_not_linked(self):
+    def test_duplicate_normalized_related_port_id_is_not_linked(self, client, settings):
         from dcim.models import Device
 
         device = make_device("duplicate-normalized-related-id")
@@ -3212,32 +3185,31 @@ class TestSyncInterfacesViewPost:
             "duplicate-normalized-related-id",
             [("view", Device), ("add", type(child)), ("change", type(child))],
         )
-        request = _make_request(
-            post_data={
-                "select": ["10"],
-                "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed", "type"],
-            },
-            user=user,
-        )
-        view = _sync_view()
         # The parent's port ID is duplicated, so the assessment derives no edge from it.
+        _sign_in(client, settings, device, user)
         seed_ports(
             device,
             [
-                {"port_id": 10, "ifName": child.name, "ifAdminStatus": "up"},
-                {"port_id": 20, "ifName": parent.name, "ifAdminStatus": "up"},
-                {"port_id": "020", "ifName": "duplicate-parent", "ifAdminStatus": "up"},
+                {**_PORT_KEYS_UNSET, "port_id": 10, "ifName": child.name, "ifAdminStatus": "up"},
+                {**_PORT_KEYS_UNSET, "port_id": 20, "ifName": parent.name, "ifAdminStatus": "up"},
+                {**_PORT_KEYS_UNSET, "port_id": "020", "ifName": "duplicate-parent", "ifAdminStatus": "up"},
             ],
         )
 
-        response = _post(view, request, object_type="device", object_id=device.pk)
+        response = post_interface_sync(
+            client,
+            device,
+            [10],
+            htmx=False,
+            exclude_columns=("vlans", "mac_address", "description", "mtu", "speed", "type"),
+        )
 
         assert response.status_code == 302
-        _assert_snapshot_read(request)
+        _assert_snapshot_read(response.wsgi_request)
         child.refresh_from_db()
         assert child.parent_id is None
 
-    def test_padded_cached_port_id_updates_its_existing_stable_match(self):
+    def test_padded_cached_port_id_updates_its_existing_stable_match(self, client, settings):
         from dcim.models import Device, Interface
 
         device = make_device("padded-stable-port-id")
@@ -3247,20 +3219,19 @@ class TestSyncInterfacesViewPost:
             "padded-stable-port-id",
             [("view", Device), ("add", Interface), ("change", Interface)],
         )
-        request = _make_request(
-            post_data={
-                "select": ["10"],
-                "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed", "type"],
-            },
-            user=user,
-        )
-        view = _sync_view()
+        _sign_in(client, settings, device, user)
         seed_ports(
             device,
             [{**_PORT_KEYS_UNSET, "port_id": "0010", "ifName": "newname", "ifAdminStatus": "up"}],
         )
 
-        response = _post(view, request, object_type="device", object_id=device.pk)
+        response = post_interface_sync(
+            client,
+            device,
+            [10],
+            htmx=False,
+            exclude_columns=("vlans", "mac_address", "description", "mtu", "speed", "type"),
+        )
 
         assert response.status_code == 302
         interface.refresh_from_db()
@@ -3405,64 +3376,60 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         assert Interface.objects.filter(pk=other_iface.pk).values().get() == before_holder
 
     def test_device_selection_with_vc_valid(self, client, settings):
-        """A posted sibling of the same chassis receives the interface."""
+        """A chosen sibling of the same chassis receives the interface."""
         from dcim.models import Interface
 
         _vc, (host, sibling) = make_virtual_chassis_members("selvalid")
         port = {**_PORT_KEYS_UNSET, "ifName": "Gi0/1", "port_id": 10}
 
-        _post_sync(client, settings, host, [port], [10], extra={"device_selection_10": str(sibling.pk)})
+        _post_sync(client, settings, host, [port], [10], members={10: sibling.pk})
 
         assert Interface.objects.filter(device=sibling, name="Gi0/1").exists()
         assert not Interface.objects.filter(device=host, name="Gi0/1").exists()
 
     def test_device_selection_invalid_is_skipped(self, client, settings):
-        """A device that is neither the page device nor a VC sibling is refused."""
+        """A member choice of a device outside any chassis is refused; the row keeps the page device."""
         from dcim.models import Interface
 
         dev = make_device("selinvalid-page")
         other = make_device("selinvalid-other")
-        port = {**_PORT_KEYS_UNSET, "ifName": "Gi0/1", "port_id": 10}
+        _sign_in(client, settings, dev)
+        seed_ports(dev, [{**_PORT_KEYS_UNSET, "ifName": "Gi0/1", "port_id": 10}])
 
-        response = _post_sync(client, settings, dev, [port], [10], extra={"device_selection_10": str(other.pk)})
+        response = _member_choice(client, dev, 10, other.pk)
 
-        assert not Interface.objects.filter(device=dev, name="Gi0/1").exists()
-        assert not Interface.objects.filter(device=other, name="Gi0/1").exists()
-        assert message_texts(response.wsgi_request, "warning") == [
-            "1 interface(s) skipped: Gi0/1 (selected target unavailable)."
-        ]
+        assert response.status_code == 400
+        assert _evidence(client, dev, 10)["member"] == dev.pk
+        assert not Interface.objects.filter(device=other).exists()
 
     def test_device_selection_does_not_exist_is_skipped(self, client, settings):
-        from dcim.models import Device, Interface
+        """A member choice of a device that does not exist is refused and stores nothing."""
+        from dcim.models import Device
 
-        dev = make_device("selgone-page")
-        absent_pk = missing_pk(Device)
-        port = {**_PORT_KEYS_UNSET, "ifName": "Gi0/1", "port_id": 10}
+        _vc, (host, _sibling) = make_virtual_chassis_members("selgone")
+        _sign_in(client, settings, host)
+        seed_ports(host, [{**_PORT_KEYS_UNSET, "ifName": "Gi0/1", "port_id": 10}])
+        before = _evidence(client, host, 10)
 
-        response = _post_sync(client, settings, dev, [port], [10], extra={"device_selection_10": str(absent_pk)})
+        response = _member_choice(client, host, 10, missing_pk(Device))
 
-        assert not Interface.objects.filter(device=dev, name="Gi0/1").exists()
-        assert message_texts(response.wsgi_request, "warning") == [
-            "1 interface(s) skipped: Gi0/1 (selected target unavailable)."
-        ]
+        assert response.status_code == 404
+        assert _evidence(client, host, 10) == before
 
     def test_explicit_vc_member_outside_grant_is_skipped(self, client, settings):
-        """A hidden posted target must not silently sync the row onto the page device."""
+        """A member choice of a hidden sibling is refused, so the row cannot sync onto it or onto the page device."""
         from dcim.models import Device, Interface
 
         _vc, (host, sibling) = make_virtual_chassis_members("selhidden")
         user = make_user_with_perms("selhidden-user", [("add", Interface), ("change", Interface)])
         user = grant(user, "view", Device, constraints={"pk": host.pk})
-        port = {**_PORT_KEYS_UNSET, "ifName": "Gi0/1", "port_id": 10}
+        _sign_in(client, settings, host, user)
+        seed_ports(host, [{**_PORT_KEYS_UNSET, "ifName": "Gi0/1", "port_id": 10}])
 
-        response = _post_sync(
-            client, settings, host, [port], [10], user=user, extra={"device_selection_10": str(sibling.pk)}
-        )
+        response = _member_choice(client, host, 10, sibling.pk)
 
+        assert response.status_code == 404
         assert not Interface.objects.filter(name="Gi0/1").exists()
-        assert message_texts(response.wsgi_request, "warning") == [
-            "1 interface(s) skipped: Gi0/1 (selected target unavailable)."
-        ]
 
     @pytest.mark.django_db
     def test_device_port_id_prefers_existing_librenms_id_match(self, client, settings):
@@ -4433,7 +4400,7 @@ class TestSyncInterfaceLagViewRealDB:
         view = self._make_view()
         _seed_relationship(device, "lag_members", 10, 20, member.name, agg.name)
         req = _make_request({"port_id": "10", "lag_port_id": "20"})
-        resp = _post(view, req, object_type="device", object_id=device.pk)
+        resp = _post(view, bind_relationship(req, device), object_type="device", object_id=device.pk)
 
         assert resp.status_code == 200, resp.content
         member.refresh_from_db()
@@ -4455,7 +4422,7 @@ class TestSyncInterfaceLagViewRealDB:
         _seed_relationship(device, "lag_members", 30, 31, member.name, aggregate.name)
         # NetBox's real Interface.clean() rejects a virtual LAG member with a 409, and nothing persists.
         req = _make_request({"port_id": "30", "lag_port_id": "31"})
-        resp = _post(view, req, object_type="device", object_id=device.pk)
+        resp = _post(view, bind_relationship(req, device), object_type="device", object_id=device.pk)
 
         assert resp.status_code == 409
         body = json.loads(resp.content)
@@ -4475,7 +4442,7 @@ class TestSyncInterfaceLagViewRealDB:
         view = self._make_view()
         _seed_relationship(member1, "lag_members", 40, 50, local.name, aggregate.name)
         req = _make_request({"port_id": "40", "lag_port_id": "50"})
-        resp = _post(view, req, object_type="device", object_id=member1.pk)
+        resp = _post(view, bind_relationship(req, member1), object_type="device", object_id=member1.pk)
 
         assert resp.status_code == 200, resp.content
         local.refresh_from_db()
@@ -4507,7 +4474,7 @@ class TestSyncInterfaceParentViewRealPermissions:
         _seed_relationship(donor, "sub_interfaces", 10, 11, child.name, parent.name)
         assert interface_rows(donor)["port_stack_relationships"]["sub_interfaces"] == {10: 11}
 
-        response = _post(view, request, object_type="device", object_id=donor.pk)
+        response = _post(view, bind_relationship(request, donor), object_type="device", object_id=donor.pk)
 
         assert response.status_code == 409
         assert b"migrated" in response.content.lower()
@@ -4543,7 +4510,7 @@ class TestSyncInterfaceParentViewRealPermissions:
         view = make_view(SyncInterfaceParentView)
         _seed_relationship(device, "sub_interfaces", 10, 11, child.name, parent.name)
 
-        response = _post(view, request, object_type="device", object_id=device.pk)
+        response = _post(view, bind_relationship(request, device), object_type="device", object_id=device.pk)
 
         assert response.status_code == 200, response.content
         child.refresh_from_db()
@@ -4576,7 +4543,7 @@ class TestSyncInterfaceParentViewRealPermissions:
 
         monkeypatch.setattr(Interface, "clean", rejecting_clean)
 
-        response = _post(view, request, object_type="device", object_id=device.pk)
+        response = _post(view, bind_relationship(request, device), object_type="device", object_id=device.pk)
 
         assert response.status_code == 409
         body = json.loads(response.content)
@@ -4599,7 +4566,7 @@ class TestSyncInterfaceParentViewRealPermissions:
         view = make_view(SyncInterfaceParentView)
         _seed_relationship(device, "sub_interfaces", 10, 20, child.name, wrong_parent.name)
 
-        response = _post(view, request, object_type="device", object_id=device.pk)
+        response = _post(view, bind_relationship(request, device), object_type="device", object_id=device.pk)
 
         assert response.status_code == 404, response.content
         child.refresh_from_db()
@@ -4625,7 +4592,7 @@ class TestSyncInterfaceParentViewRealPermissions:
         )
         view = make_view(SyncInterfaceParentView)
 
-        response = _post(view, request, object_type="device", object_id=device.pk)
+        response = _post(view, bind_relationship(request, device), object_type="device", object_id=device.pk)
 
         assert response.status_code == 400
         child.refresh_from_db()
@@ -4711,7 +4678,7 @@ class TestRelationshipSyncObjectScope:
         request.user = user
         view = make_view(SyncInterfaceLagView)
         _seed_relationship(device, "lag_members", port_id, lag_port_id)
-        return _post(view, request, object_type="device", object_id=device.pk)
+        return _post(view, bind_relationship(request, device), object_type="device", object_id=device.pk)
 
     def test_lag_sync_refuses_an_out_of_scope_interface(self):
         from dcim.models import Device, Interface
@@ -4803,7 +4770,7 @@ class TestRelationshipSyncObjectScope:
             is not None
         )
 
-        response = _post(view, request, object_type="device", object_id=device.pk)
+        response = _post(view, bind_relationship(request, device), object_type="device", object_id=device.pk)
 
         assert response.status_code == 409
         assert b"interface owner changed concurrently" in response.content
@@ -4848,7 +4815,7 @@ class TestRelationshipSyncObjectScope:
 
         monkeypatch.setattr(sync_interfaces, "build_interface_index", revoke_before_lock)
 
-        response = _post(view, request, object_type="device", object_id=device.pk)
+        response = _post(view, bind_relationship(request, device), object_type="device", object_id=device.pk)
 
         assert permission_revoked
         assert response.status_code == 404
@@ -4856,7 +4823,7 @@ class TestRelationshipSyncObjectScope:
         assert child.parent_id is None
 
     @pytest.mark.parametrize("hidden_stored_id", [20, "020"])
-    def test_hidden_duplicate_stable_id_blocks_inline_and_bulk_parent_links(self, hidden_stored_id):
+    def test_hidden_duplicate_stable_id_blocks_inline_and_bulk_parent_links(self, client, settings, hidden_stored_id):
         from dcim.models import Device, Interface
 
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
@@ -4875,11 +4842,18 @@ class TestRelationshipSyncObjectScope:
         )
         user = grant(user, "change", Interface, constraints={"pk": child.pk})
         user = grant(user, "view", Interface, constraints={"pk": visible_parent.pk})
+        _sign_in(client, settings, device, user)
         seed_interfaces_snapshot(
             device,
             [
-                {"port_id": 10, "ifName": child.name, "ifType": "l2vlan", "ifAdminStatus": "up"},
-                {"port_id": 20, "ifName": visible_parent.name, "ifType": "ethernetCsmacd", "ifAdminStatus": "up"},
+                {**_PORT_KEYS_UNSET, "port_id": 10, "ifName": child.name, "ifType": "l2vlan", "ifAdminStatus": "up"},
+                {
+                    **_PORT_KEYS_UNSET,
+                    "port_id": 20,
+                    "ifName": visible_parent.name,
+                    "ifType": "ethernetCsmacd",
+                    "ifAdminStatus": "up",
+                },
             ],
         )
 
@@ -4891,24 +4865,26 @@ class TestRelationshipSyncObjectScope:
             user=user,
         )
         inline_response = _post(
-            make_view(SyncInterfaceParentView), inline_request, object_type="device", object_id=device.pk
+            make_view(SyncInterfaceParentView),
+            bind_relationship(inline_request, device),
+            object_type="device",
+            object_id=device.pk,
         )
 
-        bulk_request = _make_request(
-            post_data={
-                "select": ["10"],
-                "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed", "type"],
-            },
-            user=user,
+        bulk_response = post_interface_sync(
+            client,
+            device,
+            [10],
+            htmx=False,
+            exclude_columns=("vlans", "mac_address", "description", "mtu", "speed", "type"),
         )
-        bulk_response = _post(_sync_view(), bulk_request, object_type="device", object_id=device.pk)
 
         assert inline_response.status_code == 404
         assert bulk_response.status_code == 302
         child.refresh_from_db()
         assert child.parent_id is None
 
-    def test_hidden_duplicate_unbound_name_blocks_inline_and_bulk_parent_links(self):
+    def test_hidden_duplicate_unbound_name_blocks_inline_and_bulk_parent_links(self, client, settings):
         from dcim.models import Device, Interface
 
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
@@ -4925,11 +4901,18 @@ class TestRelationshipSyncObjectScope:
         )
         user = grant(user, "change", Interface, constraints={"pk": child.pk})
         user = grant(user, "view", Interface, constraints={"pk": visible_parent.pk})
+        _sign_in(client, settings, member1, user)
         seed_interfaces_snapshot(
             member1,
             [
-                {"port_id": 10, "ifName": child.name, "ifType": "l2vlan", "ifAdminStatus": "up"},
-                {"port_id": 20, "ifName": visible_parent.name, "ifType": "ethernetCsmacd", "ifAdminStatus": "up"},
+                {**_PORT_KEYS_UNSET, "port_id": 10, "ifName": child.name, "ifType": "l2vlan", "ifAdminStatus": "up"},
+                {
+                    **_PORT_KEYS_UNSET,
+                    "port_id": 20,
+                    "ifName": visible_parent.name,
+                    "ifType": "ethernetCsmacd",
+                    "ifAdminStatus": "up",
+                },
             ],
         )
 
@@ -4941,17 +4924,19 @@ class TestRelationshipSyncObjectScope:
             user=user,
         )
         inline_response = _post(
-            make_view(SyncInterfaceParentView), inline_request, object_type="device", object_id=member1.pk
+            make_view(SyncInterfaceParentView),
+            bind_relationship(inline_request, member1),
+            object_type="device",
+            object_id=member1.pk,
         )
 
-        bulk_request = _make_request(
-            post_data={
-                "select": ["10"],
-                "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed", "type"],
-            },
-            user=user,
+        bulk_response = post_interface_sync(
+            client,
+            member1,
+            [10],
+            htmx=False,
+            exclude_columns=("vlans", "mac_address", "description", "mtu", "speed", "type"),
         )
-        bulk_response = _post(_sync_view(), bulk_request, object_type="device", object_id=member1.pk)
 
         assert inline_response.status_code == 404
         assert bulk_response.status_code == 302
@@ -4985,7 +4970,9 @@ def test_relinking_repairs_an_aggregate_edited_back_to_a_non_lag_type(settings):
         {"port_id": "10", "lag_port_id": "20", "server_key": server_key},
         user=make_superuser("lag-type-repair-user"),
     )
-    response = _post(make_view(SyncInterfaceLagView), request, object_type="device", object_id=device.pk)
+    response = _post(
+        make_view(SyncInterfaceLagView), bind_relationship(request, device), object_type="device", object_id=device.pk
+    )
 
     assert response.status_code == 200, response.content
     member.refresh_from_db()
@@ -5018,18 +5005,30 @@ def test_relationship_name_fallback_checks_host_and_oob_rows(client, settings, e
         port.update(ifDescr=port["ifName"], ifSpeed=1_000_000_000)
     seed_interfaces_snapshot(device, ports, port_stack, oob_ports=[{**oob_port, "ifType": "ethernetCsmacd"}])
     client.force_login(make_superuser("cross-source-parent-user"))
-    action = "sync_interface_parent" if endpoint == "inline" else "sync_selected_interfaces"
-    data = (
-        {"port_id": "10", "parent_port_id": "20", "interface_name_field": "ifName"}
-        if endpoint == "inline"
-        else {"select": ["10"], "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed", "type"]}
-    )
-    response = client.post(
-        reverse(f"plugins:netbox_librenms_plugin:{action}", kwargs={"object_type": "device", "object_id": device.pk}),
-        {**data, "server_key": "default"},
-    )
+    if endpoint == "inline":
+        response = client.post(
+            reverse(
+                "plugins:netbox_librenms_plugin:sync_interface_parent",
+                kwargs={"object_type": "device", "object_id": device.pk},
+            ),
+            {
+                "port_id": "10",
+                "parent_port_id": "20",
+                "interface_name_field": "ifName",
+                "server_key": "default",
+                **relationship_binding(get_user(client), device, 10, interface_name_field="ifName"),
+            },
+        )
+    else:
+        response = post_interface_sync(
+            client,
+            device,
+            [10],
+            htmx=False,
+            exclude_columns=("vlans", "mac_address", "description", "mtu", "speed", "type"),
+        )
     allowed = bound_parent or not same_oob_name
-    assert response.status_code == (302 if endpoint == "bulk" else 200 if allowed else 404)
+    assert response.status_code == (302 if endpoint == "bulk" else 200 if allowed else 404), response.content
     if endpoint == "bulk":
         _assert_snapshot_read(response.wsgi_request)
     child.refresh_from_db()

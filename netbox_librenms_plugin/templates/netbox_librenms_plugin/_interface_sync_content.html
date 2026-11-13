@@ -29,7 +29,13 @@
 {% if interface_sync.table %}{% include "netbox_librenms_plugin/inc/_sync_filter_panel.html" with owner=interface_sync.object content_id="interface-sync-content" server_key=interface_sync.server_key filters=interface_sync.filters prefix="interfaces_" tab="interfaces" section_id="interfaceFilterSection" label="Filter interfaces" %}{% endif %}
 
 <div id="interface-sync-content-results">
-<div data-sync-filter-tab="interfaces" data-selection-scope="{% sync_selection_scope interface_sync.object interface_sync.server_key "interfaces" %}" data-filter-snapshot="{% if interface_sync.table %}true{% else %}false{% endif %}" data-filter-search="{{ interface_sync.filters.form.q.value|default:'' }}" data-filter-state="{{ interface_sync.filters.form.sync_state.value|default:'' }}">
+<div data-sync-filter-tab="interfaces" data-filter-snapshot="{% if interface_sync.table %}true{% else %}false{% endif %}" data-filter-search="{{ interface_sync.filters.form.q.value|default:'' }}" data-filter-state="{{ interface_sync.filters.form.sync_state.value|default:'' }}">
+{% if interface_sync.selection_cleared %}
+<div class="alert alert-info py-1 px-2 small mb-2" role="status" data-selection-cleared>
+    <i class="mdi mdi-information-outline me-1" aria-hidden="true"></i>
+    The interface data was refreshed, so the rows you selected before are no longer selected.
+</div>
+{% endif %}
 
 {% include "netbox_librenms_plugin/inc/_ipam_permission_notice.html" with hidden_ipam_permissions=interface_sync.hidden_ipam_permissions vlan_scope_incomplete=interface_sync.vlan_scope_incomplete %}
 
@@ -47,26 +53,24 @@
 {# Migrated donors must not sync: hiding only the button leaves the POST form live (Enter in a filter still submits), so drop the form in migrated mode. #}
 {% with model_name=interface_sync.object|meta:"model_name" %}
 {% if migrated_to_marker %}
-<div data-interface-origin-device-id="{{ interface_sync.object.pk }}" data-blocked-port-ids="{{ interface_sync.blocked_port_ids_json }}">
+<div>
     {% comment %}
-    No POST form in migrated mode, but the interface table still renders interactive
-    relationship/VC-member dropdowns whose verify-interface POST reads the token via
+    No POST form in migrated mode, but the interface table still renders interactive checkboxes
+    and VC-member dropdowns whose draft commands read the token via
     document.querySelector('[name=csrfmiddlewaretoken]'). Emit a standalone token so those
-    JS-driven requests don't hit a null token (TypeError/403). A bare hidden input never
-    auto-submits, so it doesn't reintroduce the live-form problem flagged above.
+    requests don't hit a null token (403). A bare hidden input never auto-submits, so it
+    doesn't reintroduce the live-form problem flagged above.
     {% endcomment %}
     <input type="hidden" name="csrfmiddlewaretoken" value="{{ csrf_token }}">
 {% else %}
 {% url 'plugins:netbox_librenms_plugin:sync_selected_interfaces' object_type=model_name object_id=interface_sync.object.pk as sync_url %}
-{# htmx swaps the tab in place, so the scroll position survives; method/action stay as the no-JS fallback. #}
+{# The answer carries the messages, and the page reads the tab again from the draft; method/action stay as the no-JS fallback. #}
 {# The URL carries the page query, so the tab comes back with the same filters, page and page size. #}
 {% sync_tab_url sync_url interface_name_field=interface_name_field as sync_action_url %}
-<form method="post" id="interface-sync-form"
-    data-interface-origin-device-id="{{ interface_sync.object.pk }}"
-    data-blocked-port-ids="{{ interface_sync.blocked_port_ids_json }}"
+<form method="post" id="interface-sync-form" data-draft-command="draft"
     action="{{ sync_action_url }}"
     hx-post="{{ sync_action_url }}"
-    hx-target="#interface-sync-content" hx-swap="innerHTML" hx-sync="#interface-sync-content:drop">
+    hx-target="#htmx-modal-content" hx-swap="innerHTML">
     {# Form-only inputs live inside the form branch so migrated (donor) mode, which renders a plain <div> wrapper, never emits hidden fields outside any <form>. #}
     {% csrf_token %}
     {% if interface_sync.server_key %}<input type="hidden" name="server_key" value="{{ interface_sync.server_key }}">{% endif %}
@@ -80,7 +84,7 @@
                     {% include "netbox_librenms_plugin/inc/_relationship_diagnostics.html" with diagnostics=interface_sync.relationship_diagnostics %}
                     {% if interface_sync.object.virtual_chassis %}
                     <button type="button" class="btn btn-secondary" id="bulk-vc-member-button" data-bs-toggle="modal"
-                        data-bs-target="#bulkVCMemberModal" disabled>
+                        data-bs-target="#bulkVCMemberModal">
                         Bulk Edit VC Member
                     </button>
                     {% endif %}
@@ -132,56 +136,39 @@
             <div class="card">
                 {% if interface_sync.filters.is_valid %}
                 {% include 'netbox_librenms_plugin/inc/paginator.html' with table=interface_sync.table placement="top" filtered_from=interface_sync.filtered_from %}
+                {% include 'netbox_librenms_plugin/inc/_ip_offpage_selection.html' with ip_sync=interface_sync %}
                 {% include 'inc/table.html' with table=interface_sync.table %}
                 {% include 'netbox_librenms_plugin/inc/paginator.html' with table=interface_sync.table filtered_from=interface_sync.filtered_from %}
                 {% else %}
+                {% include 'netbox_librenms_plugin/inc/_ip_offpage_selection.html' with ip_sync=interface_sync %}
+                {# No row shows, but the page keeps the draft that Clear and the submit name. #}
+                <table {{ interface_sync.draft_attrs.as_html }} hidden></table>
                 {% include 'netbox_librenms_plugin/inc/_sync_filter_invalid.html' with table=interface_sync.table text="Correct the filters to show the interfaces." %}
                 {% endif %}
             </div>
         </div>
     </div>
 
-    <!-- VLAN Detail Modal (inside form so hidden inputs are submitted) -->
-    <div class="modal fade" id="vlanDetailModal" tabindex="-1" aria-labelledby="vlanDetailModalLabel" aria-hidden="true">
-        <div class="modal-dialog">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title" id="vlanDetailModalLabel">VLAN Assignments</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-                </div>
-                <div class="modal-body">
-                    <p class="text-muted mb-2">Interface: <strong id="vlanModalInterfaceName"></strong></p>
-                    <table class="table table-sm table-hover mb-3" id="vlanDetailTable">
-                        <thead>
-                            <tr>
-                                <th style="width: 80px;">VID</th>
-                                <th style="width: 60px;">Type</th>
-                                <th>VLAN Group</th>
-                            </tr>
-                        </thead>
-                        <tbody id="vlanDetailTableBody">
-                            <!-- Populated by JS -->
-                        </tbody>
-                    </table>
-                    <div class="form-check">
-                        <input class="form-check-input" type="checkbox" id="applyVlanGroupToAll">
-                        <label class="form-check-label" for="applyVlanGroupToAll">
-                            Apply these groups to the same VLANs on all interfaces of the device, on every page and in every filter
-                        </label>
-                    </div>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-primary" id="saveVlanGroups">Save</button>
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                </div>
-            </div>
-        </div>
-    </div>
 {% if migrated_to_marker %}
 </div>
 {% else %}
 </form>
 {% endif %}
+
+<!-- VLAN groups dialog: its content is the server-rendered dialog of one row -->
+{# hx-preserve: a read of the tab keeps the dialog and its loader as they are, so no unsaved edit or open read is lost. #}
+<div class="modal fade" id="vlanDetailModal" hx-preserve="true" tabindex="-1" aria-labelledby="vlanDetailModalLabel" aria-hidden="true">
+    {# sync_draft.js reads the dialog of a row through this loader, in turn with the draft writes; a later opening aborts an earlier one. #}
+    <span class="d-none" id="vlanDetailLoader" hx-get="" hx-trigger="librenms:dialog-read" hx-sync="this:replace"
+        hx-target="#vlanDetailModalContent" hx-swap="innerHTML"></span>
+    <div class="modal-dialog">
+        <div class="modal-content" id="vlanDetailModalContent">
+            <div class="modal-body text-center text-muted py-3" role="status">
+                <span class="spinner-border spinner-border-sm me-2" aria-hidden="true"></span>Loading VLAN groups
+            </div>
+        </div>
+    </div>
+</div>
 {% else %}
 
 <div class="card">
@@ -224,8 +211,8 @@
                     that group is selected regardless of scope. Click the <i class="mdi mdi-pencil"></i> icon
                     on any row to change the group assignment for individual VLANs.</p>
                 <p>Check <strong>Apply these groups to the same VLANs on all interfaces of the device, on every page and in every filter</strong> in the
-                    modal to apply your selection to every interface that shares the same VLAN IDs. This choice is
-                    saved for the duration of the cache, so subsequent table pages will also use it.</p>
+                    modal to apply your selection to every interface that shares the same VLAN IDs. Your choices
+                    stay until the interface data is refreshed, so every table page also uses them.</p>
                 <p>VLANs shown with a <i class="mdi mdi-alert text-danger"></i>
                     warning icon do not exist in the selected VLAN group in NetBox yet. Use the <strong>VLAN Sync</strong> tab to create them
                     before syncing interfaces.</p>
@@ -246,18 +233,21 @@
                 <h5 class="modal-title" id="bulkVCMemberModalLabel">Set Virtual Chassis Member</h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
             </div>
+            {# sync_draft.js sends the member as the choice of every selected row, on every page. #}
+            <form data-write-url="{{ interface_sync.member_command_url }}">
             <div class="modal-body">
                 <label for="bulk-vc-member-select">Select Virtual Chassis Member:</label>
-                <select id="bulk-vc-member-select" class="form-select">
+                <select id="bulk-vc-member-select" class="form-select" name="value">
                     {% for member in interface_sync.virtual_chassis_members %}
                     <option value="{{ member.id }}">{{ member.name }}</option>
                     {% endfor %}
                 </select>
             </div>
             <div class="modal-footer">
-                <button class="btn btn-primary" id="apply-bulk-vc-member" data-bs-dismiss="modal">Apply</button>
-                <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" id="apply-bulk-vc-member" data-draft-write data-bs-dismiss="modal">Apply</button>
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
             </div>
+            </form>
         </div>
     </div>
 </div>

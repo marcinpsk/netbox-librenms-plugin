@@ -2,33 +2,28 @@ import json
 
 from dcim.models import Device
 from django.contrib import messages
-from django.core import signing
 from django.core.exceptions import BadRequest
-from django.http import Http404, HttpResponse
+from django.http import Http404
 from django.utils import timezone
 from django.views import View
-from django_tables2.utils import AttributeDict
-from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin import source_cache
 from netbox_librenms_plugin.acquisition.registry import Resource
-from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-from netbox_librenms_plugin.selection_draft import Assignment, DraftConflict, Intent, read_evidence
-from netbox_librenms_plugin.server_mappings import mapped_device_servers, read_mapping
+from netbox_librenms_plugin.selection_draft import DraftConflict
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.sync_filters import parse_table_filters
 from netbox_librenms_plugin.sync_rows import (
     IP_TAB,
     RESULTS_STALE_EVENT,
-    REVISION_HEADER,
     ROW_STALE_EVENT,
     VRF_CHOICE,
     find_ip_draft,
+    hidden_selection,
     ip_row_html,
     ip_rows,
     ip_table,
     management_assignments,
-    offpage_selection,
     open_ip_draft,
     read_ip_assessment,
     seed_management_rows,
@@ -39,6 +34,13 @@ from netbox_librenms_plugin.utils import (
     normalize_ip_sync_row_id,
     resolve_create_missing_interfaces,
     resolve_set_primary_ip,
+)
+from netbox_librenms_plugin.views.base.draft_views import (
+    DraftCommandView,
+    DraftView,
+    parse_assignments,
+    row_evidence,
+    row_response,
 )
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
@@ -77,7 +79,6 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         cache_ttl = source_cache.remaining_ttl(obj, Resource.IP_ADDRESSES, server_key)
         cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl) if cache_ttl else None
         table, filters, filtered_from = ip_table(request, obj, server_key, assessment, draft)
-        offpage = offpage_selection(table, assessment.rows, filters)
 
         return {
             "table": table,
@@ -87,11 +88,11 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             # The data refresh replaced a draft that had rows, so the page says the selection is gone.
             "selection_cleared": cleared,
             # The selected rows that the shown page does not show, which the submit takes too.
-            "offpage_selected": offpage,
-            "offpage_selected_json": json.dumps(offpage),
-            # The draft of the table without the table, for a page that shows no row (an invalid filter).
-            "draft_attrs": AttributeDict(
-                {name: value for name, value in table.attrs.items() if name.startswith("data-")}
+            **hidden_selection(
+                table,
+                [row["row_id"] for row in assessment.rows if row.get("selected")],
+                filters,
+                lambda record: record["row_id"],
             ),
             "object": obj,
             "cache_expiry": cache_expiry,
@@ -217,15 +218,6 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         )
 
 
-def _owner_model(object_type):
-    """Return the model of a sync subject URL's ``object_type``."""
-    if object_type == "device":
-        return Device
-    if object_type == "virtualmachine":
-        return VirtualMachine
-    raise Http404("Unsupported sync object type.")
-
-
 def _canonical_row_key(value):
     """Return *value* when it is the canonical ID of an IP row."""
     try:
@@ -236,37 +228,10 @@ def _canonical_row_key(value):
     raise BadRequest("The request names no valid IP row.")
 
 
-def _parse_assignments(raw, obj, server_key):
-    """
-    Return the assignments that a selection request posts: ``{row_key: {"state", "token"}}`` as JSON.
+class _IPDraftView(DraftView):
+    """Resolve the subject, the server and the IP snapshot of one request on the user's IP selection draft."""
 
-    A selection carries the row's evidence token, and the token must be one that the IP tab of this
-    subject and server signed for this row.
-
-    Raises:
-        BadRequest: The body is not such a JSON object.
-
-    """
-    try:
-        data = json.loads(raw)
-    except (TypeError, ValueError):
-        raise BadRequest("The assignments are not JSON.") from None
-    if not isinstance(data, dict) or not data:
-        raise BadRequest("The assignments name no row.")
-    assignments = {}
-    for row_key, value in data.items():
-        _canonical_row_key(row_key)
-        try:
-            intent = Intent(value["state"])
-            token = value["token"] if intent is Intent.ON else None
-        except (KeyError, TypeError, ValueError):
-            raise BadRequest(f"The assignment of IP row {row_key} is not valid.") from None
-        assignments[row_key] = (
-            Assignment(intent, _row_evidence(row_key, token, obj, server_key))
-            if intent is Intent.ON
-            else Assignment(intent)
-        )
-    return assignments
+    resource = Resource.IP_ADDRESSES
 
 
 def _parse_shown_evidence(raw, obj, server_key):
@@ -283,94 +248,11 @@ def _parse_shown_evidence(raw, obj, server_key):
         raise BadRequest("The shown evidence is not JSON.") from None
     if not isinstance(data, dict):
         raise BadRequest("The shown evidence is not a JSON object.")
-    return {_canonical_row_key(key): _row_evidence(key, token, obj, server_key) for key, token in data.items()}
+    return {_canonical_row_key(key): row_evidence(IP_TAB, key, token, obj, server_key) for key, token in data.items()}
 
 
-def _row_evidence(row_key, token, obj, server_key):
-    """
-    Return the payload of *token* when the IP tab of this subject and server signed it for the row *row_key*.
-
-    Raises:
-        BadRequest: The token is not such a token.
-
-    """
-    try:
-        payload = read_evidence(IP_TAB, token) if isinstance(token, str) else None
-    except signing.BadSignature:
-        payload = None
-    if isinstance(payload, dict) and (payload.get("row"), payload.get("subject"), payload.get("server")) == (
-        row_key,
-        [obj._meta.label_lower, obj.pk],
-        server_key,
-    ):
-        return payload
-    raise BadRequest(f"The request carries no evidence of IP row {row_key}.")
-
-
-class _IPDraftView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
-    """
-    Resolve the subject, the server and the IP snapshot of one request on the user's IP selection draft.
-
-    The draft holds only the user's own selection, so the tab's view permissions are enough; the
-    submit checks the write permissions. The URL query names the server and the page query.
-    """
-
-    def subject(self, request, object_type, pk):
-        """
-        Return the subject, its server key and its IP snapshot (None when there is none), or an error response.
-
-        Raises:
-            Http404: The subject is outside the view scope, or the server is not mapped to it.
-
-        """
-        model = _owner_model(object_type)
-        self.required_object_permissions = {request.method: [("view", model)]}
-        if error := self.require_object_permissions_json(request.method):
-            return None, None, None, error
-        obj = self.restrict_object_or_404(model, pk=pk)
-        server_key = request.GET.get("server_key")
-        # A key that names no configured server reads no cache namespace, also when a mapping names it.
-        if (
-            not isinstance(server_key, str)
-            or server_key not in LibreNMSAPI.get_available_servers()
-            or server_key not in mapped_device_servers(obj, active_server=server_key)
-        ):
-            raise Http404("LibreNMS server is not mapped to this object.")
-        return obj, server_key, source_cache.read(obj, Resource.IP_ADDRESSES, server_key), None
-
-
-class _IPDraftCommandView(_IPDraftView):
-    """
-    A command on the user's IP draft: a compare-and-set on the draft ID and revision that the client acknowledged.
-
-    It answers 204 with the new revision in ``X-Draft-Revision``, or 409 when the draft is not the one
-    the client names (another window changed it, or a data refresh replaced it); then nothing changed.
-    """
-
-    # The draft writer of the page reads only the status and the headers.
-    answers_json = True
-
-    @staticmethod
-    def draft_version(data):
-        """Return the draft ID and the expected revision that a command names."""
-        try:
-            return str(data["draft_id"]), int(data["expected_revision"])
-        except (KeyError, TypeError, ValueError):
-            raise BadRequest("A draft command names its draft and revision.") from None
-
-    @staticmethod
-    def acknowledge(revision, trigger=None):
-        """Return the answer of an applied command."""
-        response = HttpResponse(status=204)
-        response[REVISION_HEADER] = str(revision)
-        if trigger is not None:
-            response["HX-Trigger"] = json.dumps(trigger)
-        return response
-
-    @staticmethod
-    def conflict():
-        """Return the answer of a command that named another draft or revision."""
-        return HttpResponse(status=409)
+class _IPDraftCommandView(DraftCommandView, _IPDraftView):
+    """A command on the user's IP draft."""
 
     @staticmethod
     def draft(request, obj, server_key, snapshot):
@@ -387,7 +269,7 @@ class IPSelectionView(_IPDraftCommandView):
         if error:
             return error
         draft_id, expected_revision = self.draft_version(request.POST)
-        assignments = _parse_assignments(request.POST.get("assignments"), obj, server_key)
+        assignments = parse_assignments(request.POST.get("assignments"), IP_TAB, obj, server_key, _canonical_row_key)
         if (draft := self.draft(request, obj, server_key, snapshot)) is None:
             return self.conflict()
         try:
@@ -466,7 +348,4 @@ class IPRowView(_IPDraftView):
         )
         if html is None:
             raise Http404("No current IP row has this key.")
-        response = HttpResponse(html)
-        # Per-viewer selection state.
-        response["Cache-Control"] = "no-store"
-        return response
+        return row_response(html)

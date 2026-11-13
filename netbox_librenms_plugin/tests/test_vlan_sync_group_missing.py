@@ -1,76 +1,66 @@
 """Real-DB e2e: a VLAN whose selected group no longer exists must not report as 'unchanged'.
 
-SyncVLANsView._handle_create_vlans fails closed when a per-row ``vlan_group_{vid}`` points at a
-missing group: it skips that VID (never creating it in the wrong scope) and emits its own error.
-Previously that skip was folded into the shared ``skipped_count`` and surfaced as "N unchanged" in a
-*success* message — implying the VID synced fine. This drives the real view end-to-end (real Device,
-real cache, real message framework, real DB) to pin that the group-missing skip is counted and
-messaged separately and never claims success.
+SyncVLANsView._handle_create_vlans fails closed when the group that the user approved for a row is gone
+when the writer resolves it: it skips that VID (never creating it in the wrong scope) and emits its own
+error. Previously that skip was folded into the shared ``skipped_count`` and surfaced as "N unchanged"
+in a *success* message, implying the VID synced fine. This drives the real view end-to-end (real Device,
+real cache, real draft, real message framework, real DB) to pin that the group-missing skip is counted
+and messaged separately and never claims success.
 """
 
 import pytest
-from django.contrib.auth import get_user_model
-from django.contrib.messages.storage.fallback import FallbackStorage
-from django.test import RequestFactory
-from django_htmx.middleware import HtmxDetails
+from django.contrib.messages import get_messages
+from django.urls import reverse
 
-from netbox_librenms_plugin import source_cache
 from netbox_librenms_plugin.acquisition.registry import Resource
+from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server, make_device, make_superuser
 from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_source_snapshot
+from netbox_librenms_plugin.tests.view_test_helpers import submit_with_draft
 
 
-def _make_device(name):
-    from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
-
-    mfr, _ = Manufacturer.objects.get_or_create(name="VLM-Mfr", slug="vlm-mfr")
-    dt, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model="VLM-DT", slug="vlm-dt")
-    role, _ = DeviceRole.objects.get_or_create(name="VLM-Role", slug="vlm-role")
-    site, _ = Site.objects.get_or_create(name="VLM-Site", slug="vlm-site")
-    return Device.objects.create(name=name, device_type=dt, role=role, site=site, status="active")
-
-
-def _post_request(device_pk, vid, group_pk):
-    request = RequestFactory().post(
-        "/sync/vlans/",
-        data={
-            "action": "create_vlans",
-            "select": [str(vid)],
-            f"vlan_group_{vid}": str(group_pk),
-            "server_key": "default",
-        },
+def _sync(client, device, vid, name, *, choices=()):
+    """Select *vid* through the VLAN tab's draft, then submit it; return the recorded messages."""
+    seed_source_snapshot(device, Resource.VLANS, "default", vlans=[{"vlan_vlan": vid, "vlan_name": name}])
+    url = reverse(
+        "plugins:netbox_librenms_plugin:sync_selected_vlans", kwargs={"object_type": "device", "object_id": device.pk}
     )
-    request.user = get_user_model().objects.create_user(username="vlm-user", password="x", is_superuser=True)
-    request.session = {}
-    request._messages = FallbackStorage(request)
-    request.htmx = HtmxDetails(request)
-    return request
+    response = submit_with_draft(client, device, "vlans", url, [vid], choices=choices, action="create_vlans")
+    return [(message.level_tag, message.message) for message in get_messages(response.wsgi_request)]
 
 
-def _drive_sync(device, vid, group_pk):
-    from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
-
-    view = SyncVLANsView()
-    request = _post_request(device.pk, vid, group_pk)
-    view.request = request  # dispatch() normally wires this; we call post() directly
-    # server_key "default" is posted, so the lazy librenms_api property is never built.
-    seed_source_snapshot(device, Resource.VLANS, "default", vlans=[{"vlan_vlan": vid, "vlan_name": "Management"}])
-    try:
-        view.post(request, object_type="device", object_id=device.pk)
-    finally:
-        source_cache.delete(device, Resource.VLANS, "default")
-    return [(m.level_tag, m.message) for m in request._messages]
+@pytest.fixture
+def device(client, settings):
+    configure_default_librenms_server(settings)
+    client.force_login(make_superuser("vlm-user"))
+    return make_device("vlm-dev", librenms_cf={"default": {"id": 42}})
 
 
 @pytest.mark.django_db
 class TestVlanSyncGroupMissing:
-    def test_missing_group_not_reported_as_unchanged(self):
-        from ipam.models import VLAN
+    def test_missing_group_not_reported_as_unchanged(self, client, device, monkeypatch):
+        from ipam.models import VLAN, VLANGroup
 
-        device = _make_device("vlm-dev-1")
+        from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
+
+        group = VLANGroup.objects.create(name="vlm-group", slug="vlm-group")
+        approved_rows = SyncVLANsView._approved_rows
+
+        def approve_then_delete_the_group(view, *args):
+            # Another user deletes the group after the evidence check approved the row.
+            approved = approved_rows(view, *args)
+            VLANGroup.objects.filter(pk=group.pk).delete()
+            return approved
+
+        monkeypatch.setattr(SyncVLANsView, "_approved_rows", approve_then_delete_the_group)
         before = VLAN.objects.count()
 
-        # 2**31 - 1: a pk no VLANGroup will ever have in a fresh test DB.
-        messages = _drive_sync(device, vid=10, group_pk=2_147_483_647)
+        messages = _sync(
+            client,
+            device,
+            10,
+            "Management",
+            choices=[("data-choice-url", {"row": "10", "field": "group", "value": str(group.pk)})],
+        )
 
         joined = " || ".join(msg for _, msg in messages)
         # The per-VID fail-closed error is shown...
@@ -83,36 +73,11 @@ class TestVlanSyncGroupMissing:
         # ...and no VLAN was created in the wrong (global) scope.
         assert VLAN.objects.count() == before
 
-    def test_valid_global_vlan_still_syncs(self):
+    def test_valid_global_vlan_still_syncs(self, client, device):
         """Positive control: a row with no group selection still creates a real global VLAN and reports success."""
         from ipam.models import VLAN
 
-        from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
+        messages = _sync(client, device, 20, "Users")
 
-        device = _make_device("vlm-dev-2")
-        view = SyncVLANsView()
-        request = RequestFactory().post(
-            "/sync/vlans/",
-            data={
-                "action": "create_vlans",
-                "select": ["20"],
-                "vlan_group_20": "",
-                "expected_vlan_name_20": "Users",
-                "server_key": "default",
-            },
-        )
-        request.user = get_user_model().objects.create_user(username="vlm-user2", password="x", is_superuser=True)
-        request.session = {}
-        request._messages = FallbackStorage(request)
-        request.htmx = HtmxDetails(request)
-        view.request = request  # dispatch() normally wires this; we call post() directly
-
-        seed_source_snapshot(device, Resource.VLANS, "default", vlans=[{"vlan_vlan": 20, "vlan_name": "Users"}])
-        try:
-            view.post(request, object_type="device", object_id=device.pk)
-        finally:
-            source_cache.delete(device, Resource.VLANS, "default")
-
-        messages = [(m.level_tag, m.message) for m in request._messages]
         assert any(level == "success" and "created" in msg for level, msg in messages), messages
         assert VLAN.objects.filter(vid=20, group__isnull=True).exists()

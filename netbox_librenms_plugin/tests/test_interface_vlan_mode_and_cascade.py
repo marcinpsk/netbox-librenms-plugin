@@ -139,7 +139,7 @@ class TestTheViewPassesTheReportedMode:
         from netbox_librenms_plugin.tests.interface_sync_post_helpers import post_interface_sync, seed_ports, sync_port
         from netbox_librenms_plugin.tests.source_snapshot_helpers import port_vlans
 
-        device = make_device("vlan-mode-view")
+        device = make_device("vlan-mode-view", librenms_cf={"default": {"id": 42}})
         interface = make_interface(device, "Ethernet1")
         vlan = VLAN.objects.create(vid=100, name="VLAN-MODE-VIEW-100", status="active")
         configure_default_librenms_server(settings)
@@ -372,11 +372,16 @@ def test_vlan_sync_preserves_an_existing_assignment_when_the_requested_vid_is_mi
 ):
     from ipam.models import VLAN
 
-    from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server, make_superuser
+    from netbox_librenms_plugin.tests.conftest import (
+        configure_default_librenms_server,
+        make_superuser,
+        map_device_to_librenms,
+    )
     from netbox_librenms_plugin.tests.interface_sync_post_helpers import post_interface_sync, seed_ports, sync_port
     from netbox_librenms_plugin.tests.source_snapshot_helpers import port_vlans
 
     _mixin, interface, _maps, vlans = _fixture("unresolved-untagged", [100, 200])
+    map_device_to_librenms(interface.device, 42, server_key="default")
     interface.mode = "access"
     interface.untagged_vlan = vlans[0]
     interface.save()

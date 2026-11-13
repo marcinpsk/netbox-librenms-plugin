@@ -160,24 +160,34 @@ class TestVlanSyncContentTemplateMigratedMode:
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("endpoint", ["verify_vlan_group", "verify_vlan_sync_group"])
-@pytest.mark.parametrize("group_id", [True, False, 1.5, 0, -1, 10**40, [], {}])
-def test_vlan_verification_rejects_malformed_group_ids(client, endpoint, group_id):
-    """JSON values must not become a different group or an implicit global selection."""
-    from django.urls import reverse
-    from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
-
-    device = make_device("invalid-vlan-group")
-    client.force_login(make_superuser())
-    response = client.post(
-        reverse(f"plugins:netbox_librenms_plugin:{endpoint}"),
-        {
-            "device_id": device.pk,
-            "interface_name": "eth0",
-            "vid": 100,
-            "vlan_group_id": group_id,
-        },
-        content_type="application/json",
+@pytest.mark.parametrize("tab", ["interfaces", "vlans"])
+@pytest.mark.parametrize("group_id", ["True", "False", "1.5", "0", "-1", str(10**40), "[]", "{}", "not-an-id"])
+def test_a_vlan_group_choice_rejects_malformed_group_ids(client, settings, tab, group_id):
+    """A malformed group value must not become a different group or an implicit Global choice."""
+    from netbox_librenms_plugin.acquisition.registry import Resource
+    from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server, make_device, make_superuser
+    from netbox_librenms_plugin.tests.interface_sync_post_helpers import sync_port
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import (
+        port_vlans,
+        seed_interfaces_snapshot,
+        seed_source_snapshot,
     )
+    from netbox_librenms_plugin.tests.view_test_helpers import draft_command, draft_tab
+
+    configure_default_librenms_server(settings)
+    client.force_login(make_superuser())
+    device = make_device("invalid-vlan-group", librenms_cf={"default": {"id": 42}})
+    if tab == "interfaces":
+        seed_interfaces_snapshot(device, [sync_port(41, "eth0", **port_vlans("access", 100))], server_key="default")
+        query = {"interface_name_field": "ifName"}
+        command = ("data-vlan-groups-url", {"row": "41", "group_100": group_id})
+    else:
+        seed_source_snapshot(device, Resource.VLANS, "default", vlans=[{"vlan_vlan": 100, "vlan_name": "v100"}])
+        query = {}
+        command = ("data-choice-url", {"row": "100", "field": "group", "value": group_id})
+    shown = draft_tab(client, device, tab, **query)
+
+    response = draft_command(client, shown, command[0], **command[1])
+
     assert response.status_code == 400
-    assert response.json()["message"] == "Invalid VLAN group ID"
+    assert draft_tab(client, device, tab, **query).table["data-draft-revision"] == shown.table["data-draft-revision"]

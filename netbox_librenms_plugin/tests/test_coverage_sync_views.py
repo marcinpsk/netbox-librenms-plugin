@@ -27,7 +27,13 @@ from netbox_librenms_plugin.tests.source_snapshot_helpers import (
     seed_ip_snapshot,
     seed_source_snapshot,
 )
-from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, submit_ip_selection
+from netbox_librenms_plugin.tests.interface_sync_post_helpers import post_interface_sync
+from netbox_librenms_plugin.tests.view_test_helpers import (
+    make_request,
+    message_texts,
+    submit_ip_selection,
+    submit_with_draft,
+)
 from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 from netbox_librenms_plugin.views.sync.locations import SyncSiteLocationView
 
@@ -157,18 +163,7 @@ class TestInterfaceSynchronization:
         seed_interfaces_snapshot(device, [port], server_key=SERVER_KEY)
         _login(client, "interface-create-user")
 
-        response = client.post(
-            reverse(
-                "plugins:netbox_librenms_plugin:sync_selected_interfaces",
-                kwargs={"object_type": "device", "object_id": device.pk},
-            ),
-            {
-                "server_key": SERVER_KEY,
-                "interface_name_field": "ifName",
-                "select": "8101",
-                "exclude_columns": "vlans",
-            },
-        )
+        response = post_interface_sync(client, device, [8101], htmx=False, exclude_columns=("vlans",))
 
         assert response.status_code == 302
         interface = Interface.objects.get(device=device, name="Ethernet1/1")
@@ -181,13 +176,7 @@ class TestInterfaceSynchronization:
         seed_interfaces_snapshot(device, [], server_key=SERVER_KEY)
         _login(client, "interface-no-selection-user")
 
-        response = client.post(
-            reverse(
-                "plugins:netbox_librenms_plugin:sync_selected_interfaces",
-                kwargs={"object_type": "device", "object_id": device.pk},
-            ),
-            {"server_key": SERVER_KEY, "interface_name_field": "ifName"},
-        )
+        response = post_interface_sync(client, device, [], htmx=False)
 
         assert response.status_code == 302
         assert not Interface.objects.filter(device=device).exists()
@@ -280,16 +269,7 @@ class TestVLANSynchronization:
             kwargs={"object_type": "device", "object_id": device.pk},
         )
 
-        created = client.post(
-            url,
-            {
-                "server_key": SERVER_KEY,
-                "action": "create_vlans",
-                "select": "3091",
-                "vlan_group_3091": "",
-                "expected_vlan_name_3091": "Application",
-            },
-        )
+        created = submit_with_draft(client, device, "vlans", url, [3091], action="create_vlans")
 
         assert created.status_code == 302
         vlan = VLAN.objects.get(vid=3091, group__isnull=True)
@@ -307,16 +287,7 @@ class TestVLANSynchronization:
         seed_source_snapshot(
             device, Resource.VLANS, SERVER_KEY, vlans=[{"vlan_vlan": 3093, "vlan_name": "Application Servers"}]
         )
-        updated = client.post(
-            url,
-            {
-                "server_key": SERVER_KEY,
-                "action": "create_vlans",
-                "select": "3093",
-                "vlan_group_3093": "",
-                "expected_vlan_name_3093": "Application Servers",
-            },
-        )
+        updated = submit_with_draft(client, device, "vlans", url, [3093], action="create_vlans")
 
         assert updated.status_code == 200
         assert b"Confirm VLAN changes" in updated.content
@@ -331,7 +302,6 @@ class TestVLANSynchronization:
                 "action": "create_vlans",
                 "confirm_conflicts": "1",
                 "force_conflict": "3093",
-                "select": "3093",
                 "conflict_intent": conflict["intent"],
             },
         )
@@ -350,7 +320,7 @@ class TestVLANSynchronization:
                 "plugins:netbox_librenms_plugin:sync_selected_vlans",
                 kwargs={"object_type": "device", "object_id": device.pk},
             ),
-            {"server_key": SERVER_KEY, "action": "create_vlans", "select": "3092", "vlan_group_3092": ""},
+            {"server_key": SERVER_KEY, "action": "create_vlans", "draft_id": "missing", "expected_revision": "0"},
         )
 
         assert response.status_code == 302

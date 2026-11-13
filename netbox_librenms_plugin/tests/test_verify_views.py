@@ -1,12 +1,13 @@
 """
-Tests for SingleCableVerifyView and SingleInterfaceVerifyView VC resolution.
+Tests for the cable and module verify endpoints, and for the interface and IP row reads that replaced row verification.
 
-Verifies that both views delegate VC device resolution to
-get_librenms_sync_device() and handle the None return gracefully
-(e.g. empty VC members or vc_position type errors).
+The cable verify view delegates VC device resolution to get_librenms_sync_device() and handles the
+None return gracefully (e.g. empty VC members or vc_position type errors). The interface row read
+renders one row as the tab does, in the caller's object scope.
 """
 
 import json
+import re
 from copy import deepcopy
 
 from netbox_librenms_plugin.tests.source_snapshot_helpers import link_row, port_row, seed_cables_snapshot
@@ -16,7 +17,12 @@ from django.conf import settings
 from django.test import RequestFactory, override_settings
 from django.urls import reverse
 
-from netbox_librenms_plugin.tests.conftest import configured_server_key, make_superuser
+from netbox_librenms_plugin.tests._html_helpers import open_tags
+from netbox_librenms_plugin.tests.conftest import (
+    configure_default_librenms_server,
+    configured_server_key,
+    make_superuser,
+)
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import (
     interface_rows,
@@ -25,8 +31,8 @@ from netbox_librenms_plugin.tests.source_snapshot_helpers import (
     seed_interfaces_snapshot,
 )
 
+from netbox_librenms_plugin.tests.view_test_helpers import bind_relationship, draft_command, draft_tab
 from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
-from netbox_librenms_plugin.views.object_sync.devices import SingleInterfaceVerifyView
 
 
 pytestmark = pytest.mark.django_db
@@ -143,78 +149,69 @@ def _seed_parent_and_child(subject, child, parent, *, server_key="default", chil
     assert interface_rows(subject, server_key=server_key)["port_stack_relationships"]["sub_interfaces"] == {10: 20}
 
 
-def _interface_verify_view(server_key="default"):
-    """Return an interface verify view with a real client for *server_key*."""
-    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+def _signed_in_client(settings, user):
+    """Return a client signed in as *user*, with the default LibreNMS server configured."""
+    from django.test import Client
 
-    view = SingleInterfaceVerifyView()
-    view._librenms_api = LibreNMSAPI(server_key=server_key)
-    return view
-
-
-def _verify_request(body, user):
-    """Return a real JSON verify POST from *user*."""
-    from netbox_librenms_plugin.tests.view_test_helpers import make_request
-
-    return make_request("post", json.dumps(body), user=user, path="/verify/", content_type="application/json")
+    configure_default_librenms_server(settings)
+    client = Client()
+    client.force_login(user)
+    return client
 
 
-def _verify(body, user, server_key="default"):
-    """POST *body* to a fresh interface verify view and return the response."""
-    return _interface_verify_view(server_key).post(_verify_request(body, user))
+def _mapped(device, librenms_id=4500):
+    """Map *device* to the default server, so its sync tab and its row reads answer."""
+    seed_mapping(device, "default", own=librenms_id)
+    return device
 
 
-def _table_context(user, device, server_key="default"):
-    """Return the interfaces table context of *device*, rendered from its stored snapshot for *user*."""
-    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-    from netbox_librenms_plugin.tests.view_test_helpers import make_request
-    from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
-
-    request = make_request("get", user=user)
-    view = DeviceInterfaceTableView()
-    view._librenms_api = LibreNMSAPI(server_key=server_key)
-    view.request = request
-    return view.get_context_data(request, device, "ifName", server_key, sync_device=device)
+def _shown_row(client, owner, port_id, server_key="default", **query):
+    """Return the ``<tr>`` of LibreNMS port *port_id* as the interfaces tab renders it."""
+    shown = draft_tab(client, owner, "interfaces", server_key=server_key, **{"interface_name_field": "ifName", **query})
+    for match in re.finditer(r"<tr\b[^>]*>.*?</tr>", shown.html, re.S):
+        if f'data-row-key="{port_id}"' in match.group(0):
+            return match.group(0)
+    raise AssertionError(f"the tab renders no row {port_id}")
 
 
-def _table_row(context, port_id):
-    """Return the table record of LibreNMS port *port_id*."""
-    return next(row for row in context["table"].data if row["port_id"] == port_id)
+def _row_read(client, owner, port_id, server_key="default", **query):
+    """Return the ``<tr>`` that the row read of LibreNMS port *port_id* answers, from the URL the tab renders on it."""
+    row = _shown_row(client, owner, port_id, server_key, **query)
+    (tr,) = open_tags(row, "tr")
+    response = client.get(tr["hx-get"])
+    assert response.status_code == 200, response.content
+    return response.content.decode()
+
+
+def _cell(row, column):
+    """Return the markup of the *column* cell of a rendered row."""
+    return dict(re.findall(r'<td[^>]*data-col="([^"]+)"[^>]*>(.*?)</td>', row, re.S))[column]
+
+
+def _row_attrs(row):
+    (tr,) = open_tags(row, "tr")
+    return tr
 
 
 # ---------------------------------------------------------------------------
-# SingleInterfaceVerifyView
+# The interface row read (the verify endpoint's successor): scope, resolution and write offers
 # ---------------------------------------------------------------------------
-class TestSingleInterfaceVerifyView:
-    """SingleInterfaceVerifyView.post() VC resolution and None guard (real device, real gate/restrict)."""
-
-    def _make_view(self):
-        view = SingleInterfaceVerifyView()
-        view.setup(_make_request({}))
-        return view
-
-    def test_no_device_id_returns_400(self):
-        """Missing device_id: returns 400 error."""
-        view = self._make_view()
-        request = _make_request({"interface_name": "eth0"})
-        response = view.post(request)
-
-        assert response.status_code == 400
-        data = json.loads(response.content)
-        assert data["status"] == "error"
+class TestTheInterfaceRowRead:
+    """The row read renders one interface row as the tab does, with the caller's scope and the row's own resolution."""
 
     @pytest.mark.django_db
     @pytest.mark.parametrize("source", ["host", "oob"])
-    def test_verify_response_hides_vlan_metadata_from_a_user_without_ipam_view_rights(self, source):
+    def test_the_row_hides_vlan_metadata_from_a_user_without_ipam_view_rights(self, settings, source):
         """The gate only checks view_device, so the IPAM reads must be scoped to the caller."""
         from dcim.models import Device, Site
         from django.contrib.contenttypes.models import ContentType
         from ipam.models import VLAN, VLANGroup
 
+        from netbox_librenms_plugin.models import LibreNMSSettings
         from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
 
-        device = make_device("verify-ipam-scope")
+        device = _mapped(make_device("verify-ipam-scope"))
         group = VLANGroup.objects.create(
             name="Verify Hidden VLAN Group",
             slug="verify-hidden-vlan-group",
@@ -228,61 +225,45 @@ class TestSingleInterfaceVerifyView:
             seed_interfaces_snapshot(device, [], oob_ports=[port])
         else:
             seed_interfaces_snapshot(device, [port])
+        restricted_user = make_user_with_perms("verify-ipam-scope-user", [("view", Device)], plugin_write=False)
+        restricted_user = grant(restricted_user, "view", LibreNMSSettings)
 
-        def vlans_cell_for(user):
-            response = _verify(
-                {
-                    "device_id": device.pk,
-                    "interface_name": "Ethernet1",
-                    "interface_name_field": "ifName",
-                    "port_id": 41,
-                },
-                user,
-            )
-            assert response.status_code == 200, response.content
-            return json.loads(response.content)["formatted_row"]["vlans"]
-
-        visible = vlans_cell_for(_verify_superuser("ipam-scope-admin"))
-        restricted = vlans_cell_for(
-            make_user_with_perms("verify-ipam-scope-user", [("view", Device)], plugin_write=False)
+        visible = _cell(
+            _row_read(_signed_in_client(settings, _verify_superuser("ipam-scope-admin")), device, 41), "vlans"
         )
+        restricted = _cell(_row_read(_signed_in_client(settings, restricted_user), device, 41), "vlans")
 
-        # The group name and its pk reach the tooltip and the hidden group input only for a
-        # caller who may view the group.
+        # The group name reaches the tooltip only for a caller who may view the group.
         assert group.name in visible
-        assert f'value="{group.pk}"' in visible
         assert group.name not in restricted
-        assert f'value="{group.pk}"' not in restricted
         assert "Not in NetBox" in restricted
 
     @pytest.mark.django_db
-    def test_verify_does_not_name_match_interface_bound_to_another_port(self):
+    def test_the_row_does_not_name_match_an_interface_bound_to_another_port(self, settings):
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface
 
-        device = make_device("verify-conflicting-port-id")
+        device = _mapped(make_device("verify-conflicting-port-id"))
         wrong_interface = make_interface(device, "Ethernet1")
         seed_mapping(wrong_interface, own=30, save=False)
         wrong_interface.save()
         seed_interfaces_snapshot(device, [_snapshot_port(20, "Ethernet1")])
 
-        response = _verify(
-            {"device_id": device.pk, "interface_name": "Ethernet1", "interface_name_field": "ifName", "port_id": 20},
-            _verify_superuser("conflicting-port-id"),
-        )
+        row = _row_read(_signed_in_client(settings, _verify_superuser("conflicting-port-id")), device, 20)
 
-        assert response.status_code == 200
-        row = json.loads(response.content)["formatted_row"]
-        assert "text-danger" in row["name"]
+        assert "text-danger" in _cell(row, "name")
 
     @pytest.mark.django_db
-    def test_verify_member_switch_returns_the_selected_members_vlan_group(self):
+    def test_a_member_choice_gives_the_row_the_chosen_members_vlan_group(self, settings):
         from django.contrib.contenttypes.models import ContentType
         from dcim.models import Rack
         from ipam.models import VLAN, VLANGroup
 
+        from netbox_librenms_plugin.selection_draft import read_evidence
         from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+        from netbox_librenms_plugin.views.base.interfaces_view import INTERFACE_TAB
 
         _virtual_chassis, (member1, member2) = make_virtual_chassis_members("verify-vlan-owner")
+        _mapped(member1)
         rack1 = Rack.objects.create(name="Verify VLAN Rack 1", site=member1.site, status="active")
         rack2 = Rack.objects.create(name="Verify VLAN Rack 2", site=member1.site, status="active")
         member1.rack = rack1
@@ -305,23 +286,21 @@ class TestSingleInterfaceVerifyView:
         VLAN.objects.create(vid=100, name="Verify Rack 1 VLAN", group=group1, status="active")
         VLAN.objects.create(vid=100, name="Verify Rack 2 VLAN", group=group2, status="active")
         seed_interfaces_snapshot(member1, [_snapshot_port(10, "Ethernet2", **port_vlans("access", 100))])
+        client = _signed_in_client(settings, _verify_superuser("vlan-owner"))
+        shown = draft_tab(client, member1, "interfaces", interface_name_field="ifName")
 
-        response = _verify(
-            {"device_id": member2.pk, "interface_name": "Ethernet2", "interface_name_field": "ifName", "port_id": 10},
-            _verify_superuser("vlan-owner"),
-        )
+        chosen = draft_command(client, shown, "data-choice-url", row="10", field="member", value=str(member2.pk))
+        row = _row_read(client, member1, 10)
 
-        assert response.status_code == 200
-        vlan_cell = json.loads(response.content)["formatted_row"]["vlans"]
-        assert f'name="vlan_group_10_100" value="{group2.pk}"' in vlan_cell
-        assert f'name="vlan_group_10_100" value="{group1.pk}"' not in vlan_cell
+        assert chosen.status_code == 204
+        assert read_evidence(INTERFACE_TAB, _row_attrs(row)["data-evidence"])["vlan_groups"] == {"100": str(group2.pk)}
 
     @pytest.mark.django_db
-    def test_verify_normalizes_relationship_port_ids(self):
+    def test_the_row_normalizes_relationship_port_ids(self, settings):
         """A port_stack pair that names a port id as a string still gives the parent edge."""
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface
 
-        device = make_device("verify-string-relationship-key")
+        device = _mapped(make_device("verify-string-relationship-key"))
         child = make_interface(device, "Ethernet1.100", iface_type="virtual")
         parent = make_interface(device, "Ethernet1")
         seed_mapping(child, own=10, save=False)
@@ -330,78 +309,21 @@ class TestSingleInterfaceVerifyView:
         parent.save()
         _seed_parent_and_child(device, child, parent, pair=("10", 20))
 
-        response = _verify(
-            {"device_id": device.pk, "interface_name_field": "ifName", "port_id": 10},
-            _verify_superuser("string-relationship-key"),
-        )
+        row = _row_read(_signed_in_client(settings, _verify_superuser("string-relationship-key")), device, 10)
 
-        assert response.status_code == 200
-        formatted_row = json.loads(response.content)["formatted_row"]
-        assert parent.name in formatted_row["parent"]
-        assert formatted_row["librenms_parent_port_id"] == 20
-        assert formatted_row["librenms_parent_name"] == parent.name
-        assert formatted_row["librenms_lag_port_id"] is None
-        assert formatted_row["librenms_lag_name"] is None
-        assert formatted_row["librenms_bridge_port_id"] is None
-        assert formatted_row["librenms_bridge_name"] is None
+        assert parent.name in _cell(row, "parent")
+        attrs = _row_attrs(row)
+        assert (attrs["data-parent-port-id"], attrs["data-parent-name"]) == ("20", parent.name)
+        assert (attrs["data-member-of-lag"], attrs["data-lag-name"]) == ("", "")
+        assert (attrs["data-bridge-port-id"], attrs["data-bridge-name"]) == ("", "")
 
     @pytest.mark.django_db
-    def test_verify_missed_port_id_does_not_repaint_same_named_row(self):
-        """A supplied port_id is authoritative: if it misses, do NOT fall back to a same-named row."""
-        from netbox_librenms_plugin.tests.conftest import make_device
-
-        device = make_device("verify-authoritative-pid")
-        user = _verify_superuser("authoritative-pid")
-        seed_interfaces_snapshot(device, [_snapshot_port(99, "Et1")])
-        view = _interface_verify_view()
-        matching_request = _verify_request(
-            {"device_id": device.pk, "interface_name": "Et1", "interface_name_field": "ifName", "port_id": 99}, user
-        )
-        missed_request = _verify_request(
-            {"device_id": device.pk, "interface_name": "Et1", "interface_name_field": "ifName", "port_id": 777}, user
-        )
-
-        assert view.post(matching_request).status_code == 200
-        response = view.post(missed_request)
-
-        # The authoritative-but-missed id yields "not found", never a wrong-row repaint.
-        assert response.status_code == 404
-        data = json.loads(response.content)
-        assert data["status"] == "error"
-
-    @pytest.mark.django_db
-    def test_verify_name_hint_derived_from_matched_row(self):
-        """The interface name fallback is taken from the port_id-matched snapshot row, not the posted display name."""
+    def test_the_table_and_the_row_read_resolve_the_same_stable_id_row(self, settings):
+        """The table and the row read must prefer the same stable-ID interface."""
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface
 
-        device = make_device("verify-namehint")
-        make_interface(device, "Et1")
-        seed_interfaces_snapshot(device, [_snapshot_port(10, "Et1")])
-
-        response = _verify(
-            {
-                "device_id": device.pk,
-                "interface_name": "stale-display-name",
-                "interface_name_field": "ifName",
-                "port_id": 10,
-            },
-            _verify_superuser("namehint"),
-        )
-
-        assert response.status_code == 200
-        row = json.loads(response.content)["formatted_row"]
-        assert "text-success" in row["name"]
-        assert "stale-display-name" not in row["name"]
-
-    @pytest.mark.django_db
-    def test_table_and_verify_resolve_the_same_stable_id_row(self, client, settings):
-        """The table and verify endpoint must prefer the same stable-ID interface."""
-        from django.urls import reverse
-
-        from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server, make_device, make_interface
-
         server_key = configure_default_librenms_server(settings)
-        device = make_device("verify-table-resolution")
+        device = _mapped(make_device("verify-table-resolution"))
         stable_match = make_interface(device, "NetBoxStable")
         name_candidate = make_interface(device, "Ethernet1")
         seed_mapping(stable_match, server_key, own=10, save=False)
@@ -410,42 +332,23 @@ class TestSingleInterfaceVerifyView:
         name_candidate.mtu = 1500
         name_candidate.save()
         seed_interfaces_snapshot(device, [_snapshot_port(10, "Ethernet1", ifMtu=9000)], server_key=server_key)
-        user = _verify_superuser("table-resolution")
+        client = _signed_in_client(settings, _verify_superuser("table-resolution"))
 
-        context = _table_context(user, device, server_key)
-        table_row = _table_row(context, 10)
-        table_name = str(context["table"].render_name(table_row["ifName"], table_row))
-        table_mtu = str(context["table"].render_mtu(table_row["ifMtu"], table_row))
+        table_row = _shown_row(client, device, 10)
+        read_row = _row_read(client, device, 10)
 
-        client.force_login(user)
-        response = client.post(
-            reverse("plugins:netbox_librenms_plugin:verify_interface"),
-            data=json.dumps(
-                {
-                    "device_id": device.pk,
-                    "server_key": server_key,
-                    "interface_name_field": "ifName",
-                    "port_id": 10,
-                }
-            ),
-            content_type="application/json",
-        )
-
-        assert response.status_code == 200, response.content
-        formatted_row = json.loads(response.content)["formatted_row"]
-        verify_name = formatted_row["name"]
-        assert verify_name == table_name
-        assert formatted_row["mtu"] == table_mtu
-        assert "text-success" in formatted_row["mtu"]
+        assert _cell(read_row, "name") == _cell(table_row, "name")
+        assert _cell(read_row, "mtu") == _cell(table_row, "mtu")
+        assert "text-success" in _cell(read_row, "mtu")
 
     @pytest.mark.django_db
-    def test_verify_keeps_view_only_interface_match_without_offering_relationship_write(self):
+    def test_the_row_keeps_a_view_only_interface_match_without_offering_a_relationship_write(self, settings):
         from dcim.models import Device, Interface
 
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface
         from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
-        device = make_device("verify-view-only-match")
+        device = _mapped(make_device("verify-view-only-match"))
         child = make_interface(device, "Ethernet1.100", iface_type="virtual")
         parent = make_interface(device, "Ethernet1")
         seed_mapping(child, own=10, save=False)
@@ -458,22 +361,20 @@ class TestSingleInterfaceVerifyView:
         )
         _seed_parent_and_child(device, child, parent)
 
-        response = _verify({"device_id": device.pk, "interface_name_field": "ifName", "port_id": 10}, user)
+        row = _row_read(_signed_in_client(settings, user), device, 10)
 
-        assert response.status_code == 200
-        row = json.loads(response.content)["formatted_row"]
-        assert "text-success" in row["name"]
-        assert "parent-sync-btn" not in row["parent"]
+        assert "text-success" in _cell(row, "name")
+        assert "parent-sync-btn" not in _cell(row, "parent")
 
     @pytest.mark.django_db
-    def test_plugin_read_only_user_never_receives_relationship_write_button(self):
+    def test_plugin_read_only_user_never_receives_relationship_write_button(self, settings):
         from dcim.models import Device, Interface
 
         from netbox_librenms_plugin.models import LibreNMSSettings
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface
         from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
 
-        device = make_device("verify-plugin-read-only")
+        device = _mapped(make_device("verify-plugin-read-only"))
         child = make_interface(device, "Ethernet1.100", iface_type="virtual")
         parent = make_interface(device, "Ethernet1")
         seed_mapping(child, own=10, save=False)
@@ -487,25 +388,21 @@ class TestSingleInterfaceVerifyView:
         )
         user = grant(user, "view", LibreNMSSettings)
         _seed_parent_and_child(device, child, parent)
+        client = _signed_in_client(settings, user)
 
-        context = _table_context(user, device)
-        table_html = str(context["table"].render_parent(None, _table_row(context, 10)))
-        verify_response = _verify({"device_id": device.pk, "interface_name_field": "ifName", "port_id": 10}, user)
-
-        assert verify_response.status_code == 200, verify_response.content
-        assert "parent-sync-btn" not in table_html
-        assert "parent-sync-btn" not in json.loads(verify_response.content)["formatted_row"]["parent"]
+        assert "parent-sync-btn" not in _cell(_shown_row(client, device, 10), "parent")
+        assert "parent-sync-btn" not in _cell(_row_read(client, device, 10), "parent")
 
     @pytest.mark.django_db
     @pytest.mark.parametrize("migrated", [False, True], ids=["active-page", "migrated-page"])
-    def test_virtual_chassis_member_verify_uses_the_origin_page_mode(self, migrated):
-        """Member verification must keep the page mode and target the selected member."""
+    def test_a_virtual_chassis_member_row_uses_the_page_mode(self, client, settings, migrated):
+        """A row bound on another member keeps the page mode and targets that member."""
         from netbox_librenms_plugin.server_mappings import mark_migrated
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_virtual_chassis_members
         from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
-        from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
 
         _virtual_chassis, (page_device, selected_device) = make_virtual_chassis_members("verify-migrated-page")
+        _mapped(page_device)
         winner = make_device("verify-migrated-winner")
         child = make_interface(selected_device, "Ethernet2.100", iface_type="virtual")
         parent = make_interface(selected_device, "Ethernet2")
@@ -517,19 +414,18 @@ class TestSingleInterfaceVerifyView:
             apply_mapping_change(page_device, mark_migrated(page_device, winner.pk, "default"))
             page_device.save()
         _seed_parent_and_child(page_device, child, parent)
-
-        response = _verify(
-            {
-                "device_id": selected_device.pk,
-                "origin_device_id": page_device.pk,
-                "interface_name_field": "ifName",
-                "port_id": 10,
-            },
-            make_superuser("verify-migrated-page"),
+        configure_default_librenms_server(settings)
+        client.force_login(_verify_superuser("migrated-page"))
+        fragment = reverse(
+            "plugins:netbox_librenms_plugin:sync_cache_fragment",
+            kwargs={"object_type": "device", "pk": page_device.pk, "tab": "interfaces"},
         )
 
+        response = client.get(fragment, {"server_key": "default", "interface_name_field": "ifName"})
+
         assert response.status_code == 200, response.content
-        parent_html = json.loads(response.content)["formatted_row"]["parent"]
+        row = re.search(r'<tr\b[^>]*data-port-id="10".*?</tr>', response.content.decode(), re.S).group(0)
+        parent_html = _cell(row, "parent")
         if migrated:
             assert "parent-sync-btn" not in parent_html
         else:
@@ -537,7 +433,7 @@ class TestSingleInterfaceVerifyView:
             assert f"/device/{selected_device.pk}/sync-interface-parent/" in parent_html
 
     @pytest.mark.django_db
-    def test_verify_response_does_not_expose_inaccessible_vc_members(self):
+    def test_the_tab_and_the_row_read_do_not_expose_inaccessible_vc_members(self, settings):
         from dcim.models import Device
 
         from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
@@ -547,40 +443,28 @@ class TestSingleInterfaceVerifyView:
             "verify-member-scope",
             count=3,
         )
+        _mapped(page_device)
         user = make_user_with_perms("verify-member-scope", [])
         user = grant(user, "view", Device, constraints={"pk": page_device.pk})
         user = grant(user, "view", Device, constraints={"pk": selected_device.pk})
         seed_interfaces_snapshot(page_device, [_snapshot_port(10, "Ethernet2")])
+        client = _signed_in_client(settings, user)
 
-        response = _verify(
-            {
-                "device_id": selected_device.pk,
-                "origin_device_id": page_device.pk,
-                "interface_name_field": "ifName",
-                "port_id": 10,
-            },
-            user,
-        )
+        tab = draft_tab(client, page_device, "interfaces", interface_name_field="ifName").html
+        row = _row_read(client, page_device, 10)
 
-        assert response.status_code == 200, response.content
-        formatted_row = json.loads(response.content)["formatted_row"]
-        body = response.content.decode()
-        assert "device_selection" not in formatted_row
-        assert hidden_device.name not in body
-        # Match the pk as a device REFERENCE, not as a bare substring: `str(pk) in body`
-        # also matches any rendered number (ifMtu 1500 collided with pk 1500), so the old
-        # assertion failed on pk allocation rather than on a member actually leaking.
-        assert f"/dcim/devices/{hidden_device.pk}/" not in body
+        for body in (tab, row):
+            assert hidden_device.name not in body
+            # Match the pk as a device reference: a bare number can match any rendered value.
+            assert f"/dcim/devices/{hidden_device.pk}/" not in body
+            assert f'value="{hidden_device.pk}"' not in body
+        assert f'value="{selected_device.pk}"' in tab
 
     @pytest.mark.django_db
-    def test_hidden_related_owner_stays_unavailable_through_verify_and_inline_post(self, settings):
+    def test_hidden_related_owner_stays_unavailable_through_the_row_and_the_inline_post(self, settings):
         from dcim.models import Device, Interface
 
-        from netbox_librenms_plugin.tests.conftest import (
-            configure_default_librenms_server,
-            make_interface,
-            make_virtual_chassis_members,
-        )
+        from netbox_librenms_plugin.tests.conftest import make_interface, make_virtual_chassis_members
         from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, make_user_with_perms, make_view
         from netbox_librenms_plugin.tests.view_test_helpers import post as call_post
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
@@ -591,6 +475,7 @@ class TestSingleInterfaceVerifyView:
         child = make_interface(page_device, "Ethernet1.100", iface_type="virtual")
         parent = make_interface(hidden_parent_device, "Ethernet2")
         server_key = configure_default_librenms_server(settings)
+        _mapped(page_device)
         seed_mapping(child, server_key, own=10, save=False)
         seed_mapping(parent, server_key, own=20, save=False)
         child.save()
@@ -601,24 +486,17 @@ class TestSingleInterfaceVerifyView:
         user = grant(user, "view", Interface, constraints={"pk": parent.pk})
         # The names share no base, so only the L3 ifType of the child makes the pair a parent edge.
         _seed_parent_and_child(page_device, child, parent, server_key=server_key, child_type="ipForward")
+        client = _signed_in_client(settings, user)
 
-        context = _table_context(user, page_device, server_key)
-        assert "parent-sync-btn" not in str(context["table"].render_parent(None, _table_row(context, 10)))
-
-        verify_response = _verify(
-            {"device_id": page_device.pk, "server_key": server_key, "interface_name_field": "ifName", "port_id": 10},
-            user,
-            server_key,
-        )
-        assert verify_response.status_code == 200, verify_response.content
-        assert "parent-sync-btn" not in json.loads(verify_response.content)["formatted_row"]["parent"]
+        assert "parent-sync-btn" not in _cell(_shown_row(client, page_device, 10), "parent")
+        assert "parent-sync-btn" not in _cell(_row_read(client, page_device, 10), "parent")
 
         relationship_request = make_request(
             "post", {"port_id": "10", "parent_port_id": "20", "server_key": server_key}, user=user
         )
         relationship_response = call_post(
             make_view(SyncInterfaceParentView, relationship_request),
-            relationship_request,
+            bind_relationship(relationship_request, page_device, server_key=server_key),
             object_type="device",
             object_id=page_device.pk,
         )
@@ -628,36 +506,16 @@ class TestSingleInterfaceVerifyView:
         assert child.parent_id is None
 
     @pytest.mark.django_db
-    @pytest.mark.parametrize("invalid_origin_id", [[], {}])
-    def test_verify_rejects_malformed_origin_device_id(self, invalid_origin_id):
-        from netbox_librenms_plugin.tests.conftest import make_device
-
-        device = make_device("verify-malformed-origin")
-
-        response = _verify(
-            {
-                "device_id": device.pk,
-                "origin_device_id": invalid_origin_id,
-                "interface_name_field": "ifName",
-                "port_id": 10,
-            },
-            _verify_superuser(f"malformed-origin-{type(invalid_origin_id).__name__}"),
-        )
-
-        assert response.status_code == 400
-        assert json.loads(response.content)["status"] == "error"
-
-    @pytest.mark.django_db
     def test_view_only_non_lag_target_never_receives_lag_promotion_button(self, settings):
         from dcim.models import Device, Interface
 
-        from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server, make_device, make_interface
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
         from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, make_user_with_perms, make_view
         from netbox_librenms_plugin.tests.view_test_helpers import post as call_post
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
 
         server_key = configure_default_librenms_server(settings)
-        device = make_device("verify-view-only-lag-target")
+        device = _mapped(make_device("verify-view-only-lag-target"))
         member = make_interface(device, "Ethernet1")
         aggregate = make_interface(device, "Port-Channel1", iface_type="other")
         seed_mapping(member, server_key, own=10, save=False)
@@ -673,88 +531,47 @@ class TestSingleInterfaceVerifyView:
             [port_pair(10, 20)],
             server_key=server_key,
         )
+        client = _signed_in_client(settings, user)
 
-        context = _table_context(user, device, server_key)
-        table_html = str(context["table"].render_parent(None, _table_row(context, 10)))
-        verify_response = _verify(
-            {"device_id": device.pk, "interface_name_field": "ifName", "port_id": 10}, user, server_key
-        )
+        table_html = _cell(_shown_row(client, device, 10), "parent")
+        read_html = _cell(_row_read(client, device, 10), "parent")
         inline_request = make_request(
             "post", {"port_id": "10", "lag_port_id": "20", "server_key": server_key}, user=user
         )
         inline_response = call_post(
             make_view(SyncInterfaceLagView, inline_request),
-            inline_request,
+            bind_relationship(inline_request, device, server_key=server_key),
             object_type="device",
             object_id=device.pk,
         )
 
-        assert verify_response.status_code == 200, verify_response.content
         # Pin the refusal status: "!= 200" also passes for a 500 from an unrelated crash, and the
         # state assertions below hold after any failed request because nothing was written.
         assert inline_response.status_code == 403, inline_response.content
         assert "lag-sync-btn" not in table_html
-        assert "lag-sync-btn" not in json.loads(verify_response.content)["formatted_row"]["parent"]
+        assert "lag-sync-btn" not in read_html
         member.refresh_from_db()
         aggregate.refresh_from_db()
         assert member.lag_id is None
         assert aggregate.type != "lag"
 
     @pytest.mark.django_db
-    def test_verify_falls_back_when_interface_name_field_is_not_a_string(self):
+    def test_the_row_read_falls_back_when_the_interface_name_field_is_unknown(self, settings):
         from netbox_librenms_plugin.tests.conftest import make_device
 
-        device = make_device("verify-malformed-name-field")
-        seed_interfaces_snapshot(device, [_snapshot_port(10, "Ethernet1")])
+        device = _mapped(make_device("verify-malformed-name-field"))
+        seed_interfaces_snapshot(device, [_snapshot_port(10, "Ethernet1", ifDescr="GigabitEthernet1")])
 
-        response = _verify(
-            {"device_id": device.pk, "interface_name_field": ["ifName"], "port_id": 10},
-            _verify_superuser("malformed-name-field"),
+        row = _row_read(
+            _signed_in_client(settings, _verify_superuser("malformed-name-field")),
+            device,
+            10,
+            interface_name_field="bogus",
         )
 
-        assert response.status_code == 200
-        # 200 alone does not say how the list was handled: a regression that coerced it into a
-        # column name would also return 200. Pin the fallback to the default name column.
-        assert "Ethernet1" in json.loads(response.content)["formatted_row"]["name"]
-
-    @pytest.mark.django_db
-    def test_verify_materializes_only_relationship_candidates(self):
-        from django.db.models.signals import post_init
-        from dcim.models import Interface
-
-        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
-
-        device = make_device("verify-candidate-scope")
-        source = make_interface(device, "Ethernet1.100", iface_type="virtual")
-        parent = make_interface(device, "Ethernet1")
-        seed_mapping(source, own=10, save=False)
-        seed_mapping(parent, own=20, save=False)
-        source.save()
-        parent.save()
-        for index in range(40):
-            unrelated = make_interface(device, f"unrelated-{index}")
-            seed_mapping(unrelated, own=1000 + index, save=False)
-            unrelated.save()
-        _seed_parent_and_child(device, source, parent)
-        view = _interface_verify_view()
-        request = _verify_request(
-            {"device_id": device.pk, "interface_name_field": "ifName", "port_id": 10},
-            _verify_superuser("candidate-scope"),
-        )
-        materialized_interface_ids = []
-
-        def capture_interface(instance, **_kwargs):
-            materialized_interface_ids.append(instance.pk)
-
-        post_init.connect(capture_interface, sender=Interface, weak=False)
-        try:
-            response = view.post(request)
-        finally:
-            post_init.disconnect(capture_interface, sender=Interface)
-
-        assert response.status_code == 200
-        assert len(materialized_interface_ids) <= 10
-        assert set(materialized_interface_ids) <= {source.pk, parent.pk}
+        # A bogus field name falls back to the default name column, never to another column.
+        assert "Ethernet1" in _cell(row, "name")
+        assert "GigabitEthernet1" not in _cell(row, "name")
 
 
 # ---------------------------------------------------------------------------
@@ -887,7 +704,7 @@ class TestTheIPRowReadServerKeyCacheNamespace:
 
 
 # ---------------------------------------------------------------------------
-# server_key guards on the interface/module verify + VLAN overrides endpoints
+# server_key guards on the module verify and the interface row read
 # (real DB, only the plugin-config boundary patched)
 # ---------------------------------------------------------------------------
 _GUARD_SERVERS = {
@@ -930,27 +747,18 @@ def _json_post(url, body, user):
     return request
 
 
+def _interface_row_url(owner, row_key, server_key):
+    """Return the URL of the interface row read of *owner* on *server_key*."""
+    path = reverse(
+        "plugins:netbox_librenms_plugin:interface_row",
+        kwargs={"object_type": owner._meta.model_name, "pk": owner.pk, "row_key": row_key},
+    )
+    return f"{path}?server_key={server_key}"
+
+
 @pytest.mark.django_db
 class TestVerifyEndpointsServerKeyGuard:
-    """Verify endpoints reject forged or non-string server keys without a 500 or arbitrary cache access."""
-
-    def test_interface_verify_unhashable_server_key_degrades(self):
-        from netbox_librenms_plugin.views.object_sync.devices import SingleInterfaceVerifyView
-
-        device = _make_vc_member_device(name="srvkey-if-dev")
-        request = _json_post(
-            "/plugins/librenms_plugin/verify-interface/",
-            {"device_id": device.pk, "interface_name": "eth0", "server_key": ["a"]},
-            _superuser("srvkey-if-su"),
-        )
-        view = SingleInterfaceVerifyView()
-        view.request = request
-
-        with _servers_settings(_GUARD_SERVERS):
-            response = view.post(request)
-
-        # JSON error/miss response — not a TypeError 500.
-        assert response.status_code in (200, 404)
+    """The module verify and the interface row read reject forged or non-string server keys without a 500 or arbitrary cache access."""
 
     def test_module_verify_unhashable_server_key_degrades(self):
         from netbox_librenms_plugin.views.object_sync.devices import SingleModuleVerifyView
@@ -969,51 +777,37 @@ class TestVerifyEndpointsServerKeyGuard:
 
         assert response.status_code in (200, 404)
 
-    def test_vlan_overrides_unhashable_server_key_degrades(self):
-        from netbox_librenms_plugin.views.object_sync.devices import SaveVlanGroupOverridesView
+    def test_interface_row_read_forged_string_key_never_scopes_cache(self, monkeypatch):
+        from django.test import Client
 
-        device = _make_vc_member_device(name="srvkey-vlan-dev")
-        request = _json_post(
-            "/plugins/librenms_plugin/vlan-group-overrides/",
-            {"device_id": device.pk, "vid_group_map": {"10": 1}, "server_key": ["a"]},
-            _superuser("srvkey-vlan-su"),
-        )
-        view = SaveVlanGroupOverridesView()
-        view.request = request
-
-        with _servers_settings(_GUARD_SERVERS):
-            response = view.post(request)
-
-        # Falls back and then 400s on the missing ports cache — never a TypeError 500.
-        assert response.status_code == 400
-
-    def test_interface_verify_forged_string_key_never_scopes_cache(self, monkeypatch):
         from netbox_librenms_plugin import source_cache
-        from netbox_librenms_plugin.views.object_sync.devices import SingleInterfaceVerifyView
 
         device = _make_gate_device(name="srvkey-forged-dev")
-        request = _json_post(
-            "/plugins/librenms_plugin/verify-interface/",
-            {"device_id": device.pk, "interface_name": "eth0", "server_key": "evil-namespace"},
-            _superuser("srvkey-forged-su"),
-        )
-        view = SingleInterfaceVerifyView()
-        view.request = request
-
-        captured = {}
+        for own, namespace in enumerate(("alpha", "evil-namespace"), start=4401):
+            seed_mapping(device, namespace, own=own, save=False)
+        device.save()
+        for namespace in ("alpha", "evil-namespace"):
+            seed_interfaces_snapshot(device, [_snapshot_port(10, "eth0")], server_key=namespace)
+        client = Client()
+        client.force_login(_superuser("srvkey-forged-su"))
+        captured = []
         original_read = source_cache.read
 
         def spy(subject, resource, server_key):
-            captured["server_key"] = server_key
+            captured.append(server_key)
             return original_read(subject, resource, server_key)
 
         monkeypatch.setattr(source_cache, "read", spy)
 
         with _servers_settings(_GUARD_SERVERS):
-            view.post(request)
+            forged = client.get(_interface_row_url(device, "10", "evil-namespace"))
+            configured = client.get(_interface_row_url(device, "10", "alpha"))
 
-        # The snapshot read ran, and on a configured server, never on the forged one.
-        assert captured["server_key"] in _GUARD_SERVERS
+        # The forged key never reads its own namespace; a configured key reads its own snapshot.
+        assert forged.status_code == 404
+        assert configured.status_code == 200, configured.content
+        assert "evil-namespace" not in captured
+        assert "alpha" in captured
 
 
 @pytest.mark.django_db
@@ -1047,29 +841,25 @@ class TestParseRequestJsonRejectsNonObject:
 
 
 @pytest.mark.django_db
-class TestInterfaceVerifyMalformedPortsCache:
+class TestInterfaceRowReadMalformedPortsCache:
     """A malformed payload under the snapshot key must degrade to the 404 miss path."""
 
     def test_corrupt_snapshot_degrades_to_the_miss(self):
         from django.core.cache import cache as real_cache
+        from django.test import Client
 
         from netbox_librenms_plugin import source_cache
         from netbox_librenms_plugin.acquisition.registry import Resource
-        from netbox_librenms_plugin.views.object_sync.devices import SingleInterfaceVerifyView
 
         device = _make_gate_device(name="srvkey-corrupt-dev")
-        request = _json_post(
-            "/plugins/librenms_plugin/verify-interface/",
-            {"device_id": device.pk, "interface_name": "eth0", "server_key": "alpha"},
-            _superuser("srvkey-corrupt-su"),
-        )
-        view = SingleInterfaceVerifyView()
-        view.request = request
+        seed_mapping(device, "alpha", own=4410)
+        client = Client()
+        client.force_login(_superuser("srvkey-corrupt-su"))
 
         with _servers_settings(_GUARD_SERVERS):
             cache_key = source_cache.snapshot_key(device, Resource.INTERFACES, "alpha")
             real_cache.set(cache_key, ["corrupt", "legacy", "shape"], timeout=60)
-            response = view.post(request)
+            response = client.get(_interface_row_url(device, "10", "alpha"))
 
         # Degrades to the not-found miss path instead of AttributeError-500.
         assert response.status_code == 404
@@ -1078,67 +868,39 @@ class TestInterfaceVerifyMalformedPortsCache:
 
 
 @pytest.mark.django_db
-class TestVerifyViewObjectScope:
-    """Verify views restrict device lookup so constrained grants cannot reveal cached data outside their object scope."""
+class TestInterfaceRowReadObjectScope:
+    """The row read restricts the device lookup so constrained grants cannot reveal cached data outside their object scope."""
 
     SERVER_KEY = "default"  # the only configured server in the test env
 
     @staticmethod
     def _constrained_user(in_scope_device):
-        from core.models import ObjectType
         from dcim.models import Device
-        from django.contrib.auth import get_user_model
-        from users.models import ObjectPermission
 
-        user = get_user_model().objects.create_user(username="scoped-verify", password="x")
-        perm = ObjectPermission.objects.create(
-            name="scoped-view-device", actions=["view"], constraints={"pk": in_scope_device.pk}
-        )
-        perm.object_types.set([ObjectType.objects.get_for_model(Device)])
-        perm.users.set([user])
-        # Re-fetch to clear NetBox's per-request object-permission cache on the user.
-        return get_user_model().objects.get(pk=user.pk)
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
 
-    def _interface_verify_view(self, user):
-        from netbox_librenms_plugin.views.object_sync.devices import SingleInterfaceVerifyView
+        user = make_user_with_perms("scoped-verify", [])
+        return grant(user, "view", Device, constraints={"pk": in_scope_device.pk}, name="scoped-view-device")
 
-        view = SingleInterfaceVerifyView()
-        request = RequestFactory().post("/plugins/librenms_plugin/verify-interface/")
-        request.user = user
-        view.request = request
-        view.kwargs = {}
-        view.args = ()
-        return view
-
-    def test_out_of_scope_device_verify_raises_404(self):
-        """The verify endpoint 404s an out-of-scope device even with its snapshot stored (no data leak)."""
-        from django.http import Http404
+    def test_out_of_scope_device_row_read_answers_404(self):
+        """The row read 404s an out-of-scope device even with its snapshot stored (no data leak)."""
+        from django.test import Client
 
         in_scope = _make_gate_device(name="scope-in")
         out_of_scope = _make_gate_device(name="scope-out")
-        user = self._constrained_user(in_scope)
-        view = self._interface_verify_view(user)
+        for own, device in enumerate((in_scope, out_of_scope), start=4420):
+            seed_mapping(device, self.SERVER_KEY, own=own)
+            seed_interfaces_snapshot(device, [_snapshot_port(1, "Gi0/0")], server_key=self.SERVER_KEY)
+        client = Client()
+        client.force_login(self._constrained_user(in_scope))
 
-        # Store the OUT-OF-SCOPE device's snapshot: with a raw get_object_or_404 the device
-        # resolves and the endpoint returns its row (the leak). restrict() drops it first.
-        seed_interfaces_snapshot(out_of_scope, [_snapshot_port(1, "Gi0/0")], server_key=self.SERVER_KEY)
-        request = RequestFactory().post(
-            "/plugins/librenms_plugin/verify-interface/",
-            data=json.dumps(
-                {
-                    "device_id": out_of_scope.pk,
-                    "interface_name": "Gi0/0",
-                    "interface_name_field": "ifName",
-                    "server_key": self.SERVER_KEY,
-                }
-            ),
-            content_type="application/json",
-        )
-        request.user = user
-        view.request = request
+        hidden = client.get(_interface_row_url(out_of_scope, "1", self.SERVER_KEY))
+        visible = client.get(_interface_row_url(in_scope, "1", self.SERVER_KEY))
+
         # An out-of-scope pk 404s at the lookup like a nonexistent one, so the snapshot is never read.
-        with pytest.raises(Http404):
-            view.post(request)
+        assert hidden.status_code == 404
+        assert b"Gi0/0" not in hidden.content
+        assert visible.status_code == 200, visible.content
 
     def test_grant_scopes_lookup_to_covered_device(self):
         """The restricted queryset the endpoint uses covers the in-scope device and excludes others."""
@@ -1154,90 +916,48 @@ class TestVerifyViewObjectScope:
 
 
 @pytest.mark.django_db
-class TestSaveVlanGroupOverridesObjectScope:
-    """SaveVlanGroupOverridesView blocks plugin writers from updating devices outside their view scope."""
+class TestInterfaceVlanGroupsCommandObjectScope:
+    """The VLAN groups command blocks plugin writers from changing the draft of a device outside their view scope."""
 
     SERVER_KEY = "default"
 
     @staticmethod
     def _plugin_writer_scoped_to(in_scope_device):
-        """A real user with plugin write access AND a pk-constrained view_device grant (no superuser)."""
-        from core.models import ObjectType
+        """A real user with plugin write access and a pk-constrained view_device grant (no superuser)."""
         from dcim.models import Device
-        from django.contrib.auth import get_user_model
-        from users.models import ObjectPermission
 
-        from netbox_librenms_plugin.models import LibreNMSSettings
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
 
-        user = get_user_model().objects.create_user(username="scoped-writer", password="x")
+        user = make_user_with_perms("scoped-writer", [])
+        return grant(user, "view", Device, constraints={"pk": in_scope_device.pk}, name="scoped-view-dev")
 
-        write = ObjectPermission.objects.create(name="plugin-write", actions=["change"])
-        write.object_types.set([ObjectType.objects.get_for_model(LibreNMSSettings)])
-        write.users.set([user])
-
-        view_dev = ObjectPermission.objects.create(
-            name="scoped-view-dev", actions=["view"], constraints={"pk": in_scope_device.pk}
-        )
-        view_dev.object_types.set([ObjectType.objects.get_for_model(Device)])
-        view_dev.users.set([user])
-
-        return get_user_model().objects.get(pk=user.pk)  # clear the per-request perm cache
-
-    def _view_and_request(self, user, device_pk):
-        from netbox_librenms_plugin.views.object_sync.devices import SaveVlanGroupOverridesView
-
-        view = SaveVlanGroupOverridesView()
-        request = RequestFactory().post(
-            "/plugins/librenms_plugin/save-vlan-overrides/",
-            data=json.dumps({"device_id": device_pk, "vid_group_map": {"10": 3}, "server_key": self.SERVER_KEY}),
-            content_type="application/json",
-        )
-        request.user = user
-        view.request = request
-        view.kwargs = {}
-        view.args = ()
-        return view, request
-
-    def test_out_of_scope_device_is_blocked(self):
-        """A plugin-writer scoped to another device cannot persist overrides for an out-of-scope device."""
-        from django.core.cache import cache as real_cache
-        from django.http import Http404
+    def test_out_of_scope_device_is_blocked_and_an_in_scope_device_is_not(self):
+        """A plugin writer scoped to another device cannot choose VLAN groups for an out-of-scope device."""
+        from django.test import Client
 
         in_scope = _make_gate_device(name="ovr-in")
         out_of_scope = _make_gate_device(name="ovr-out")
-        user = self._plugin_writer_scoped_to(in_scope)
-        view, request = self._view_and_request(user, out_of_scope.pk)
+        for own, device in enumerate((in_scope, out_of_scope), start=4430):
+            seed_mapping(device, self.SERVER_KEY, own=own)
+            seed_interfaces_snapshot(
+                device, [_snapshot_port(10, "Gi0/0", **port_vlans("access", 100))], server_key=self.SERVER_KEY
+            )
+        client = Client()
+        client.force_login(self._plugin_writer_scoped_to(in_scope))
+        shown = draft_tab(client, in_scope, "interfaces", interface_name_field="ifName")
+        fields = {"row": "10", "group_100": ""}
+        hidden_url = shown.table["data-vlan-groups-url"].replace(
+            f"/device/{in_scope.pk}/", f"/device/{out_of_scope.pk}/"
+        )
 
-        overrides_key = view.get_vlan_overrides_key(out_of_scope, self.SERVER_KEY)
-        real_cache.delete(overrides_key)
-        # Even with the snapshot stored (so the write path would otherwise proceed), the device
-        # must 404 at the restricted lookup before anything is persisted.
-        seed_interfaces_snapshot(out_of_scope, [], server_key=self.SERVER_KEY)
-        try:
-            with pytest.raises(Http404):
-                view.post(request)
-            assert real_cache.get(overrides_key) is None  # nothing written for the out-of-scope device
-        finally:
-            real_cache.delete(overrides_key)
+        blocked = client.post(
+            hidden_url, {"draft_id": shown.table["data-draft-id"], "expected_revision": "0", **fields}
+        )
+        applied = draft_command(client, shown, "data-vlan-groups-url", **fields)
 
-    def test_in_scope_device_resolves_past_the_gate(self):
-        """The device the grant DOES cover resolves through restrict() (no over-block — reaches the write path)."""
-        from django.core.cache import cache as real_cache
-        from django.http import Http404, JsonResponse
-
-        in_scope = _make_gate_device(name="ovr-in-2")
-        user = self._plugin_writer_scoped_to(in_scope)
-        view, request = self._view_and_request(user, in_scope.pk)
-        try:
-            # Must NOT 404: an in-scope device is resolvable. (It then hits the ports-cache/TTL check,
-            # returning a JsonResponse either way — the point is the restricted lookup didn't block it.)
-            try:
-                response = view.post(request)
-            except Http404:
-                pytest.fail("in-scope device was wrongly blocked by restrict()")
-            assert isinstance(response, JsonResponse)
-        finally:
-            real_cache.delete(view.get_vlan_overrides_key(in_scope, self.SERVER_KEY))
+        # The out-of-scope device 404s at the restricted lookup before any draft is read.
+        assert blocked.status_code == 404
+        assert applied.status_code == 204
 
 
 # ---------------------------------------------------------------------------
@@ -1308,27 +1028,20 @@ def test_module_verify_rejects_an_out_of_range_device_id_like_its_siblings():
 
 
 @pytest.mark.django_db
-def test_verify_rejects_a_device_id_beyond_the_bigint_range():
-    """An oversized primary key must fail validation here, not in the database driver."""
-    import json as json_module
-
-    from netbox_librenms_plugin.tests.view_test_helpers import make_request
+def test_the_interface_row_read_rejects_a_device_id_beyond_the_bigint_range(client, settings):
+    """An oversized primary key must fail as a missing device, not in the database driver."""
     from netbox_librenms_plugin.utils import _POSTGRES_BIGINT_MAX
-    from netbox_librenms_plugin.views.object_sync.devices import SingleInterfaceVerifyView
 
-    view = SingleInterfaceVerifyView()
-    request = make_request(
-        "post",
-        json_module.dumps({"device_id": _POSTGRES_BIGINT_MAX + 1, "port_id": 10}),
-        user=_verify_superuser("bigint-device-id"),
-        path="/verify/",
-        content_type="application/json",
+    configure_default_librenms_server(settings)
+    client.force_login(_verify_superuser("bigint-device-id"))
+    url = reverse(
+        "plugins:netbox_librenms_plugin:interface_row",
+        kwargs={"object_type": "device", "pk": _POSTGRES_BIGINT_MAX + 1, "row_key": "10"},
     )
 
-    response = view.post(request)
+    response = client.get(url, {"server_key": "default"})
 
-    assert response.status_code == 400
-    assert json_module.loads(response.content)["message"] == "No device ID provided"
+    assert response.status_code == 404
 
 
 @pytest.mark.django_db

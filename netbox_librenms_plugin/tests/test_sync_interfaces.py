@@ -11,6 +11,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_interface,
     make_superuser,
     make_vm,
+    map_device_to_librenms,
     transactional_db_with_all_apps,
 )
 from netbox_librenms_plugin.tests.interface_sync_post_helpers import bound_interface, post_interface_sync, seed_ports
@@ -20,6 +21,7 @@ def _post_sync(client, settings, device, port, *, exclude_columns):
     """Seed *port* for *device* and post the sync of that one row through the real URL, as a superuser."""
     configure_default_librenms_server(settings)
     client.force_login(make_superuser(f"{device.name}-user"))
+    map_device_to_librenms(device, 42, server_key="default")
     seed_ports(device, [port])
     return post_interface_sync(client, device, [port["port_id"]], htmx=False, exclude_columns=exclude_columns)
 

@@ -1,39 +1,22 @@
 """
-Branch coverage for the VLAN verify and override endpoints in ``views/object_sync/devices.py``.
+The VLAN group views of a sync row: the interface VLAN groups dialog and its command, and the VLAN tab's group choice.
 
-The primary home for these endpoints is ``test_coverage_devices.py``. These cases live in their
-own file because higher branches of the PR stack grow that file's tail, so appending there
-conflicts on every restack.
+The tests cover their permission gate, their row-key guard, the colours that the dialog shows for the
+groups it previews, and the interface view scope. Each test seeds a snapshot and drives the real views
+with a signed-in client; NetBox rows and object permissions are real.
 """
 
-import json
+import re
+from urllib.parse import urlencode
 
 import pytest
+from django.urls import reverse
 
+from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server, make_device, make_superuser
+from netbox_librenms_plugin.tests.interface_sync_post_helpers import bound_interface, sync_port
+from netbox_librenms_plugin.tests.source_snapshot_helpers import port_vlans, seed_interfaces_snapshot
 
 SERVER_KEY = "default"
-
-
-def _json_post(client, route_name, body):
-    """POST a JSON body to one of the plugin's verify endpoints."""
-    from django.urls import reverse
-
-    return client.post(
-        reverse(f"plugins:netbox_librenms_plugin:{route_name}"),
-        data=json.dumps(body),
-        content_type="application/json",
-    )
-
-
-def _plugin_reader(username):
-    """Create a real user with plugin read access only: no plugin write, no NetBox object grants."""
-    from django.apps import apps
-    from django.contrib.auth import get_user_model
-    from netbox_librenms_plugin.tests.view_test_helpers import grant
-
-    user = get_user_model().objects.create_user(username=username, password="x")
-    settings_model = apps.get_model("netbox_librenms_plugin", "LibreNMSSettings")
-    return grant(user, "view", settings_model, name=f"{username}-plugin-view")
 
 
 def _vlan_group(name):
@@ -50,315 +33,161 @@ def _vlan(vid, name, *, group=None):
     return VLAN.objects.create(vid=vid, name=name, group=group)
 
 
-def _tagged_interface(device, name, vlans):
-    """Create a real tagged interface carrying *vlans*."""
-    from netbox_librenms_plugin.tests.conftest import make_interface
+def _device(client, settings, name, ports, *, user=None):
+    """Return a device mapped to LibreNMS whose interfaces snapshot holds *ports*; sign in *user* or a superuser."""
+    configure_default_librenms_server(settings)
+    client.force_login(user or make_superuser(f"{name}-user"))
+    device = make_device(name, librenms_cf={SERVER_KEY: {"id": 4300}})
+    seed_interfaces_snapshot(device, ports, server_key=SERVER_KEY)
+    return device
 
-    interface = make_interface(device, name)
-    interface.mode = "tagged"
-    interface.save()
-    interface.tagged_vlans.set(vlans)
-    return interface
+
+def _url(name, device, query=None, **kwargs):
+    """Return the URL of the view *name* for *device*, with the server, the name field and *query*."""
+    path = reverse(
+        f"plugins:netbox_librenms_plugin:{name}", kwargs={"object_type": "device", "pk": device.pk, **kwargs}
+    )
+    return f"{path}?{urlencode({'server_key': SERVER_KEY, 'interface_name_field': 'ifName', **(query or {})})}"
+
+
+def _dialog_vlans(client, device, row_key, **groups):
+    """Return ``{vid: (css class, missing marker)}`` of the VLAN groups dialog of one row that previews *groups*."""
+    response = client.get(_url("interface_vlan_modal", device, groups, row_key=row_key))
+    assert response.status_code == 200, response.content
+    rows = re.findall(
+        r'<tr data-vid="(\d+)">\s*<td[^>]*><span class="([^"]*)">\d+</span>(.*?)</td>', response.content.decode(), re.S
+    )
+    return {int(vid): (css, "mdi-alert" in tail) for vid, css, tail in rows}
 
 
 @pytest.mark.django_db
-class TestSingleVlanGroupVerifyGate:
-    """The endpoint checks the NetBox object permissions before it resolves the device."""
+class TestTheDraftEndpointGate:
+    """Each endpoint checks the subject's view permission before it resolves the device."""
 
-    def test_missing_object_permissions_are_reported_instead_of_the_device(self, client):
-        """A plugin writer without the DCIM/IPAM view grants gets 403, not a device-scoped 404."""
-        from netbox_librenms_plugin.tests.conftest import make_device
+    @pytest.mark.parametrize(
+        ("method", "name", "kwargs"),
+        [
+            ("get", "interface_vlan_modal", {"row_key": "10"}),
+            ("post", "interface_selection_vlan_groups", {}),
+            ("post", "vlan_selection_choice", {}),
+            ("get", "vlan_row", {"row_key": "110"}),
+        ],
+        ids=["interface-dialog", "interface-command", "vlan-choice", "vlan-row-read"],
+    )
+    def test_a_missing_device_permission_is_reported_instead_of_the_device(
+        self, client, settings, method, name, kwargs
+    ):
+        """A plugin writer without the DCIM view grant gets 403, not a device-scoped 404."""
         from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
-        device = make_device("vlan-verify-gate")
-        client.force_login(make_user_with_perms("vlan-verify-gate-user", []))
+        user = make_user_with_perms(f"vlan-gate-{name}-user", [])
+        device = _device(client, settings, f"vlan-gate-{name}", [sync_port(10, "eth0")], user=user)
 
-        response = _json_post(client, "verify_vlan_group", {"device_id": device.pk, "vid": "110"})
+        response = getattr(client, method)(_url(name, device, **kwargs))
 
         assert response.status_code == 403
-        assert response.json() == {
-            "error": "Missing permissions: dcim.view_device, ipam.view_vlangroup, ipam.view_vlan"
-        }
+        assert response.json() == {"error": "Missing permissions: dcim.view_device"}
 
 
 @pytest.mark.django_db
-class TestSingleVlanGroupVerifyPayloadGuards:
-    """Each required payload field is rejected with its own structured 400."""
+class TestTheVlanGroupsCommandRowGuard:
+    """The VLAN groups command names one interface row by its canonical port ID, or answers 400."""
 
-    def test_missing_device_id_is_rejected(self, client):
-        """A payload without device_id returns the device error, not a 500."""
-        from netbox_librenms_plugin.tests.conftest import make_superuser
+    @pytest.mark.parametrize("row", [None, "not-a-port", "010"], ids=["missing", "text", "leading-zero"])
+    def test_an_unusable_row_is_rejected(self, client, settings, row):
+        from netbox_librenms_plugin.tests.view_test_helpers import draft_command, draft_tab
 
-        client.force_login(make_superuser("vlan-verify-no-device-user"))
+        device = _device(client, settings, "vlan-row-guard", [sync_port(10, "eth0", **port_vlans("access", 110))])
+        shown = draft_tab(client, device, "interfaces", interface_name_field="ifName")
+        fields = {"group_110": ""} | ({} if row is None else {"row": row})
 
-        response = _json_post(client, "verify_vlan_group", {"vid": "110"})
-
-        assert response.status_code == 400
-        assert response.json() == {"status": "error", "message": "No device ID provided"}
-
-    def test_missing_vid_is_rejected(self, client):
-        """A payload with a device but no VID returns the VID error."""
-        from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
-
-        device = make_device("vlan-verify-no-vid")
-        client.force_login(make_superuser("vlan-verify-no-vid-user"))
-
-        response = _json_post(client, "verify_vlan_group", {"device_id": device.pk})
+        response = draft_command(client, shown, "data-vlan-groups-url", **fields)
 
         assert response.status_code == 400
-        assert response.json() == {"status": "error", "message": "No VID provided"}
-
-    def test_non_numeric_vid_is_rejected(self, client):
-        """A VID that is not an integer returns a structured 400 instead of raising."""
-        from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
-
-        device = make_device("vlan-verify-bad-vid")
-        client.force_login(make_superuser("vlan-verify-bad-vid-user"))
-
-        response = _json_post(client, "verify_vlan_group", {"device_id": device.pk, "vid": "not-a-vid"})
-
-        assert response.status_code == 400
-        assert response.json() == {"status": "error", "message": "Invalid VID"}
 
 
 @pytest.mark.django_db
-class TestSingleVlanGroupVerifyGlobalScope:
-    """With no group selected only group-less VLANs count as available."""
+class TestTheDialogColours:
+    """The dialog colours each VLAN for the group it previews, as the row compares it with NetBox."""
 
-    def test_a_grouped_vlan_is_missing_when_no_group_is_selected(self, client):
+    def test_a_grouped_vlan_is_missing_when_no_group_is_selected(self, client, settings):
         """Without a VLAN group only global VLANs resolve, so a grouped VID reads as missing."""
-        from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_superuser
-
-        device = make_device("vlan-verify-global-scope")
+        device = _device(
+            client, settings, "vlan-dialog-global", [sync_port(1, "Ethernet1", **port_vlans("tagged", 950, [940]))]
+        )
         group = _vlan_group("Verify Campus")
         _vlan(940, "grouped-only", group=group)
         global_vlan = _vlan(950, "global-only")
-        interface = make_interface(device, "Ethernet1")
-        interface.mode = "access"
+        interface = bound_interface(device, "Ethernet1", 1)
+        interface.mode = "tagged"
         interface.untagged_vlan = global_vlan
         interface.save()
-        client.force_login(make_superuser("vlan-verify-global-scope-user"))
 
-        grouped = _json_post(
-            client,
-            "verify_vlan_group",
-            {"device_id": device.pk, "interface_name": "Ethernet1", "vid": "940", "vlan_type": "U"},
-        )
-        globally = _json_post(
-            client,
-            "verify_vlan_group",
-            {"device_id": device.pk, "interface_name": "Ethernet1", "vid": "950", "vlan_type": "U"},
-        )
+        vlans = _dialog_vlans(client, device, "1", group_940="", group_950="")
 
-        assert grouped.json()["is_missing"] is True
-        assert grouped.json()["css_class"] == "text-danger"
-        assert globally.json()["is_missing"] is False
-        assert globally.json()["css_class"] == "text-success"
+        assert vlans[940] == ("text-danger", True)
+        assert vlans[950] == ("text-success", False)
 
-
-@pytest.mark.django_db
-class TestSingleVlanGroupVerifyTaggedRows:
-    """The tagged branch compares against the interface's real tagged VLANs and their groups."""
-
-    def test_tagged_vlan_group_comparison_uses_the_netbox_vlan_group(self, client):
+    def test_tagged_vlan_group_comparison_uses_the_netbox_vlan_group(self, client, settings):
         """The same tagged VID matches in its own group and reads as a group mismatch in another."""
-        from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
-
-        device = make_device("vlan-verify-tagged")
+        device = _device(
+            client, settings, "vlan-dialog-tagged", [sync_port(2, "Ethernet2", **port_vlans("tagged", tagged=[930]))]
+        )
         own_group = _vlan_group("Verify Tagged Own")
         other_group = _vlan_group("Verify Tagged Other")
         own_vlan = _vlan(930, "tagged-own", group=own_group)
         _vlan(930, "tagged-other", group=other_group)
-        _tagged_interface(device, "Ethernet2", [own_vlan])
-        client.force_login(make_superuser("vlan-verify-tagged-user"))
+        interface = bound_interface(device, "Ethernet2", 2)
+        interface.mode = "tagged"
+        interface.save()
+        interface.tagged_vlans.set([own_vlan])
 
-        same_group = _json_post(
-            client,
-            "verify_vlan_group",
-            {
-                "device_id": device.pk,
-                "interface_name": "Ethernet2",
-                "vid": "930",
-                "vlan_type": "T",
-                "vlan_group_id": own_group.pk,
-            },
-        )
-        other = _json_post(
-            client,
-            "verify_vlan_group",
-            {
-                "device_id": device.pk,
-                "interface_name": "Ethernet2",
-                "vid": "930",
-                "vlan_type": "T",
-                "vlan_group_id": other_group.pk,
-            },
-        )
+        same_group = _dialog_vlans(client, device, "2", group_930=str(own_group.pk))
+        other = _dialog_vlans(client, device, "2", group_930=str(other_group.pk))
 
-        assert same_group.json()["is_missing"] is False
-        assert same_group.json()["css_class"] == "text-success"
-        assert other.json()["is_missing"] is False
-        assert other.json()["css_class"] == "text-warning"
-        assert ">930(T)</span>" in same_group.json()["formatted_vlans"]
+        assert same_group[930] == ("text-success", False)
+        assert other[930] == ("text-warning", False)
 
-    def test_a_tagged_vlan_outside_every_group_carries_the_missing_warning(self, client):
+    def test_a_tagged_vlan_outside_every_group_carries_the_missing_warning(self, client, settings):
         """A tagged VID that exists in no visible VLAN renders the missing-VLAN warning icon."""
-        from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
-
-        device = make_device("vlan-verify-tagged-missing")
-        _tagged_interface(device, "Ethernet3", [])
-        client.force_login(make_superuser("vlan-verify-tagged-missing-user"))
-
-        response = _json_post(
+        device = _device(
             client,
-            "verify_vlan_group",
-            {"device_id": device.pk, "interface_name": "Ethernet3", "vid": "931", "vlan_type": "T"},
+            settings,
+            "vlan-dialog-tagged-missing",
+            [sync_port(3, "Ethernet3", **port_vlans("tagged", tagged=[931]))],
         )
+        interface = bound_interface(device, "Ethernet3", 3)
+        interface.mode = "tagged"
+        interface.save()
 
-        body = response.json()
-        assert body["is_missing"] is True
-        assert body["css_class"] == "text-danger"
-        assert "931(T)" in body["formatted_vlans"]
-        assert "mdi-alert" in body["formatted_vlans"]
-
-    def test_a_row_that_renders_no_vlan_falls_back_to_a_dash(self, client):
-        """VID 0 renders nothing, so the cell degrades to the placeholder instead of an empty string."""
-        from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
-
-        device = make_device("vlan-verify-empty-cell")
-        client.force_login(make_superuser("vlan-verify-empty-cell-user"))
-
-        response = _json_post(
-            client,
-            "verify_vlan_group",
-            {"device_id": device.pk, "interface_name": "Ethernet1", "vid": "0", "vlan_type": "U"},
-        )
-
-        assert response.status_code == 200
-        assert response.json()["formatted_vlans"] == "\u2014"
+        assert _dialog_vlans(client, device, "3")[931] == ("text-danger", True)
 
 
 @pytest.mark.django_db
-class TestVerifyVlanSyncGroupBranches:
-    """The VLAN sync tab endpoint gates on IPAM permissions and validates the group id."""
-
-    def test_missing_vlan_permissions_are_reported(self, client):
-        """A plugin writer without the IPAM view grants gets 403 before any VLAN is read."""
-        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
-
-        client.force_login(make_user_with_perms("vlan-sync-verify-gate-user", []))
-
-        response = _json_post(client, "verify_vlan_sync_group", {"vid": "120", "name": "Users"})
-
-        assert response.status_code == 403
-        assert response.json() == {"error": "Missing permissions: ipam.view_vlan, ipam.view_vlangroup"}
-
-    def test_non_numeric_vlan_group_id_is_rejected(self, client):
-        """A VLAN group id that is not an integer returns a structured 400."""
-        from netbox_librenms_plugin.tests.conftest import make_superuser
-
-        client.force_login(make_superuser("vlan-sync-verify-bad-group-user"))
-
-        response = _json_post(
-            client,
-            "verify_vlan_sync_group",
-            {"vid": "120", "name": "Users", "vlan_group_id": "not-an-id"},
-        )
-
-        assert response.status_code == 400
-        assert response.json() == {"status": "error", "message": "Invalid VLAN group ID"}
-
-
-@pytest.mark.django_db
-class TestSaveVlanGroupOverridesBranches:
-    """Persisting overrides needs plugin write access, a device id, and a resolvable cache scope."""
-
-    def test_a_plugin_reader_cannot_persist_overrides(self, client, configure_librenms):
-        """Plugin read access alone is refused with 403 and writes nothing to the cache."""
-        from django.core.cache import cache
-        from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.views.object_sync.devices import SaveVlanGroupOverridesView
-
-        device = make_device("vlan-overrides-reader", librenms_cf={SERVER_KEY: {"id": 161}})
-        overrides_key = SaveVlanGroupOverridesView().get_vlan_overrides_key(device, SERVER_KEY)
-        client.force_login(_plugin_reader("vlan-overrides-reader-user"))
-
-        response = _json_post(
-            client,
-            "save_vlan_group_overrides",
-            {"device_id": device.pk, "server_key": SERVER_KEY, "vid_group_map": {"940": "21"}},
-        )
-
-        assert response.status_code == 403
-        assert cache.get(overrides_key) is None
-
-    def test_missing_device_id_is_rejected(self, client, configure_librenms):
-        """A payload without device_id returns a structured 400 before the device lookup."""
-        from netbox_librenms_plugin.tests.conftest import make_superuser
-
-        client.force_login(make_superuser("vlan-overrides-no-device-user"))
-
-        response = _json_post(
-            client,
-            "save_vlan_group_overrides",
-            {"server_key": SERVER_KEY, "vid_group_map": {"941": "22"}},
-        )
-
-        assert response.status_code == 400
-        assert response.json() == {"status": "error", "message": "No device ID provided"}
-
-    def test_an_unresolvable_chassis_falls_back_to_the_posted_device(self, client, configure_librenms):
-        """A chassis with no resolvable sync member stores the overrides under the posted device."""
-        from django.core.cache import cache
-        from netbox_librenms_plugin.tests.conftest import make_superuser, make_virtual_chassis_members
-        from netbox_librenms_plugin.server_selection import get_librenms_sync_device
-        from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_interfaces_snapshot
-        from netbox_librenms_plugin.views.object_sync.devices import SaveVlanGroupOverridesView
-
-        _chassis, (device, _sibling) = make_virtual_chassis_members("vlan-overrides-vc")
-        device.vc_position = None
-        device.save(update_fields=["vc_position"])
-        assert get_librenms_sync_device(device, server_key=SERVER_KEY) is None
-
-        view = SaveVlanGroupOverridesView()
-        seed_interfaces_snapshot(device, [], server_key=SERVER_KEY)
-        client.force_login(make_superuser("vlan-overrides-vc-user"))
-
-        response = _json_post(
-            client,
-            "save_vlan_group_overrides",
-            {"device_id": device.pk, "server_key": SERVER_KEY, "vid_group_map": {"942": "23"}},
-        )
-
-        assert response.status_code == 200
-        assert response.json() == {"status": "success"}
-        assert cache.get(view.get_vlan_overrides_key(device, SERVER_KEY)) == {"942": "23"}
-
-
-@pytest.mark.django_db
-def test_the_vlan_verify_reads_an_interface_the_user_cannot_view_as_absent(client):
-    """The verify compares only an interface in the view scope: a hidden one answers as a missing one."""
+def test_the_dialog_reads_an_interface_the_user_cannot_view_as_absent(client, settings):
+    """The dialog compares only an interface in the view scope: a hidden one answers as a missing one."""
     from dcim.models import Device, Interface
     from ipam.models import VLAN, VLANGroup
 
-    from netbox_librenms_plugin.tests.conftest import make_device
     from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
 
-    device = make_device("vlan-verify-hidden-iface")
+    user = make_user_with_perms("vlan-dialog-hidden-user", [("view", Device), ("view", VLANGroup), ("view", VLAN)])
+    user = grant(user, "view", Interface, constraints={"name": "VisibleOnly"})
+    device = _device(
+        client,
+        settings,
+        "vlan-dialog-hidden-iface",
+        [sync_port(4, "Ethernet4", **port_vlans("tagged", tagged=[932]))],
+        user=user,
+    )
     group = _vlan_group("Verify Hidden Iface")
-    hidden = _tagged_interface(device, "Ethernet4", [_vlan(932, "hidden-iface", group=group)])
-    user = make_user_with_perms("vlan-verify-hidden-user", [("view", Device), ("view", VLANGroup), ("view", VLAN)])
-    client.force_login(grant(user, "view", Interface, constraints={"name": "VisibleOnly"}))
-    body = {
-        "device_id": device.pk,
-        "interface_name": hidden.name,
-        "vid": "932",
-        "vlan_type": "T",
-        "vlan_group_id": group.pk,
-    }
+    hidden = bound_interface(device, "Ethernet4", 4)
+    hidden.mode = "tagged"
+    hidden.save()
+    hidden.tagged_vlans.set([_vlan(932, "hidden-iface", group=group)])
 
-    hidden_answer = _json_post(client, "verify_vlan_group", body).json()
+    hidden_answer = _dialog_vlans(client, device, "4", group_932=str(group.pk))
     hidden.delete()
-    absent_answer = _json_post(client, "verify_vlan_group", body).json()
+    absent_answer = _dialog_vlans(client, device, "4", group_932=str(group.pk))
 
     assert hidden_answer == absent_answer

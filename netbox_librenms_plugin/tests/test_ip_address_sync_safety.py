@@ -1357,20 +1357,11 @@ def test_interface_sync_keeps_its_source_snapshot_and_clears_the_ip_snapshot(
     )
     assert source_cache.read(device, Resource.IP_ADDRESSES, "default") is not None
 
-    interface_sync_url = reverse(
-        "plugins:netbox_librenms_plugin:sync_selected_interfaces",
-        kwargs={"object_type": "device", "object_id": device.pk},
-    )
+    from netbox_librenms_plugin.tests.interface_sync_post_helpers import post_interface_sync, select_interface_rows
+
+    draft = select_interface_rows(client, device, [7016])
     with django_capture_on_commit_callbacks(execute=True):
-        response = client.post(
-            interface_sync_url,
-            {
-                "server_key": "default",
-                "interface_name_field": "ifName",
-                "select": "7016",
-                "exclude_columns": "vlans",
-            },
-        )
+        response = post_interface_sync(client, device, [7016], htmx=False, exclude_columns=("vlans",), draft=draft)
 
     assert response.status_code == 302
     assert source_cache.read(device, Resource.INTERFACES, "default") is not None

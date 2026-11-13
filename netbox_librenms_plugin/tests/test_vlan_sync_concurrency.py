@@ -14,7 +14,12 @@ from django.contrib.auth import get_user_model
 from django.db import close_old_connections, connection
 
 from netbox_librenms_plugin.acquisition.registry import Resource
-from netbox_librenms_plugin.tests.conftest import bounded_executor, make_device, run_in_threads
+from netbox_librenms_plugin.tests.conftest import (
+    bounded_executor,
+    configure_default_librenms_server,
+    make_device,
+    run_in_threads,
+)
 from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_source_snapshot
 from netbox_librenms_plugin.tests.view_test_helpers import (
     assert_locked_before_update,
@@ -22,6 +27,7 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
     make_user_with_perms,
     messages_on,
     post,
+    select_rows,
 )
 
 
@@ -81,7 +87,18 @@ class _GlobalVLANLookupBarrier:
         return result
 
 
-def _sync_global_vlan(device, user, vid, lookup_wrapper):
+def _select_vlan(device, user, vid, librenms_name, *, group=None):
+    """Seed the VLAN snapshot of *device*, then select *vid* (in *group*) in the user's draft; return the draft fields."""
+    from django.test import Client
+
+    seed_source_snapshot(device, Resource.VLANS, "default", vlans=[{"vlan_vlan": vid, "vlan_name": librenms_name}])
+    client = Client()
+    client.force_login(user)
+    choices = [("data-choice-url", {"row": str(vid), "field": "group", "value": str(group.pk)})] if group else []
+    return select_rows(client, device, "vlans", [vid], choices=choices)
+
+
+def _sync_global_vlan(device, user, draft, lookup_wrapper):
     from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
 
     close_old_connections()
@@ -91,22 +108,13 @@ def _sync_global_vlan(device, user, vid, lookup_wrapper):
             cursor.execute("SET statement_timeout = '5s'")
 
         request = make_request(
-            data={
-                "action": "create_vlans",
-                "select": [str(vid)],
-                f"vlan_group_{vid}": "",
-                f"expected_vlan_name_{vid}": "Concurrent global VLAN",
-                "server_key": "default",
-            },
+            data={"action": "create_vlans", "server_key": "default", **draft},
             user=user,
             path="/sync/vlans/",
         )
 
         view = SyncVLANsView()
         view.request = request
-        seed_source_snapshot(
-            device, Resource.VLANS, "default", vlans=[{"vlan_vlan": vid, "vlan_name": "Concurrent global VLAN"}]
-        )
 
         with connection.execute_wrapper(lookup_wrapper):
             view.post(request, object_type="device", object_id=device.pk)
@@ -120,23 +128,25 @@ def _sync_global_vlan(device, user, vid, lookup_wrapper):
     # This is required when another installed plugin has M2M tables outside the default flush list.
     available_apps=[app.name for app in apps.get_app_configs()],
 )
-def test_concurrent_global_vlan_sync_creates_one_vlan():
+def test_concurrent_global_vlan_sync_creates_one_vlan(settings):
     """Two requests that sync the same missing global VID must create one row."""
     from ipam.models import VLAN
 
+    configure_default_librenms_server(settings)
     user = get_user_model().objects.create_user(
         username="global-vlan-concurrency-user",
         password="test-password",
         is_superuser=True,
     )
-    devices = [make_device("global-vlan-device-a"), make_device("global-vlan-device-b")]
+    devices = [make_device(f"global-vlan-device-{tag}", librenms_cf={"default": {"id": 42}}) for tag in ("a", "b")]
+    drafts = [_select_vlan(device, user, 321, "Concurrent global VLAN") for device in devices]
     lookup_barrier = Barrier(2, timeout=10)
     lookup_wrappers = [_GlobalVLANLookupBarrier(lookup_barrier) for _device in devices]
 
     run_in_threads(
         *(
-            partial(_sync_global_vlan, device, user, 321, lookup_wrapper)
-            for device, lookup_wrapper in zip(devices, lookup_wrappers, strict=True)
+            partial(_sync_global_vlan, device, user, draft, lookup_wrapper)
+            for device, draft, lookup_wrapper in zip(devices, drafts, lookup_wrappers, strict=True)
         ),
         barriers=(lookup_barrier,),
         timeout=10,
@@ -146,18 +156,13 @@ def test_concurrent_global_vlan_sync_creates_one_vlan():
     assert VLAN.objects.filter(vid=321, group__isnull=True).count() == 1
 
 
-def _drive_grouped_sync(device, user, group, vid, librenms_name, *, intent=None):
-    """POST one grouped VID into the real view and return the recorded messages."""
+def _drive_grouped_sync(device, user, vid, librenms_name, *, intent=None, draft=None):
+    """POST one grouped VID into the real view, as a confirmation of *intent* or a submit of *draft*; return the messages."""
     from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
 
-    data = {
-        "action": "create_vlans",
-        "select": [str(vid)],
-        f"vlan_group_{vid}": str(group.pk),
-        f"expected_vlan_name_{vid}": librenms_name,
-        "server_key": "default",
-    }
+    data = {"action": "create_vlans", "server_key": "default", **(draft or {})}
     if intent is not None:
+        seed_source_snapshot(device, Resource.VLANS, "default", vlans=[{"vlan_vlan": vid, "vlan_name": librenms_name}])
         data.update(
             {
                 "confirm_conflicts": "1",
@@ -171,7 +176,6 @@ def _drive_grouped_sync(device, user, group, vid, librenms_name, *, intent=None)
         path="/sync/vlans/",
     )
     view = SyncVLANsView()
-    seed_source_snapshot(device, Resource.VLANS, "default", vlans=[{"vlan_vlan": vid, "vlan_name": librenms_name}])
     post(view, request, object_type="device", object_id=device.pk)
     return messages_on(request)
 
@@ -210,7 +214,6 @@ def test_grouped_vlan_row_is_locked_before_the_rename():
         _drive_grouped_sync(
             device,
             user,
-            group,
             vid=41,
             librenms_name="librenms-name",
             intent=intent,
@@ -239,7 +242,6 @@ def test_grouped_vlan_name_collision_is_rejected_without_a_database_error():
     recorded_messages = _drive_grouped_sync(
         device,
         user,
-        group,
         vid=51,
         librenms_name="claimed-name",
         intent=intent,
@@ -278,17 +280,19 @@ class _ScopedVLANReadGate:
     # This is required when another installed plugin has M2M tables outside the default flush list.
     available_apps=[app.name for app in apps.get_app_configs()],
 )
-def test_grouped_vlan_deleted_after_the_scope_check_is_skipped_not_crashed(request):
+def test_grouped_vlan_deleted_after_the_scope_check_is_skipped_not_crashed(request, settings):
     """Verify deleting a grouped VLAN after the scope check skips it instead of raising a failed-update error."""
     from ipam.models import VLAN, VLANGroup
 
-    device = make_device("vlan-relock-delete")
+    configure_default_librenms_server(settings)
+    device = make_device("vlan-relock-delete", librenms_cf={"default": {"id": 42}})
     group = VLANGroup.objects.create(name="Relock-Delete", slug="relock-delete")
     vlan = VLAN.objects.create(vid=42, group=group, name="old-name", status="active")
     user = make_user_with_perms(
         "vlan-relock-delete-user",
         [("view", type(device)), ("view", VLANGroup), ("add", VLAN), ("change", VLAN)],
     )
+    draft = _select_vlan(device, user, 42, "librenms-name", group=group)
 
     with connection.cursor() as cursor:
         cursor.execute("SHOW lock_timeout")
@@ -316,7 +320,7 @@ def test_grouped_vlan_deleted_after_the_scope_check_is_skipped_not_crashed(reque
                 cursor.execute("SET statement_timeout = '10s'")
             thread_user = get_user_model().objects.get(pk=user.pk)
             with connection.execute_wrapper(_ScopedVLANReadGate(read_done, resume)):
-                return _drive_grouped_sync(device, thread_user, group, vid=42, librenms_name="librenms-name")
+                return _drive_grouped_sync(device, thread_user, vid=42, librenms_name="librenms-name", draft=draft)
         finally:
             close_old_connections()
 

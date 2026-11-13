@@ -5,7 +5,7 @@ The relationship column has only ever pointed upward: a row says what it is atta
 aggregate row said nothing about what is attached to *it*, so a paginated table could not answer
 "are ae0's four members here". The downward view is one inversion of the three edge maps the
 snapshot already carries, so the count is complete even when no member is on the page, and the
-table render and the single-row verify read the same definition.
+table render and the row read use the same definition.
 """
 
 import pytest
@@ -335,36 +335,27 @@ class TestTheRealTabRendersIt:
 
 
 @pytest.mark.django_db
-class TestTheVerifyPathAgrees:
-    """A single-row verify re-renders the same cell, so it must re-derive the same badge."""
+class TestTheRowReadAgrees:
+    """A row read re-renders the same cell, so it must re-derive the same badge."""
 
-    def test_an_inline_verify_keeps_the_member_badge(self, client, settings):
-        from django.urls import reverse
+    def test_a_row_read_keeps_the_member_badge(self, client, settings):
+        from html import unescape
 
         from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server
-        from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
+        from netbox_librenms_plugin.tests.view_test_helpers import draft_tab, make_superuser
 
         configure_default_librenms_server(settings)
-        device = make_device("member-badge-verify")
+        device = make_device("member-badge-row-read", librenms_cf={SERVER_KEY: {"id": 42}})
         interface = make_interface(device, "ae0")
         seed_mapping(interface, SERVER_KEY, own=10, save=False)
         interface.save()
         _seed_snapshot(device)
-        client.force_login(make_superuser("member-badge-verify-user"))
+        client.force_login(make_superuser("member-badge-row-read-user"))
+        shown = draft_tab(client, device, "interfaces", interface_name_field="ifName")
 
-        response = client.post(
-            reverse("plugins:netbox_librenms_plugin:verify_interface"),
-            {
-                "device_id": device.pk,
-                "interface_name": "ae0",
-                "interface_name_field": "ifName",
-                "port_id": 10,
-                "server_key": SERVER_KEY,
-            },
-            content_type="application/json",
-        )
+        response = client.get(unescape(shown.rows["10"]["hx-get"]))
 
         assert response.status_code == 200
-        parent_cell = response.json()["formatted_row"]["parent"]
-        assert "</i>2 members</span>" in parent_cell
-        assert "</i>1 sub-interface</span>" in parent_cell
+        row = response.content.decode()
+        assert "</i>2 members</span>" in row
+        assert "</i>1 sub-interface</span>" in row

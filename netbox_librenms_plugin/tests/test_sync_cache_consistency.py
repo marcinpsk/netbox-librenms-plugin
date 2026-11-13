@@ -8,7 +8,7 @@ from unittest.mock import patch
 import pytest
 from dcim.models import Cable, Module, ModuleBay, ModuleBayTemplate, ModuleType
 from django.apps import apps as django_apps
-from django.contrib.auth import get_user_model
+from django.contrib.auth import get_user, get_user_model
 from django.contrib.messages import get_messages
 from django.core.cache import cache, caches
 from django.db import transaction
@@ -61,8 +61,10 @@ from netbox_librenms_plugin.tests.source_snapshot_helpers import (
     stored_source_value,
 )
 from netbox_librenms_plugin.tests.view_test_helpers import (
+    relationship_binding,
     render_module_tab,
     rendered_module_form,
+    select_rows,
     submit_ip_selection,
     write_ip_rows,
 )
@@ -127,10 +129,14 @@ def _cache_key(data_type, obj, server_key):
     return sync_snapshot_key(obj, data_type, server_key)
 
 
-def _vlan_overrides_key(obj, server_key):
-    from netbox_librenms_plugin.sync_cache import sync_vlan_overrides_key
-
-    return sync_vlan_overrides_key(obj, server_key)
+def _selected_interfaces_post(client, owner, port_ids, server_key="primary", **fields):
+    """Select *port_ids* through the interface tab's draft; return the URL and the fields of the sync POST."""
+    draft = select_rows(client, owner, "interfaces", port_ids, server_key=server_key, interface_name_field="ifName")
+    url = reverse(
+        "plugins:netbox_librenms_plugin:sync_selected_interfaces",
+        kwargs={"object_type": owner._meta.model_name, "object_id": owner.pk},
+    )
+    return f"{url}?interface_name_field=ifName", {"server_key": server_key, **draft, **fields}
 
 
 def _seed_snapshot(data_type, obj, server_key, payload=None):
@@ -573,20 +579,10 @@ def test_an_attribute_only_interface_change_schedules_the_cache_transition(
         server_key="primary",
     )
     client.force_login(make_superuser("cache-attr-only-user"))
+    url, data = _selected_interfaces_post(client, device, [7009], exclude_columns="vlans")
 
     with django_capture_on_commit_callbacks(execute=True):
-        response = client.post(
-            reverse(
-                "plugins:netbox_librenms_plugin:sync_selected_interfaces",
-                kwargs={"object_type": "device", "object_id": device.pk},
-            ),
-            {
-                "server_key": "primary",
-                "interface_name_field": "ifName",
-                "select": "7009",
-                "exclude_columns": "vlans",
-            },
-        )
+        response = client.post(url, data)
 
     assert response.status_code == 302
     interface.refresh_from_db()
@@ -625,7 +621,6 @@ def test_committed_interface_sync_invalidates_only_mapped_page_and_shared_snapsh
         ],
         server_key="primary",
     )
-    cache.set(_vlan_overrides_key(page_device, "primary"), {"100": "1"}, timeout=300)
     for data_type in ("links", "inventory", "vlans"):
         _seed_snapshot(data_type, page_device, "primary")
     seed_ip_snapshot(page_device, [], server_key="primary")
@@ -636,31 +631,18 @@ def test_committed_interface_sync_invalidates_only_mapped_page_and_shared_snapsh
     for subject in (page_device, sibling):
         _seed_snapshot("vlans", subject, "secondary")
         seed_ip_snapshot(subject, [], server_key="secondary")
-    cache.set(_vlan_overrides_key(secondary_owner, "secondary"), {"200": "2"}, timeout=300)
 
     for data_type in ("ports", "inventory", "vlans"):
         _seed_snapshot(data_type, page_device, "unmapped")
     seed_ip_snapshot(page_device, [], server_key="unmapped")
 
     client.force_login(make_superuser("cache-scope-user"))
-    sync_url = reverse(
-        "plugins:netbox_librenms_plugin:sync_selected_interfaces",
-        kwargs={"object_type": "device", "object_id": page_device.pk},
-    )
+    sync_url, data = _selected_interfaces_post(client, page_device, [7001], exclude_columns="vlans")
     with django_capture_on_commit_callbacks(execute=True):
-        response = client.post(
-            sync_url,
-            {
-                "server_key": "primary",
-                "interface_name_field": "ifName",
-                "select": "7001",
-                "exclude_columns": "vlans",
-            },
-        )
+        response = client.post(sync_url, data)
 
     assert response.status_code == 302
     assert source_cache.read(page_device, Resource.INTERFACES, "primary") == source
-    assert cache.get(_vlan_overrides_key(page_device, "primary")) == {"100": "1"}
     for data_type in ("links", "ip_addresses", "inventory", "vlans"):
         assert cache.get(_cache_key(data_type, page_device, "primary")) is None
 
@@ -751,23 +733,9 @@ def test_a_sibling_refresh_clears_the_shared_tab_block_on_every_member(
     client.force_login(make_superuser("cache-shared-state-user"))
 
     # The sibling's own sync clears the shared cable snapshot and blocks its cable tab.
-    sync_url = reverse(
-        "plugins:netbox_librenms_plugin:sync_selected_interfaces",
-        kwargs={"object_type": "device", "object_id": sibling.pk},
-    )
+    sync_url, data = _selected_interfaces_post(client, sibling, [7481], exclude_columns="vlans")
     with django_capture_on_commit_callbacks(execute=True):
-        assert (
-            client.post(
-                sync_url,
-                {
-                    "server_key": "primary",
-                    "interface_name_field": "ifName",
-                    "select": "7481",
-                    "exclude_columns": "vlans",
-                },
-            ).status_code
-            == 302
-        )
+        assert client.post(sync_url, data).status_code == 302
     assert cache.get(_cache_key("links", owner, "primary")) is None
 
     status_url = reverse(
@@ -816,18 +784,9 @@ def test_fully_skipped_interface_request_preserves_all_snapshots(client, setting
     ip_snapshot = seed_ip_snapshot(device, [ip_address_row("198.18.20.10", 7010)], server_key="primary")
 
     client.force_login(make_superuser("cache-noop-user"))
-    sync_url = reverse(
-        "plugins:netbox_librenms_plugin:sync_selected_interfaces",
-        kwargs={"object_type": "device", "object_id": device.pk},
-    )
+    sync_url, data = _selected_interfaces_post(client, device, [])
     with django_capture_on_commit_callbacks(execute=True):
-        response = client.post(
-            sync_url,
-            {
-                "server_key": "primary",
-                "interface_name_field": "ifName",
-            },
-        )
+        response = client.post(sync_url, data)
 
     assert response.status_code == 302
     assert source_cache.read(device, Resource.INTERFACES, "primary") == source
@@ -845,7 +804,20 @@ def test_selected_interface_that_already_matches_preserves_other_snapshots(
     device = make_device("cache-interface-unchanged", librenms_cf={"primary": {"id": 52}})
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
     seed_mapping(interface, "primary", own=7002)
-    seed_interfaces_snapshot(device, [{"port_id": 7002, "ifName": interface.name}], server_key="primary")
+    seed_interfaces_snapshot(
+        device,
+        [
+            {
+                **_PORT_KEYS_UNSET,
+                "port_id": 7002,
+                "ifName": interface.name,
+                "ifDescr": interface.name,
+                "ifType": "ethernetCsmacd",
+                "ifAdminStatus": "up",
+            }
+        ],
+        server_key="primary",
+    )
     ip_snapshot = seed_ip_snapshot(
         device,
         [ip_address_row("198.18.20.11", 7002)],
@@ -854,20 +826,14 @@ def test_selected_interface_that_already_matches_preserves_other_snapshots(
     )
 
     client.force_login(make_superuser("cache-interface-unchanged-user"))
-    sync_url = reverse(
-        "plugins:netbox_librenms_plugin:sync_selected_interfaces",
-        kwargs={"object_type": "device", "object_id": device.pk},
+    sync_url, data = _selected_interfaces_post(
+        client,
+        device,
+        [7002],
+        exclude_columns=["name", "type", "speed", "description", "mtu", "enabled", "mac_address", "vlans"],
     )
     with django_capture_on_commit_callbacks(execute=True):
-        response = client.post(
-            sync_url,
-            {
-                "server_key": "primary",
-                "interface_name_field": "ifName",
-                "select": "7002",
-                "exclude_columns": ["name", "type", "speed", "description", "mtu", "enabled", "mac_address", "vlans"],
-            },
-        )
+        response = client.post(sync_url, data)
 
     assert response.status_code == 302
     assert cache.get(_cache_key("ip_addresses", device, "primary")) == ip_snapshot.to_payload()
@@ -983,6 +949,7 @@ def test_htmx_mutation_does_not_repeat_cache_notice_on_next_navigation(client, s
             "server_key": "primary",
             "port_id": "7112",
             "parent_port_id": "7111",
+            **relationship_binding(get_user(client), device, 7112, server_key="primary"),
         },
         HTTP_HX_REQUEST="true",
     )
@@ -1089,17 +1056,9 @@ def test_vlan_sync_invalidates_other_tabs_after_creating_a_vlan(
         "plugins:netbox_librenms_plugin:sync_selected_vlans",
         kwargs={"object_type": "device", "object_id": device.pk},
     )
+    draft = select_rows(client, device, "vlans", [3062], server_key="primary")
     with django_capture_on_commit_callbacks(execute=True):
-        response = client.post(
-            url,
-            {
-                "server_key": "primary",
-                "action": "create_vlans",
-                "select": "3062",
-                "vlan_group_3062": "",
-                "expected_vlan_name_3062": "Cache Test VLAN",
-            },
-        )
+        response = client.post(url, {"server_key": "primary", "action": "create_vlans", **draft})
 
     assert response.status_code == 302
     assert VLAN.objects.filter(vid=3062, name="Cache Test VLAN").exists()
@@ -1760,6 +1719,7 @@ def test_inline_relationship_noop_preserves_other_snapshots(
                 "server_key": "primary",
                 "port_id": "7442",
                 "parent_port_id": "7441",
+                **relationship_binding(get_user(client), device, 7442, server_key="primary"),
             },
         )
 
@@ -2883,21 +2843,10 @@ def test_source_snapshot_expiry_before_commit_callback_is_not_reversed(
     _seed_snapshot("links", device, "primary")
     source_key = _cache_key("ports", device, "primary")
     client.force_login(make_superuser("cache-source-expiry-user"))
-    url = reverse(
-        "plugins:netbox_librenms_plugin:sync_selected_interfaces",
-        kwargs={"object_type": "device", "object_id": device.pk},
-    )
+    url, data = _selected_interfaces_post(client, device, [7361], exclude_columns="vlans")
 
     with django_capture_on_commit_callbacks(execute=True):
-        response = client.post(
-            url,
-            {
-                "server_key": "primary",
-                "interface_name_field": "ifName",
-                "select": "7361",
-                "exclude_columns": "vlans",
-            },
-        )
+        response = client.post(url, data)
         cache.delete(source_key)
 
     assert response.status_code == 302
@@ -3014,10 +2963,8 @@ def test_cache_mutation_resolves_the_shared_owner_once_per_server(
     seed_ip_snapshot(page_device, [], server_key="primary")
 
     client.force_login(make_superuser("cache-owner-resolution-user"))
-    sync_url = reverse(
-        "plugins:netbox_librenms_plugin:sync_selected_interfaces",
-        kwargs={"object_type": "device", "object_id": page_device.pk},
-    )
+    # The selection renders the tab, so it runs before the count starts.
+    sync_url, data = _selected_interfaces_post(client, page_device, [7101], description="owner resolution")
 
     from netbox_librenms_plugin import sync_cache
 
@@ -3030,15 +2977,7 @@ def test_cache_mutation_resolves_the_shared_owner_once_per_server(
 
     monkeypatch.setattr(sync_cache, "get_librenms_sync_device", counting_get_sync_device)
     with django_capture_on_commit_callbacks(execute=True):
-        response = client.post(
-            sync_url,
-            {
-                "server_key": "primary",
-                "interface_name_field": "ifName",
-                "select": "7101",
-                "description": "owner resolution",
-            },
-        )
+        response = client.post(sync_url, data)
 
     assert response.status_code == 302
     assert resolved_server_keys, "the shared owner must still be resolved for the mapped server"

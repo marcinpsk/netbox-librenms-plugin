@@ -282,22 +282,9 @@ def test_a_swap_sends_a_failed_save_again_with_the_latest_choice(page, menu_page
     assert len(saved) == 1
 
 
-# A sub-interface (4302) and the parent it requires (4301).
-TAB_ROWS = (
-    '<tr data-port-id="4301"><td data-col="selection">'
-    '<input type="checkbox" name="select" value="4301" id="cb-4301"></td><td>et-0/0/6</td></tr>'
-    '<tr data-port-id="4302" data-parent-port-id="4301" data-parent-name="et-0/0/6"><td data-col="selection">'
-    '<input type="checkbox" name="select" value="4302" id="cb-4302"></td><td>et-0/0/6.0</td></tr>'
-)
-
-
 def _tab_markup(**menu_state):
-    """The swappable interface tab: the menu and a table whose rows the server renders unchecked."""
-    return (
-        f"{_menu_markup(**menu_state)}"
-        '<table id="librenms-interface-table"><thead><tr><th><input type="checkbox" class="toggle"></th>'
-        f"<th>Name</th></tr></thead><tbody>{TAB_ROWS}</tbody></table>"
-    )
+    """The swappable interface tab: its sync options menu."""
+    return _menu_markup(**menu_state)
 
 
 # Two rows of the IP tab, whose selection the server draft keeps.
@@ -350,36 +337,26 @@ def swap_page(page):
     return _load, _swap
 
 
-def _selected(page):
-    return set(page.evaluate("Array.from(document.querySelectorAll('input[name=select]:checked')).map(cb => cb.value)"))
-
-
-def test_a_stale_swap_does_not_pull_in_a_parent_the_user_turned_auto_select_off_for(page, swap_page):
+def test_a_stale_swap_keeps_auto_select_off_after_the_user_turned_it_off(page, swap_page):
     load, swap = swap_page
     load(_tab_markup())
     page.uncheck("#autoSelectLagMembers")
-    page.check("#cb-4302")
-    assert _selected(page) == {"4302"}
 
     # The swap renders the stored preference from before the save: auto-select on.
     swap(_tab_markup(), "interface-sync-options")
 
     assert not _checked(page, "#autoSelectLagMembers")
-    assert _selected(page) == {"4302"}
 
 
-def test_a_stale_swap_keeps_the_parent_after_reset_turned_auto_select_on(page, swap_page):
+def test_a_stale_swap_keeps_auto_select_on_after_reset_turned_it_on(page, swap_page):
     load, swap = swap_page
     load(_tab_markup(auto_select=False))
     page.click("#reset-interface-sync-options")
-    page.check("#cb-4302")
-    assert _selected(page) == {"4301", "4302"}
 
     # The swap renders the stored preference from before the Reset: auto-select off.
     swap(_tab_markup(auto_select=False), "interface-sync-options")
 
     assert _checked(page, "#autoSelectLagMembers")
-    assert _selected(page) == {"4301", "4302"}
 
 
 def test_a_stale_ip_swap_keeps_the_switches(page, swap_page):

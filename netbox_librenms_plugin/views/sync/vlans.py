@@ -1,3 +1,4 @@
+import json
 from dataclasses import dataclass, field
 
 from dcim.models import Device
@@ -5,7 +6,7 @@ from django.contrib import messages
 from django.core import signing
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
-from django.http import Http404, HttpResponse
+from django.http import Http404
 from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.views import View
@@ -15,17 +16,27 @@ from utilities.exceptions import PermissionsViolation
 from netbox_librenms_plugin import source_cache
 from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.assessment.vlans import assess
+from netbox_librenms_plugin.selection_draft import DraftConflict, Intent, evidence_changed, read_evidence
 from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     apply_request_cache_transition,
     schedule_request_cache_mutation,
 )
 from netbox_librenms_plugin.sync_query import page_query_url
+from netbox_librenms_plugin.sync_rows import RESULTS_STALE_EVENT, REVISION_HEADER
 from netbox_librenms_plugin.transactions import saved_in_scope
 from netbox_librenms_plugin.utils import (
     acquire_advisory_transaction_lock,
     normalize_vlan_vid,
     vlan_source_namer,
+)
+from netbox_librenms_plugin.views.base.vlan_table_view import (
+    VLAN_TAB,
+    approved_vlan_rows,
+    find_vlan_draft,
+    vlan_evidence,
+    vlan_rows,
+    vlan_tab_view,
 )
 from netbox_librenms_plugin.views.object_sync.devices import DeviceLibreNMSSyncView
 from netbox_librenms_plugin.views.mixins import (
@@ -37,6 +48,14 @@ from netbox_librenms_plugin.views.mixins import (
 
 _VID_PREVIEW_LIMIT = 32
 VLAN_CONFLICT_SIGNING_SALT = "netbox_librenms_plugin.vlan_conflict"
+# The submit names another draft or revision than the user's draft has now.
+SELECTION_CHANGED = (
+    "The selection changed in another window, or the VLAN data was refreshed. Review the tab and sync again."
+)
+# Selected rows whose evidence is not the evidence that the user approved; they are put back to select again.
+CHANGED_ROWS = "These VLANs changed after you selected them, so they were not synced. Select them again: {}."
+# A row action of a page that does not show the row as it is now.
+ROW_CHANGED = "The VLAN changed after the page showed it, so it was not synced. Review the row and sync it again."
 
 
 @dataclass
@@ -70,6 +89,8 @@ class _VLANSyncOutcome:
     add_permission_skipped_count: int = 0
     confirmation_error_count: int = 0
     conflicts: list[dict] = field(default_factory=list)
+    # The VIDs whose VLAN now stands as the row asks: a claimed row that is not among them goes back to the draft.
+    written: set[str] = field(default_factory=set)
 
     def success_parts(self):
         """Return summary fragments for successful synchronization outcomes."""
@@ -137,28 +158,23 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
         ],
     }
 
-    def _required_post_permissions(self, request):
-        """Require VLANGroup access when a selected row or a signed intent names a group."""
-        permissions = list(type(self).required_object_permissions["POST"])
-        if self._post_names_a_vlan_group(request):
-            permissions.append(("view", VLANGroup))
-        return permissions
+    def _require_group_permission(self, rows, force_intents):
+        """
+        Return the permission error when a selected row or a signed intent names a VLAN group the user may not view, else None.
 
-    @classmethod
-    def _post_names_a_vlan_group(cls, request):
-        """Report whether this POST targets a VLAN group through a row field or a signed intent."""
-        for vid_str in cls._selected_vlan_vids(request):
-            if request.POST.get(f"vlan_group_{vid_str}"):
-                return True
-        # A confirmation carries its target group in the signed payload, with no companion field.
-        for token in request.POST.getlist("conflict_intent"):
-            try:
-                _vid, payload = cls._load_conflict_intent(token)
-            except (KeyError, TypeError, ValueError, signing.BadSignature, signing.SignatureExpired):
-                continue
-            if payload.get("target_group_id"):
-                return True
-        return False
+        Args:
+            rows (dict[str, dict]): The approved evidence of each selected row by VID.
+            force_intents (dict[str, dict]): The confirmed VLAN changes by VID.
+
+        """
+        if not any(payload.get("group") for payload in rows.values()) and not any(
+            payload.get("target_group_id") for payload in force_intents.values()
+        ):
+            return None
+        self.required_object_permissions = {
+            "POST": [*type(self).required_object_permissions["POST"], ("view", VLANGroup)]
+        }
+        return self.require_all_permissions("POST")
 
     def post(self, request, object_type: str, object_id: int):
         """
@@ -166,8 +182,8 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
 
         Expected POST data:
         - action: 'create_vlans'
-        - select: List of VLAN IDs to create
-        - vlan_group_{vid}: Per-row VLAN group selection
+        - draft_id and expected_revision: the user's draft that the page shows; its rows and groups are the selection
+        - or sync_one with the page's draft and the row's evidence, or the signed confirmations of a disclosure
 
         Args:
             request (HttpRequest): The request that contains the VLAN synchronization data.
@@ -175,15 +191,15 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
             object_id (int): The target object's ID.
 
         Returns:
-            HttpResponse: A permission error, confirmation disclosure, or synchronization redirect.
+            HttpResponse: A permission error, a confirmation disclosure, or the tab answer.
 
         Raises:
             Http404: If the object type is invalid or no permitted device matches the object ID.
 
         """
-        self.required_object_permissions = {"POST": self._required_post_permissions(request)}
+        self.required_object_permissions = {"POST": list(type(self).required_object_permissions["POST"])}
 
-        # Check both plugin write and NetBox object permissions
+        # Check both plugin write and NetBox object permissions; a group grant is checked when a row names a group
         if error := self.require_all_permissions("POST"):
             return error
 
@@ -192,14 +208,14 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
         self._post_server_key = self.rebind_api_for_posted_server(request.POST)
         if self._post_server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
-            return self._redirect(object_type, object_id)
+            return self._tab_answer(object_type, object_id)
         action = request.POST.get("action", "")
 
         if action == "create_vlans":
             return self._handle_create_vlans(request, obj, object_type, object_id)
         else:
             messages.error(request, "Invalid action specified.")
-            return self._redirect(object_type, object_id)
+            return self._tab_answer(object_type, object_id)
 
     def get_object(self, object_type: str, object_id: int):
         """Get the target object (Device or VM)."""
@@ -207,12 +223,34 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
             return self.restrict_object_or_404(Device, pk=object_id)
         raise Http404("Invalid object type.")
 
-    def _redirect(self, object_type: str, object_id: int):
-        """Redirect back to sync page with VLAN tab active."""
-        url = self.get_vlan_tab_url(object_type, object_id)
-        if self.request.htmx:
-            return HttpResponse("", headers={"HX-Redirect": url})
-        return redirect(url)
+    def _redirect(self, object_type, object_id):
+        """Redirect a plain POST to the VLAN tab, with the page query and the server it acted on."""
+        return redirect(self.get_vlan_tab_url(object_type, object_id))
+
+    def _tab_answer(self, object_type, object_id, draft=None):
+        """
+        Answer an action of the VLAN tab: the messages, and the event that makes the page read the tab again.
+
+        The answer names no URL: the page reads its current destination through its navigation scheduler,
+        so a late answer never takes the browser back over a newer navigation. After a claim of *draft*,
+        ``X-Draft-Revision`` names the revision that the claim and the restore left, which the page's draft
+        writer sends with the input made during the submit; without one after a claim (another window
+        changed the draft meanwhile) the page's draft is stale. A plain POST is redirected to the tab.
+        """
+        request = self.request
+        if not request.htmx:
+            return self._redirect(object_type, object_id)
+        response = render(request, "inc/messages.html")
+        # Only the out-of-band messages swap; the target of the posting form stays as it is.
+        response["HX-Reswap"] = "none"
+        trigger = {RESULTS_STALE_EVENT: None}
+        if request.POST.get("force_all") or request.POST.get("confirm_conflicts"):
+            # A confirmation posts from the dialog, which its answer closes.
+            trigger["closeModal"] = None
+        response["HX-Trigger"] = json.dumps(trigger)
+        if draft is not None and not draft.changed_since_claim:
+            response[REVISION_HEADER] = str(draft.revision)
+        return response
 
     def get_vlan_tab_url(self, object_type: str, object_id: int) -> str:
         """Return the URL for the VLAN synchronization tab, with the page query the request carries."""
@@ -336,15 +374,9 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
             ) from exc
         return vlan
 
-    @classmethod
-    def _selected_vlan_vids(cls, request, force_intents=None):
-        """
-        Return the VLAN VIDs this POST selects.
-
-        Pass the validated ``force_intents`` map to get the exact work list. Pass None, before the
-        intents can be validated, to get every VID the POST names: a superset, so the permission gate
-        can never be narrower than the work the request goes on to do.
-        """
+    @staticmethod
+    def _confirmed_vlan_vids(request, force_intents):
+        """Return the VIDs of the signed confirmations that the user confirmed, and every rejected request value."""
 
         def canonicalize(values):
             vids = []
@@ -359,33 +391,12 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
                     vids.append(canonical)
             return _SelectedVLANVIDs(vids, list(dict.fromkeys(errors)))
 
-        if force_intents is None:
-            named_vids = request.POST.getlist("select")
-            if "sync_one" in request.POST:
-                named_vids.append(request.POST.get("sync_one"))
-            named_vids.extend(request.POST.getlist("force_conflict"))
-            for token in request.POST.getlist("conflict_intent"):
-                try:
-                    vid, _payload = cls._load_conflict_intent(token)
-                    named_vids.append(vid)
-                except (KeyError, TypeError, ValueError, signing.BadSignature, signing.SignatureExpired):
-                    continue
-            return canonicalize(named_vids)
-
         if request.POST.get("force_all"):
             return canonicalize(force_intents)
-        if request.POST.get("confirm_conflicts"):
-            confirmed = canonicalize(request.POST.getlist("force_conflict"))
-            return _SelectedVLANVIDs(
-                [vid for vid in force_intents if vid in set(confirmed.vids)],
-                confirmed.errors,
-            )
-        if "sync_one" in request.POST:
-            return canonicalize([request.POST.get("sync_one")])
-        return canonicalize(request.POST.getlist("select"))
+        confirmed = canonicalize(request.POST.getlist("force_conflict"))
+        return _SelectedVLANVIDs([vid for vid in force_intents if vid in set(confirmed.vids)], confirmed.errors)
 
-    @staticmethod
-    def _selected_global_vids(request, selected_vlans, librenms_vlans, force_intents):
+    def _selected_global_vids(self, selected_vlans, librenms_vlans, force_intents):
         """Return selected global VIDs that require advisory transaction locks."""
         global_vids = []
         for vid_str in selected_vlans:
@@ -395,11 +406,10 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
             force_payload = force_intents.get(str(vid))
             if force_payload is not None:
                 target_group_id = force_payload.get("target_group_id")
+            elif (approval := self._approved.get(str(vid))) is not None:
+                target_group_id = approval["group"]
             else:
-                group_field = f"vlan_group_{vid}"
-                if group_field not in request.POST:
-                    continue
-                target_group_id = request.POST.get(group_field)
+                continue
             if vid in librenms_vlans and not target_group_id:
                 global_vids.append(vid)
         return global_vids
@@ -409,15 +419,8 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
         if force_payload is not None:
             group_id = force_payload.get("target_group_id")
         else:
-            group_field = f"vlan_group_{vid}"
-            if group_field not in request.POST:
-                messages.error(
-                    request,
-                    f"VLAN {vid}: the VLAN group selection is missing. Refresh the VLAN data and try again.",
-                )
-                outcome.group_missing_count += 1
-                return None, False
-            group_id = request.POST.get(group_field)
+            # The group that the user approved with the row.
+            group_id = self._approved[str(vid)]["group"]
         if group_id is None or group_id == "":
             return None, True
 
@@ -452,10 +455,9 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
             return None
         return name
 
-    @staticmethod
-    def _name_is_the_displayed_name(request, vid, name, outcome):
-        """Return whether the page showed *name* for this VID, so a rule change never writes an unseen name."""
-        if request.POST.get(f"expected_vlan_name_{vid}") == name:
+    def _name_is_the_displayed_name(self, request, vid, name, outcome):
+        """Return whether the user approved *name* for this VID, so a rule change never writes an unseen name."""
+        if self._approved[str(vid)]["name"] == name:
             return True
         messages.error(
             request,
@@ -647,6 +649,7 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
 
         if created:
             outcome.created_count += 1
+            outcome.written.add(str(vid))
         elif vlan.name != name:
             outcome.conflicts.append(
                 self._build_conflict(
@@ -659,6 +662,7 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
             )
         else:
             outcome.skipped_count += 1
+            outcome.written.add(str(vid))
 
     @staticmethod
     def _report_outcome(request, outcome):
@@ -672,11 +676,14 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
         elif not outcome.conflicts:
             messages.warning(request, "No VLANs were created or updated.")
 
-    def _handle_create_vlans(self, request, obj, object_type, object_id):
+    def _handle_create_vlans(self, request, obj, object_type, object_id):  # noqa: C901
         """
         Create selected VLANs and disclose name changes that require confirmation.
 
-        Reads per-row VLAN group selections from form fields named 'vlan_group_{vid}'.
+        A bulk submit takes the selected rows of the user's draft (a claim), writes each row whose evidence
+        is still the evidence the user approved (its group and its proposed name), and puts back every
+        claimed row it did not write. ``sync_one`` writes the one row that its page shows and leaves the
+        draft as it is. ``force_all``/``confirm_conflicts`` write the rows of their signed confirmations.
 
         Args:
             request (HttpRequest): The request that contains the selected VLAN data.
@@ -685,7 +692,7 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
             object_id (int): The target object's ID.
 
         Returns:
-            HttpResponse: A confirmation disclosure or redirect to the VLAN synchronization page.
+            HttpResponse: A confirmation disclosure or the tab answer.
 
         """
         force_intents, intent_errors = self._load_force_intents(
@@ -694,27 +701,63 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
             object_type,
             self._post_server_key,
         )
-        selection = self._selected_vlan_vids(request, force_intents)
-        selected_vlans = selection.vids
         outcome = _VLANSyncOutcome()
+        # The draft, the evidence check and the writer read this one snapshot.
+        snapshot = source_cache.read(obj, Resource.VLANS, self._post_server_key)
+        draft = claim = None
+        self._approved = {}
+        if request.POST.get("force_all") or request.POST.get("confirm_conflicts"):
+            selection = self._confirmed_vlan_vids(request, force_intents)
+        elif snapshot is None:
+            messages.error(request, "No cached VLAN data. Please refresh VLANs first.")
+            return self._tab_answer(object_type, object_id)
+        elif (sync_one := request.POST.get("sync_one")) is not None:
+            self._approved = self._displayed_row(request, obj, snapshot, sync_one)
+            if not self._approved:
+                messages.error(request, ROW_CHANGED)
+                return self._tab_answer(object_type, object_id)
+            selection = _SelectedVLANVIDs(list(self._approved), [])
+        else:
+            draft = find_vlan_draft(request, obj, self._post_server_key, snapshot)
+            try:
+                if draft is None:
+                    raise DraftConflict("A newer snapshot replaced the draft.")
+                claim = draft.claim(str(request.POST.get("draft_id")), int(request.POST.get("expected_revision")))
+            except (DraftConflict, TypeError, ValueError):
+                messages.error(request, SELECTION_CHANGED)
+                return self._tab_answer(object_type, object_id)
+            self._approved = self._approved_rows(request, obj, snapshot, claim)
+            selection = _SelectedVLANVIDs(list(self._approved), [])
+        claimed = draft if claim is not None else None
+
+        def restore(written=frozenset()):
+            if claim is not None:
+                draft.restore(claim, set(claim.entries) - set(written))
+
+        if error := self._require_group_permission(self._approved, force_intents):
+            restore()
+            return error
+        selected_vlans = selection.vids
         # Count rejections before the empty-selection exit, so an all-invalid request keeps its summary.
         for error in dict.fromkeys(selection.errors):
             messages.error(request, error)
             outcome.invalid_vid_count += 1
 
         if not selected_vlans:
+            restore()
             for error in dict.fromkeys(intent_errors):
                 messages.error(request, error)
             if selection.errors:
                 self._report_outcome(request, outcome)
-            elif not intent_errors:
+            elif not intent_errors and (
+                claim is None or not any(e.intent is Intent.ON for e in claim.entries.values())
+            ):
                 messages.error(request, "No VLAN changes selected.")
-            return self._redirect(object_type, object_id)
+            return self._tab_answer(object_type, object_id, claimed)
 
-        snapshot = source_cache.read(obj, Resource.VLANS, self._post_server_key)
         if snapshot is None:
             messages.error(request, "No cached VLAN data. Please refresh VLANs first.")
-            return self._redirect(object_type, object_id)
+            return self._tab_answer(object_type, object_id)
 
         assessment = assess(snapshot, subject=obj, lookup_maps={})
         librenms_vlans, invalid_rows = assessment.source_by_vid, assessment.invalid_rows
@@ -724,22 +767,29 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
         changeable_vlans = self.restricted_queryset(VLAN, "change")
         source_name = vlan_source_namer(obj)
 
-        with transaction.atomic():
-            global_vids = self._selected_global_vids(request, selected_vlans, librenms_vlans, force_intents)
-            _acquire_global_vlan_locks(global_vids)
-            for vid_str in selected_vlans:
-                self._sync_selected_vlan(
-                    request,
-                    vid_str=vid_str,
-                    librenms_vlans=librenms_vlans,
-                    source_name=source_name,
-                    duplicate_source_vids=duplicate_source_vids,
-                    force_intents=force_intents,
-                    changeable_vlans=changeable_vlans,
-                    obj=obj,
-                    object_type=object_type,
-                    outcome=outcome,
-                )
+        try:
+            with transaction.atomic():
+                global_vids = self._selected_global_vids(selected_vlans, librenms_vlans, force_intents)
+                _acquire_global_vlan_locks(global_vids)
+                for vid_str in selected_vlans:
+                    self._sync_selected_vlan(
+                        request,
+                        vid_str=vid_str,
+                        librenms_vlans=librenms_vlans,
+                        source_name=source_name,
+                        duplicate_source_vids=duplicate_source_vids,
+                        force_intents=force_intents,
+                        changeable_vlans=changeable_vlans,
+                        obj=obj,
+                        object_type=object_type,
+                        outcome=outcome,
+                    )
+        except Exception:
+            # The transaction wrote nothing, so the claimed rows go back as the user left them.
+            restore()
+            raise
+        # A row that wrote nothing, a choice and a disclosed rename stay in the draft for the next submit.
+        restore(outcome.written)
 
         self._report_outcome(request, outcome)
 
@@ -755,7 +805,51 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
                 source_fragment_required=bool(outcome.conflicts),
             )
         if outcome.conflicts:
-            return apply_request_cache_transition(
-                request, self._render_conflicts(request, outcome.conflicts, obj, object_type, object_id)
-            )
-        return apply_request_cache_transition(request, self._redirect(object_type, object_id))
+            response = self._render_conflicts(request, outcome.conflicts, obj, object_type, object_id)
+            if claimed is not None:
+                # The claim changed the draft, so the tab behind the dialog reads its results again.
+                response["HX-Trigger"] = json.dumps({RESULTS_STALE_EVENT: None})
+                if not claimed.changed_since_claim:
+                    response[REVISION_HEADER] = str(claimed.revision)
+            return apply_request_cache_transition(request, response)
+        return apply_request_cache_transition(request, self._tab_answer(object_type, object_id, claimed))
+
+    def _displayed_row(self, request, obj, snapshot, raw_vid):
+        """
+        Return ``{vid: evidence}`` of a row action whose page shows the row as it is now, else an empty dict.
+
+        The action posts the draft ID and revision of its page and the row's evidence token. Another draft
+        or revision, or evidence that is not the row's current evidence, writes nothing.
+        """
+        server_key = self._post_server_key
+        draft = find_vlan_draft(request, obj, server_key, snapshot)
+        vid = normalize_vlan_vid(raw_vid)
+        try:
+            shown = (str(request.POST.get("draft_id")), int(request.POST.get("expected_revision")))
+            payload = read_evidence(VLAN_TAB, request.POST.get("evidence") or "")
+        except (TypeError, ValueError, signing.BadSignature):
+            return {}
+        if draft is None or vid is None or shown != (draft.draft_id, draft.revision):
+            return {}
+        vlan_groups, lookup_maps = vlan_tab_view(request, obj, server_key).vlan_groups_and_maps(request, obj)
+        key = str(vid)
+        row = next(
+            (row for row in vlan_rows(obj, snapshot, draft.entries(), lookup_maps) if row["vlan_id"] == vid), None
+        )
+        if (
+            row is None
+            or row.get("vid_error")
+            or evidence_changed(payload, vlan_evidence(obj, server_key, row, vlan_groups))
+        ):
+            return {}
+        return {key: payload}
+
+    def _approved_rows(self, request, obj, snapshot, claim):
+        """Return the approved evidence of each claimed selected row whose evidence is still current; one message names the rest."""
+        server_key = self._post_server_key
+        vlan_groups, lookup_maps = vlan_tab_view(request, obj, server_key).vlan_groups_and_maps(request, obj)
+        rows = vlan_rows(obj, snapshot, claim.entries, lookup_maps)
+        approved, changed = approved_vlan_rows(obj, server_key, rows, vlan_groups, claim.entries)
+        if changed:
+            messages.warning(request, CHANGED_ROWS.format(", ".join(changed)))
+        return approved

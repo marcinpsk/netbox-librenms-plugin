@@ -30,6 +30,7 @@ from netbox_librenms_plugin.tests.interface_sync_post_helpers import (
     count_sync_attempts,
     post_interface_sync,
     seed_ports,
+    select_interface_rows,
     sync_port,
     synced_interface,
 )
@@ -95,9 +96,11 @@ def test_a_row_is_locked_only_when_it_changes_and_in_the_mode_of_its_update(clie
     synced_interface(device, "eth10", 10)
     seed_ports(device, [port])
     client.force_login(make_superuser("late-lock-user"))
+    # Selected first, so the captured queries are the queries of the sync POST only.
+    draft = select_interface_rows(client, device, [10])
 
     with CaptureQueriesContext(connection) as queries:
-        response = post_interface_sync(client, device, [10], htmx=False, exclude_columns=())
+        response = post_interface_sync(client, device, [10], htmx=False, exclude_columns=(), draft=draft)
 
     assert [text for level, text in messages_on(response.wsgi_request) if level == "success"] == [SYNCED]
     assert _interface_row_locks(queries) == locks
@@ -121,9 +124,11 @@ def test_a_row_is_serialized_for_the_change_log_only_when_it_changes(client, por
     synced_interface(device, "eth10", 10)
     seed_ports(device, [port])
     client.force_login(make_superuser("late-lock-change-log-user"))
+    # Selected first, so the captured queries are the queries of the sync POST only.
+    draft = select_interface_rows(client, device, [10])
 
     with CaptureQueriesContext(connection) as queries:
-        response = post_interface_sync(client, device, [10], htmx=False, exclude_columns=())
+        response = post_interface_sync(client, device, [10], htmx=False, exclude_columns=(), draft=draft)
 
     assert [text for level, text in messages_on(response.wsgi_request) if level == "success"] == [SYNCED]
     reads = [
@@ -151,6 +156,8 @@ def _run_schedule(client, device, interface, hold_sql, *, exclude_columns):
     """
     sync_pid = backend_pid(connection)
     held = Event()
+    # Selected before the other session takes its lock, so only the sync POST meets it.
+    draft = select_interface_rows(client, device, [10])
 
     def hold_then_update():
         with second_connection() as other:
@@ -166,7 +173,9 @@ def _run_schedule(client, device, interface, hold_sql, *, exclude_columns):
         holder = executor.submit(hold_then_update)
         assert held.wait(5), "the other session did not take its lock"
         with raised_sqlstates() as sqlstates:
-            response = post_interface_sync(client, device, [10], htmx=False, exclude_columns=exclude_columns)
+            response = post_interface_sync(
+                client, device, [10], htmx=False, exclude_columns=exclude_columns, draft=draft
+            )
         holder.result(timeout=10)
     return response, sqlstates
 

@@ -9,7 +9,7 @@ from netbox_librenms_plugin.middleware import REQUEST_FAILED_EVENT
 from netbox_librenms_plugin.tests.conftest import make_interface
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_interfaces_snapshot
-from netbox_librenms_plugin.tests.view_test_helpers import messages_on
+from netbox_librenms_plugin.tests.view_test_helpers import messages_on, select_rows
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
 SERVER_KEY = "default"
@@ -72,6 +72,51 @@ def sync_page(owner):
     return "http://testserver" + reverse(url_name, kwargs={"pk": owner.pk}) + "?tab=interfaces"
 
 
+def interface_choices(*, members=None, vlan_groups=None):
+    """
+    Return the draft commands that choose rows' members and VLAN groups, for :func:`select_interface_rows`.
+
+    Args:
+        members (dict | None): The member pk to choose for each port ID.
+        vlan_groups (dict | None): The VLAN group pk ("" is Global) of each VID to choose for each port ID.
+
+    Returns:
+        list[tuple[str, dict]]: The table attribute of each command URL and its fields.
+
+    """
+    commands = [
+        ("data-choice-url", {"row": str(port_id), "field": "member", "value": str(member)})
+        for port_id, member in (members or {}).items()
+    ]
+    commands += [
+        ("data-vlan-groups-url", {"row": str(port_id), **{f"group_{vid}": str(group) for vid, group in groups.items()}})
+        for port_id, groups in (vlan_groups or {}).items()
+    ]
+    return commands
+
+
+def select_interface_rows(
+    client, owner, port_ids, *, interface_name_field="ifName", members=None, vlan_groups=None, states=None
+):
+    """
+    Choose and select *port_ids* in the user's interface draft of *owner* as the page does.
+
+    Returns:
+        dict[str, str]: The ``draft_id`` and ``expected_revision`` that the sync form posts.
+
+    """
+    return select_rows(
+        client,
+        owner,
+        "interfaces",
+        port_ids,
+        server_key=SERVER_KEY,
+        choices=interface_choices(members=members, vlan_groups=vlan_groups),
+        states=states,
+        interface_name_field=interface_name_field,
+    )
+
+
 def post_interface_sync(
     client,
     owner,
@@ -80,9 +125,24 @@ def post_interface_sync(
     htmx,
     exclude_columns=("vlans", "mac_address"),
     interface_name_field="ifName",
+    members=None,
+    vlan_groups=None,
+    states=None,
+    draft=None,
     extra=None,
 ):
-    """Post the interface sync form of *owner* for *port_ids*; *extra* adds form fields such as a row's target device."""
+    """
+    Select *port_ids* through the tab's draft, then post the interface sync form of *owner*, as the page does.
+
+    Args:
+        members (dict | None): The member pk to choose for each port ID first.
+        vlan_groups (dict | None): The VLAN groups to choose for each port ID first, ``{vid: group pk}``.
+        states (dict | None): Other intents by port ID, for example ``{12: "off"}``.
+        draft (dict | None): The ``draft_id`` and ``expected_revision`` of an earlier :func:`select_interface_rows`;
+            then the helper selects nothing.
+        extra (dict | None): More form fields, for example ``auto_select_lag_members``.
+
+    """
     url = (
         reverse(
             "plugins:netbox_librenms_plugin:sync_selected_interfaces",
@@ -93,12 +153,17 @@ def post_interface_sync(
     headers = {"HTTP_REFERER": sync_page(owner)}
     if htmx:
         headers["HTTP_HX_REQUEST"] = "true"
-    data = {
-        "server_key": SERVER_KEY,
-        "select": [str(port_id) for port_id in port_ids],
-        "exclude_columns": list(exclude_columns),
-        **(extra or {}),
-    }
+    if draft is None:
+        draft = select_interface_rows(
+            client,
+            owner,
+            port_ids,
+            interface_name_field=interface_name_field,
+            members=members,
+            vlan_groups=vlan_groups,
+            states=states,
+        )
+    data = {"server_key": SERVER_KEY, **draft, "exclude_columns": list(exclude_columns), **(extra or {})}
     return client.post(url, data, **headers)
 
 
