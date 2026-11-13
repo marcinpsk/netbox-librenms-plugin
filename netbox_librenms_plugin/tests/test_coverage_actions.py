@@ -5447,7 +5447,7 @@ class TestDeviceConflictActionBranches:
         assert response.headers.get("HX-Reswap") == "none"
         assert _SERIAL_MATCH_LOST.encode() in response.content
         assert f"{target.name}-twin".encode() not in response.content
-        assert stored_mapping_for_test(Device.objects.get(pk=target.pk)) is None
+        assert mapping_summary(Device.objects.get(pk=target.pk)) == {}
 
     def test_a_serial_match_that_still_holds_links_the_device(self):
         from dcim.models import Device
@@ -5460,7 +5460,7 @@ class TestDeviceConflictActionBranches:
         response = post_view(view, self._request("link", target, f"{target.name}-user"), device_id=42)
 
         self._assert_success(response)
-        assert stored_mapping_for_test(Device.objects.get(pk=target.pk)) == {self.server_key: 42}
+        assert mapping_summary(Device.objects.get(pk=target.pk)) == {self.server_key: {"own": 42}}
 
     @pytest.mark.parametrize("keeps_match", [False, True], ids=["other-maker", "same-maker"])
     def test_a_forced_serial_match_link_saves_only_a_type_that_keeps_the_match(self, keeps_match):
@@ -6041,7 +6041,7 @@ class TestDeviceConflictActionBranches:
 
         view = self._make_view()
         tag = f"branches-retype-{action}".replace("_", "-")
-        target = make_device(tag, serial="XABC", librenms_cf={self.server_key: 42})
+        target = seed_mapping(make_device(tag, serial="XABC"), self.server_key, own=42)
         NormalizationRule.objects.create(
             scope="serial", match_pattern=r"^X(AB)C$", replacement=r"\1", manufacturer=target.device_type.manufacturer
         )
@@ -6121,7 +6121,7 @@ class TestDeviceConflictActionBranches:
 
         view = self._make_view()
         tag = f"branches-retype-{shape}"
-        target = make_device(tag, librenms_cf={self.server_key: 42})
+        target = seed_mapping(make_device(tag), self.server_key, own=42)
         new_maker = Manufacturer.objects.create(name=f"Retype {shape}", slug=f"{tag}-maker")
         _retype_shape(target, shape, new_maker)
         new_type = DeviceType.objects.create(
@@ -6144,10 +6144,8 @@ class TestDeviceConflictActionBranches:
         from netbox_librenms_plugin.models import NormalizationRule
 
         view = self._make_view()
-        target = make_device(
-            f"branches-type-serial-{action}".replace("_", "-"),
-            serial="BEFORE123",
-            librenms_cf={self.server_key: 42},
+        target = seed_mapping(
+            make_device(f"branches-type-serial-{action}".replace("_", "-"), serial="BEFORE123"), self.server_key, own=42
         )
         NormalizationRule.objects.create(
             scope="serial",
@@ -8327,8 +8325,8 @@ class TestAddAsOOBViewPost:
 
         _seed_decorated_serial_rule()
         view = self._make_view()
-        existing_device = make_device(
-            f"oob-serial-lost-{change}", serial="OOB-SERIAL-LOST", librenms_cf={self.server_key: {"id": 10}}
+        existing_device = seed_mapping(
+            make_device(f"oob-serial-lost-{change}", serial="OOB-SERIAL-LOST"), self.server_key, own=10
         )
         self._register_oob_device(17, "controller-node", serial=existing_device.serial, generic=True)
         user = make_view_user(
@@ -8348,7 +8346,7 @@ class TestAddAsOOBViewPost:
         assert response["HX-Reswap"] == "none"
         assert _SERIAL_MATCH_LOST.encode() in response.content
         assert f"{existing_device.name}-twin".encode() not in response.content
-        assert stored_mapping_for_test(Device.objects.get(pk=existing_device.pk)) == {self.server_key: {"id": 10}}
+        assert mapping_summary(Device.objects.get(pk=existing_device.pk)) == {self.server_key: {"own": 10}}
 
     def test_existing_different_oob_ip_kept_but_user_warned(self):
         """A different existing oob_ip is kept, but a deferred WARNING tells the user it was not changed."""
@@ -8876,8 +8874,8 @@ class TestPromoteToHostViewPost:
 
         _seed_decorated_serial_rule()
         view = self._make_view()
-        existing_device = make_device(
-            f"promote-serial-lost-{change}", serial="PROMOTE-SERIAL-LOST", librenms_cf={self.server_key: {"id": 10}}
+        existing_device = seed_mapping(
+            make_device(f"promote-serial-lost-{change}", serial="PROMOTE-SERIAL-LOST"), self.server_key, own=10
         )
         self._register_host_device(17, f"promote-serial-lost-{change}-host", serial=existing_device.serial)
         user = make_view_user(
@@ -8897,7 +8895,7 @@ class TestPromoteToHostViewPost:
         assert response["HX-Reswap"] == "none"
         assert _SERIAL_MATCH_LOST.encode() in response.content
         assert f"{existing_device.name}-twin".encode() not in response.content
-        assert stored_mapping_for_test(Device.objects.get(pk=existing_device.pk)) == {self.server_key: {"id": 10}}
+        assert mapping_summary(Device.objects.get(pk=existing_device.pk)) == {self.server_key: {"own": 10}}
 
     @pytest.mark.parametrize("keeps_match", [False, True], ids=["other-maker", "same-maker"])
     def test_a_type_override_promotes_only_when_the_new_type_keeps_the_serial_match(self, keeps_match):
@@ -9414,9 +9412,9 @@ class TestMergeNetBoxDevicesViewFailClosed(_MergeViewHarness):
         from netbox_librenms_plugin.views.imports.actions import _SERIAL_MATCH_LOST
 
         _seed_decorated_serial_rule()
-        winner = make_device(f"merge-serial-lost-{change}-winner", librenms_cf={self.server_key: {"id": 20}})
-        donor = make_device(
-            f"merge-serial-lost-{change}-donor", serial="MERGE-SERIAL-LOST", librenms_cf={self.server_key: {"id": 10}}
+        winner = seed_mapping(make_device(f"merge-serial-lost-{change}-winner"), self.server_key, own=20)
+        donor = seed_mapping(
+            make_device(f"merge-serial-lost-{change}-donor", serial="MERGE-SERIAL-LOST"), self.server_key, own=10
         )
 
         user = make_view_user(
@@ -9430,7 +9428,7 @@ class TestMergeNetBoxDevicesViewFailClosed(_MergeViewHarness):
         assert resp["HX-Reswap"] == "none"
         assert _SERIAL_MATCH_LOST.encode() in resp.content
         assert f"{donor.name}-twin".encode() not in resp.content
-        assert stored_mapping_for_test(Device.objects.get(pk=donor.pk))[self.server_key] == {"id": 10}
+        assert mapping_summary(Device.objects.get(pk=donor.pk))[self.server_key] == {"own": 10}
 
     def test_orphan_host_id_merge_fails_closed_and_leaves_donor_unmigrated(self):
         """A winner holding both host id + oob and a donor with a distinct host-id-only link fails closed."""
