@@ -1422,8 +1422,14 @@ def claim_librenms_port_binding(port_id, server_key, *, using=None):
         raise recorded_conflict(LibreNMSPortBindingBusy())
 
 
-def _device_identity_owner(server_key, librenms_id, *, exclude_model=None, exclude_pk=None):
-    """Return a Device or VM, other than the excluded row, that owns the identity; read in new statements."""
+def device_identity_owner(server_key, librenms_id, *, exclude_model=None, exclude_pk=None):
+    """
+    Return a Device or VM, other than the excluded row, that owns the identity; read in new statements.
+
+    Raises:
+        AmbiguousLibreNMSIdError: More than one object of a model owns the identity.
+
+    """
     from dcim.models import Device
     from virtualization.models import VirtualMachine
 
@@ -1471,7 +1477,7 @@ def lock_librenms_id_assignment(librenms_id, server_key: str, *, owner_queryset=
     if owner_queryset is not None:
         owner_model = owner_queryset.model
         locked_owner = owner_queryset.select_for_update(of=("self",)).get(pk=owner_pk)
-    conflict = _device_identity_owner(
+    conflict = device_identity_owner(
         normalized_server_key, normalized_id, exclude_model=owner_model, exclude_pk=owner_pk
     )
     return locked_owner, conflict
@@ -1494,7 +1500,7 @@ def _take_claim(claim) -> None:
 
 def _check_owner(claim, row) -> None:
     if claim.space is IdentitySpace.DEVICE:
-        owner = _device_identity_owner(claim.server, claim.identity, exclude_model=type(row), exclude_pk=row.pk)
+        owner = device_identity_owner(claim.server, claim.identity, exclude_model=type(row), exclude_pk=row.pk)
         if owner is not None:
             raise IdentityOwned(owner, claim.identity, claim.server)
         return
@@ -1603,27 +1609,3 @@ def persist_merge(change: MergeChange, *, write: Callable[[], object]):
         if progress.written != {id(change.winner), id(change.donor)}:
             raise RuntimeError("A merge must save its winner and its donor once each.")
     return result
-
-
-def can_store_device_mapping(obj) -> bool:
-    """Return whether *obj* is a saved Device or VirtualMachine that has the mapping custom field."""
-    from dcim.models import Device
-    from virtualization.models import VirtualMachine
-
-    return (
-        isinstance(obj, (Device, VirtualMachine))
-        and obj.pk is not None
-        and not obj._state.adding
-        and _MAPPING_KEY in obj.cf
-    )
-
-
-def copy_persisted_mapping(source, target) -> None:
-    """
-    Copy only the mapping of *source*, a later read of the same row, onto *target*; save nothing.
-
-    Target keeps every other custom field, also one it changed and did not save.
-    """
-    if type(source) is not type(target) or source.pk is None or source.pk != target.pk:
-        raise ValueError("A mapping copies only between two reads of one row.")
-    _put_stored_value(target, _stored_value(source))

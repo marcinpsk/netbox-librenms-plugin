@@ -152,6 +152,8 @@ def pytest_generate_tests(metafunc):
             "SetPreferredServerView",
             "EditServerMappingView",
             "ConvertLegacyLibreNMSIdView",
+            "MappingLifecycleView",
+            "BulkLinkView",
         }:
             variants.append(("virtualmachine", {}))
         if name == "AddBayTemplateView":
@@ -410,7 +412,16 @@ class TestConfirmationInventory:
         assert declared
         assert declared <= intent.registered_actions()
         assert declared <= set(SCENARIOS)
-        # A resource with a registered action has no view left in the inventory.
-        assert {resource for resource, _action in intent.registered_actions()} & set(
-            MIGRATION_INVENTORY.values()
-        ) == set()
+
+    def test_a_view_leaves_the_inventory_when_it_migrates(self):
+        """The rule is per view: other views of a migrated view's resource may stay in the inventory."""
+        from netbox_librenms_plugin import confirmation_intent as intent
+
+        migrated = {
+            name
+            for name, cls in _confirmation_views().items()
+            if isinstance(getattr(cls, "confirmation_policy", None), intent.RoutePolicy)
+        }
+        assert {"SyncVLANsView", "MappingLifecycleView", "BulkLinkView"} <= migrated
+        assert migrated & set(MIGRATION_INVENTORY) == set()
+        assert {"RemoveServerMappingView", "AddAsOOBView", "ConvertLegacyLibreNMSIdView"} <= set(MIGRATION_INVENTORY)

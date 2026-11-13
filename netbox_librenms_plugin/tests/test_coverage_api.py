@@ -9,14 +9,6 @@ import pytest
 
 from netbox_librenms_plugin.assessment.interfaces import parse_port_vlan_data
 from netbox_librenms_plugin.server_mappings import read_mapping
-from netbox_librenms_plugin.tests.mapping_fixtures import (
-    mapping_summary,
-    seed_mapping,
-    seed_mapping_row,
-    seed_stored_mapping,
-    seed_stored_mapping_row,
-    stored_mapping_for_test,
-)
 
 
 def configure_servers(settings, servers):
@@ -247,58 +239,6 @@ class TestGetAvailableServersLegacy:
         configure_legacy(settings, url, token=token)
 
         assert LibreNMSAPI.get_available_servers() == {}
-
-
-@pytest.mark.django_db
-class TestGetLibreNMSIdDictServerKey:
-    """get_librenms_id reads and writes real per-server device mappings."""
-
-    def test_dict_cf_uses_the_client_server_key(self, settings, librenms_server):
-        """The client returns the mapping for its bound server."""
-        from netbox_librenms_plugin.tests.conftest import make_device
-
-        device = seed_stored_mapping(make_device("mapped-device"), {"primary": "23", "secondary": 47}, save=True)
-        api = api_for(settings, librenms_server.url, key="primary")
-
-        assert api.get_librenms_id(device) == 23
-        device.refresh_from_db()
-        assert stored_mapping_for_test(device)["primary"] == "23"
-
-    def test_zero_mapping_is_ignored_and_discovered(self, settings, librenms_server):
-        """A zero mapping is invalid, so hostname discovery replaces it."""
-        from dcim.models import Device
-
-        from netbox_librenms_plugin.tests.conftest import make_device
-
-        device = seed_stored_mapping(make_device("stored-zero-device"), {"default": 0}, save=True)
-        librenms_server.register(
-            "/api/v0/devices/stored-zero-device",
-            {"status": "ok", "devices": [{"device_id": 31}]},
-            method="GET",
-        )
-
-        result = api_for(settings, librenms_server.url).get_librenms_id(device)
-
-        assert result == 31
-        assert mapping_summary(Device.objects.get(pk=device.pk))["default"] == {"own": 31}
-
-    def test_store_librenms_id_via_hostname_lookup(self, settings, librenms_server):
-        """A hostname lookup writes only the bound server mapping."""
-        from dcim.models import Device
-
-        from netbox_librenms_plugin.tests.conftest import make_device
-
-        device = seed_mapping(make_device("hostname-device"), "default", own=11)
-        librenms_server.register(
-            "/api/v0/devices/hostname-device",
-            {"status": "ok", "devices": [{"device_id": 42}]},
-            method="GET",
-        )
-
-        result = api_for(settings, librenms_server.url, key="primary").get_librenms_id(device)
-
-        assert result == 42
-        assert mapping_summary(Device.objects.get(pk=device.pk)) == {"default": {"own": 11}, "primary": {"own": 42}}
 
 
 # Each read endpoint, its route, accepted body, expected value, query, and HTTP error details.
@@ -773,273 +713,50 @@ class TestUpdateDeviceFieldErrors:
         assert msg
 
 
-class TestGetDeviceIdByIPErrors:
-    """get_device_id_by_ip handles real lookup and failure responses."""
-
-    IP = "198.18.0.10"
-    ROUTE = f"/api/v0/devices/{IP}"
-
-    def test_success_returns_device_id(self, settings, librenms_server):
-        """A device response returns its ID."""
-        librenms_server.register(self.ROUTE, {"devices": [{"device_id": 37}]}, method="GET")
-
-        assert api_for(settings, librenms_server.url).get_device_id_by_ip(self.IP) == 37
-
-    def test_request_exception_returns_none(self, settings, librenms_server):
-        """A refused connection returns no device ID."""
-        api = api_for(settings, librenms_server.url)
-        librenms_server.stop()
-
-        assert api.get_device_id_by_ip(self.IP) is None
-
-    def test_non_200_returns_none(self, settings, librenms_server):
-        """A 404 response returns no device ID."""
-        librenms_server.register(self.ROUTE, {"status": "error"}, status=404, method="GET")
-
-        assert api_for(settings, librenms_server.url).get_device_id_by_ip(self.IP) is None
-
-    def test_null_devices_field_returns_none(self, settings, librenms_server):
-        """A null devices field returns no device ID."""
-        librenms_server.register(self.ROUTE, {"devices": None}, method="GET")
-
-        assert api_for(settings, librenms_server.url).get_device_id_by_ip(self.IP) is None
-
-    def test_empty_devices_list_returns_none(self, settings, librenms_server):
-        """An empty devices list returns no device ID."""
-        librenms_server.register(self.ROUTE, {"devices": []}, method="GET")
-
-        assert api_for(settings, librenms_server.url).get_device_id_by_ip(self.IP) is None
-
-
-class TestGetDeviceIdByHostnameErrors:
-    """get_device_id_by_hostname handles real lookup and failure responses."""
-
-    HOSTNAME = "router01"
-    ROUTE = f"/api/v0/devices/{HOSTNAME}"
-
-    def test_success_returns_device_id(self, settings, librenms_server):
-        """A device response returns its ID."""
-        librenms_server.register(self.ROUTE, {"devices": [{"device_id": 41}]}, method="GET")
-
-        assert api_for(settings, librenms_server.url).get_device_id_by_hostname(self.HOSTNAME) == 41
-
-    def test_request_exception_returns_none(self, settings, librenms_server):
-        """A refused connection returns no device ID."""
-        api = api_for(settings, librenms_server.url)
-        librenms_server.stop()
-
-        assert api.get_device_id_by_hostname(self.HOSTNAME) is None
-
-    def test_null_devices_field_returns_none(self, settings, librenms_server):
-        """A null devices field returns no device ID."""
-        librenms_server.register(self.ROUTE, {"devices": None}, method="GET")
-
-        assert api_for(settings, librenms_server.url).get_device_id_by_hostname(self.HOSTNAME) is None
-
-    def test_empty_devices_list_returns_none(self, settings, librenms_server):
-        """An empty devices list returns no device ID."""
-        librenms_server.register(self.ROUTE, {"devices": []}, method="GET")
-
-        assert api_for(settings, librenms_server.url).get_device_id_by_hostname(self.HOSTNAME) is None
-
-
 @pytest.mark.django_db
-class TestStorelibrenmsId:
-    """_store_librenms_id persists to a real device mapping or the real cache."""
+@pytest.mark.parametrize("stored", [0, 42.0, True], ids=["zero", "float", "bool"])
+def test_a_stored_id_that_the_reader_refuses_is_no_link_and_the_link_replaces_it(
+    client, settings, librenms_server, stored
+):
+    """Python finds 42.0 == 42 and True == 1, but the reader refuses them, so the page proposes a match to link."""
+    from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
+    from netbox_librenms_plugin.tests.link_intent_helpers import link, page_token, register_match
+    from netbox_librenms_plugin.tests.mapping_fixtures import mapping_summary, seed_stored_mapping
 
-    def test_stores_via_custom_field_when_cf_has_key(self, settings, librenms_server):
-        """An existing mapping field stores the ID in the database."""
-        from dcim.models import Device
+    api = api_for(settings, librenms_server.url)
+    device = seed_stored_mapping(make_device(f"link-bad-stored-{stored!r}"), {api.server_key: stored}, save=True)
+    register_match(librenms_server, device.name, 9700, hostname=device.name)
+    client.force_login(make_superuser("link-bad-stored-user"))
 
-        from netbox_librenms_plugin.tests.conftest import make_device
+    link(client, device, [page_token(client, device)], server_key=api.server_key)
 
-        device = make_device("store-mapped-device")
-        api = api_for(settings, librenms_server.url)
-
-        api._store_librenms_id(device, 42)
-
-        assert mapping_summary(Device.objects.get(pk=device.pk))["default"] == {"own": 42}
-
-    def test_storing_the_mapping_keeps_the_caller_s_other_unsaved_custom_fields(self, settings, librenms_server):
-        """The claim reads a second row, so copying its whole field data would drop unsaved edits."""
-        from django.contrib.contenttypes.models import ContentType
-        from extras.models import CustomField
-
-        from dcim.models import Device
-
-        from netbox_librenms_plugin.tests.conftest import make_device
-
-        note = CustomField.objects.create(name="store_note", type="text")
-        note.object_types.set([ContentType.objects.get_for_model(Device)])
-        device = make_device("store-preserves-other-cf")
-        # An edit the caller has not saved yet, exactly what a view holds while it resolves an ID.
-        device.custom_field_data["store_note"] = "unsaved"
-        api = api_for(settings, librenms_server.url)
-
-        api._store_librenms_id(device, 42)
-
-        assert device.custom_field_data["store_note"] == "unsaved"
-        assert mapping_summary(device)["default"] == {"own": 42}
-        assert mapping_summary(Device.objects.get(pk=device.pk))["default"] == {"own": 42}
-
-    def test_the_store_builds_on_the_locked_row_not_the_callers_older_read(self, settings, librenms_server):
-        """A mapping that another operation added after the caller's read stays, and reaches the caller too."""
-        from dcim.models import Device
-
-        from netbox_librenms_plugin.tests.conftest import make_device
-
-        device = make_device("store-after-a-concurrent-link")
-        seed_mapping_row(device, seed_mapping(type(device)(), "secondary", own=77, save=False))
-        api = api_for(settings, librenms_server.url)
-
-        api._store_librenms_id(device, 42)
-
-        expected = {"default": {"own": 42}, "secondary": {"own": 77}}
-        assert mapping_summary(Device.objects.get(pk=device.pk)) == expected
-        assert mapping_summary(device) == expected
-
-    @pytest.mark.parametrize(
-        ("stored", "librenms_id"),
-        [
-            ({"default": 42.0}, 42),
-            ({"default": True}, 1),
-            ({"default": {"id": 42.0, "oob": {"id": 7}}}, 42),
-        ],
-    )
-    def test_the_store_repairs_a_stored_id_that_only_compares_equal(
-        self, settings, librenms_server, stored, librenms_id
-    ):
-        """Python finds 42.0 == 42 and True == 1, but the reader rejects the stored float and bool."""
-        from dcim.models import Device
-
-        from netbox_librenms_plugin.server_mappings import read_mapping
-        from netbox_librenms_plugin.tests.conftest import make_device
-
-        device = make_device("store-repairs-a-look-alike")
-        seed_stored_mapping_row(device, stored)
-        device.refresh_from_db()
-        api = api_for(settings, librenms_server.url)
-
-        api._store_librenms_id(device, librenms_id)
-
-        assert read_mapping(Device.objects.get(pk=device.pk)).own_id("default") == librenms_id
-        assert read_mapping(device).own_id("default") == librenms_id
-
-    def test_a_read_after_the_store_sees_the_mapping_on_the_callers_instance(self, settings, librenms_server):
-        """The store copies the mapping onto the caller's object, and no earlier snapshot hides it."""
-        from netbox_librenms_plugin.server_mappings import read_mapping
-        from netbox_librenms_plugin.tests.conftest import make_device
-
-        device = make_device("store-then-read")
-        api = api_for(settings, librenms_server.url)
-        before = read_mapping(device)
-
-        api._store_librenms_id(device, 42)
-
-        assert before.own_id("default") is None
-        assert read_mapping(device).own_id("default") == 42
-        assert api.get_stored_librenms_id(device) == 42
-
-    def test_an_owner_deleted_mid_claim_reports_a_lookup_error_not_a_500(self, settings, librenms_server):
-        """A concurrent delete leaves no row for the claim to lock, which must not reach the view."""
-        from dcim.models import Device
-
-        from netbox_librenms_plugin.tests.conftest import make_device
-
-        device = make_device("store-owner-deleted")
-        # The row vanishes after the caller loaded the object, exactly what a concurrent delete
-        # leaves behind: a live instance whose pk no longer resolves.
-        Device.objects.filter(pk=device.pk).delete()
-        api = api_for(settings, librenms_server.url)
-
-        from netbox_librenms_plugin.librenms_api import LibreNMSIDConflictError
-
-        with pytest.raises(LibreNMSIDConflictError) as excinfo:
-            api._store_librenms_id(device, 42)
-
-        assert "no longer exists" in str(excinfo.value)
-
-    def test_stores_in_cache_when_the_custom_field_is_absent(self, settings, librenms_server):
-        """Only a NetBox without the plugin custom field reaches the cache fallback."""
-        from django.core.cache import cache
-        from extras.models import CustomField
-
-        from netbox_librenms_plugin.server_mappings import can_store_device_mapping
-        from netbox_librenms_plugin.tests.conftest import make_device
-
-        device = make_device("store-cached-device")
-        # The plugin migration gives every Device and VM this field, so the fallback below is
-        # unreachable until the field is gone.
-        CustomField.objects.filter(name="librenms_id").delete()
-        device.refresh_from_db()
-        assert not can_store_device_mapping(device)
-
-        api = api_for(settings, librenms_server.url)
-        cache_key = api._get_cache_key(device)
-
-        api._store_librenms_id(device, 42)
-
-        assert cache.get(cache_key) == 42
-        assert api.server_key in cache_key
-
-    def test_interface_id_is_cached_without_claiming_a_device_mapping(self, settings, librenms_server):
-        """An interface port ID must not conflict with the same numeric device ID."""
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
-
-        device = seed_mapping(make_device("store-interface-owner"), "default", own=42)
-        interface = make_interface(device, "Ethernet1")
-        api = api_for(settings, librenms_server.url)
-        cache_key = api._get_cache_key(interface)
-
-        api._store_librenms_id(interface, 42)
-
-        interface.refresh_from_db()
-        assert mapping_summary(interface) == {}
-        assert cache.get(cache_key) == 42
-
-    def test_unsaved_device_id_is_cached_without_row_locking(self, settings, librenms_server):
-        """An unsaved object has no row that the assignment path can lock."""
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.tests.conftest import make_device
-
-        device = make_device("store-unsaved-device")
-        device.pk = None
-        device._state.adding = True
-        api = api_for(settings, librenms_server.url)
-        cache_key = api._get_cache_key(device)
-
-        api._store_librenms_id(device, 43)
-
-        assert f"unsaved-{id(device)}" not in cache_key
-        assert api._get_cache_key(device) == cache_key
-        assert cache.get(cache_key) == 43
+    device.refresh_from_db()
+    assert mapping_summary(device) == {api.server_key: {"own": 9700}}
 
 
 @pytest.mark.django_db(transaction=True)
-def test_discovered_mapping_and_vm_import_serialize_one_librenms_id_claim(settings, librenms_server):
-    """Concurrent API discovery and VM import must leave one owner for an ID."""
+def test_a_confirmed_link_and_a_vm_import_serialize_one_librenms_id_claim(settings, librenms_server):
+    """A Link of a device and an import of a VM with the same ID must leave one owner."""
+    from django.test import Client
     from virtualization.models import VirtualMachine
 
     from netbox_librenms_plugin.import_utils.vm_operations import create_vm_from_librenms
-    from netbox_librenms_plugin.server_mappings import IDENTITY_BUSY_MESSAGE, IdentityBusy
+    from netbox_librenms_plugin.server_mappings import IdentityBusy
     from netbox_librenms_plugin.tests.claim_race_helpers import run_librenms_id_claim_race
-    from netbox_librenms_plugin.tests.conftest import make_cluster, make_device
+    from netbox_librenms_plugin.tests.conftest import make_cluster, make_device, make_superuser
+    from netbox_librenms_plugin.tests.link_intent_helpers import link, page_token, register_match
 
     api = api_for(settings, librenms_server.url)
-    device = make_device("discovered-claim-race-device")
-    cluster = make_cluster("discovered-claim-race-cluster")
+    device = make_device("linked-claim-race-device")
+    cluster = make_cluster("linked-claim-race-cluster")
     librenms_id = 61003
+    register_match(librenms_server, device.name, librenms_id, hostname=device.name)
+    client = Client()
+    client.force_login(make_superuser("linked-claim-race-user"))
+    token = page_token(client, device)
 
-    def store_discovered_mapping():
-        try:
-            api._store_librenms_id(device, librenms_id)
-        except (ValueError, IdentityBusy) as exc:
-            refusals.append(str(exc))
-            return False
-        return True
+    def link_device():
+        return link(client, device, [token], server_key=api.server_key)
 
     def import_vm():
         validation = {
@@ -1051,30 +768,23 @@ def test_discovered_mapping_and_vm_import_serialize_one_librenms_id_claim(settin
             create_vm_from_librenms(
                 {
                     "device_id": librenms_id,
-                    "hostname": "discovered-claim-race-vm",
-                    "_computed_name": "discovered-claim-race-vm",
+                    "hostname": "linked-claim-race-vm",
+                    "_computed_name": "linked-claim-race-vm",
                 },
                 validation,
                 server_key=api.server_key,
             )
-        except (ValueError, IdentityBusy) as exc:
-            refusals.append(str(exc))
+        except (ValueError, IdentityBusy):
             return False
         return True
 
-    refusals = []
-    outcomes, claim_keys = run_librenms_id_claim_race(store_discovered_mapping, import_vm)
+    _outcomes, claim_keys = run_librenms_id_claim_race(link_device, import_vm)
 
     device.refresh_from_db()
-    vm = VirtualMachine.objects.filter(name="discovered-claim-race-vm").first()
+    vm = VirtualMachine.objects.filter(name="linked-claim-race-vm").first()
     owners = [device] if vm is None else [device, vm]
-    assert len(claim_keys) == 2
     assert len(set(claim_keys)) == 1
-    assert sorted(outcomes) == [False, True]
     assert sum(read_mapping(owner).own_id(api.server_key) == librenms_id for owner in owners) == 1
-    # The claim does not wait: the loser is busy while the winner holds it, else it finds the owner.
-    assert len(refusals) == 1
-    assert refusals[0] == IDENTITY_BUSY_MESSAGE or "already assigned" in refusals[0]
 
 
 class TestParsePortVlanData:

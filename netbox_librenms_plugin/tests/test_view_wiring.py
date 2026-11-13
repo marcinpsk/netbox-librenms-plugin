@@ -410,11 +410,11 @@ class TestGenericViewPermissionWiring:
 
 
 @pytest.mark.django_db
-class TestStatusListsShowABusyClaimAsUnknown:
-    """A row whose discovery meets another operation's claim is Unknown; the other rows keep their status."""
+class TestStatusListsMatchWithoutClaiming:
+    """Matching only proposes, so an identity claim that another operation holds changes nothing on the list."""
 
     @pytest.mark.parametrize("object_type", ["device", "vm"])
-    def test_a_busy_row_is_unknown_with_one_warning(self, client, live_librenms, object_type):
+    def test_a_held_claim_leaves_the_match_proposed_and_the_rows_unchanged(self, client, live_librenms, object_type):
         from django.urls import reverse
 
         from netbox_librenms_plugin.tests.claim_race_helpers import held_device_claim
@@ -436,12 +436,12 @@ class TestStatusListsShowABusyClaimAsUnknown:
         with held_device_claim("default", 5301):
             response = client.get(reverse(f"plugins:netbox_librenms_plugin:{url_name}"), {"q": prefix})
 
-        statuses = {row.record.pk: row.record.librenms_status for row in response.context["table"].rows}
+        table = response.context["table"]
+        statuses = {row.record.pk: row.record.librenms_status for row in table.rows}
         assert response.status_code == 200
-        assert statuses == {busy.pk: None, found.pk: True, missing.pk: False}
-        assert message_texts(response.wsgi_request, level="warning") == [
-            "Another operation is linking some of these objects. Refresh to see their status."
-        ]
+        assert statuses == {busy.pk: None, found.pk: "linked", missing.pk: None}
+        assert {pk: row.state for pk, row in table.link_rows.items()} == {busy.pk: "match", missing.pk: "no_match"}
+        assert message_texts(response.wsgi_request, level="warning") == []
         busy.refresh_from_db()
         assert mapping_summary(busy) == {}
 

@@ -17,8 +17,9 @@ from django.core import signing
 from ipam.models import VLAN, VLANGroup
 
 from netbox_librenms_plugin import confirmation_intent as intent
+from netbox_librenms_plugin.tests import link_intent_helpers as links
 from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, make_device
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import mapping_summary, seed_mapping, seed_quarantined
 from netbox_librenms_plugin.tests.view_test_helpers import domain_state, make_user_with_perms
 from netbox_librenms_plugin.tests.vlan_intent_helpers import message_texts, reassess, seed_vlans, sync, tab_tokens
 
@@ -44,10 +45,11 @@ class _VLANScenario:
     """One device whose source snapshot holds VID 100 and VID 200, one VLAN group, and a user who may sync."""
 
     resource = intent.Resource.VLAN
+    permissions = VLAN_PERMISSIONS
     vid = 100
     confirm = False
 
-    def __init__(self, tag, client):
+    def __init__(self, tag, client, settings, librenms_server):
         self.tag = tag
         self.client = client
         self.device = seed_mapping(make_device(f"contract-{tag}"), "default", own=42)
@@ -71,8 +73,34 @@ class _VLANScenario:
         )
         seed_vlans(device or self.device, rows, server_key)
 
-    def submit(self, tokens, *, device=None, server_key="default"):
-        return sync(self.client, device or self.device, tokens, confirm=self.confirm, server_key=server_key)
+    def submit(self, tokens, *, subject=None, server_key="default"):
+        return sync(self.client, subject or self.device, tokens, confirm=self.confirm, server_key=server_key)
+
+    def stale_paths(self, response):
+        return _stale_paths(response, self.vid)
+
+    def other_subject(self):
+        other = seed_mapping(make_device(f"other-subject-{self.tag}"), "default", own=43)
+        self.seed(device=other)
+        return other
+
+    def prepare_server(self, server_key):
+        self.seed(server_key=server_key)
+
+    def legacy_tokens(self):
+        legacy = signing.dumps(
+            {
+                "vid": self.vid,
+                "object_type": "device",
+                "object_pk": str(self.device.pk),
+                "server_key": "default",
+                "target_group_id": self.group.pk,
+                "proposed_name": self.source_name,
+            },
+            salt="netbox_librenms_plugin.vlan_conflict",
+            compress=True,
+        )
+        return [legacy, f"vlan:{legacy}"]
 
     def change_source_name(self):
         self.source_name = "staff"
@@ -197,9 +225,103 @@ class _VLANUpdateScenario(_VLANScenario):
         self.vlan.delete()
 
 
+class _LinkScenario:
+    """An unlinked device whose primary IP the LibreNMS fake matches as device 7100, and a user who may link it."""
+
+    resource = intent.Resource.MAPPING_LIFECYCLE
+    action = "link"
+    permissions = [("view", Device), ("change", Device)]
+    librenms_id = 7100
+    relevant = {
+        "primary_ip_changed": "assumptions.inputs.primary_ip4.address",
+        "another_object_took_the_id": "assumptions.owned",
+        "linked_meanwhile": "assumptions.own_id",
+        "stored_value_invalid": "assumptions.linkable",
+    }
+    unrelated = ("name_changed", "description_changed", "another_id_taken", "other_server_linked")
+    target_gone_path = "assumptions.inputs.primary_ip4"
+    revoked = "change"
+
+    def __init__(self, tag, client, settings, librenms_server):
+        self.tag = tag
+        self.client = client
+        self.server = librenms_server
+        url = librenms_server.url
+        configure_librenms_servers(
+            settings, {key: {"librenms_url": url, "api_token": "test-token"} for key in ("default", "other")}
+        )
+        self.device = make_device(f"contract-{tag}")
+        self.ip = links.give_primary_ip(self.device, "198.51.100.10/24")
+        links.register_match(librenms_server, "198.51.100.10", self.librenms_id)
+        self.user = make_user_with_perms(f"contract-{tag}", self.permissions)
+        client.force_login(self.user)
+
+    def mint(self):
+        return links.page_token(self.client, self.device)
+
+    def submit(self, tokens, *, subject=None, server_key="default"):
+        return links.link(self.client, subject or self.device, tokens, server_key=server_key)
+
+    def applied(self):
+        self.device.refresh_from_db()
+        return mapping_summary(self.device).get("default", {}).get("own") == self.librenms_id
+
+    def stale_paths(self, response):
+        return links.stale_paths(response, self.device.name)
+
+    def change(self, name):
+        from ipam.models import IPAddress
+
+        if name == "primary_ip_changed":
+            IPAddress.objects.filter(pk=self.ip.pk).update(address="198.51.100.11/24")
+        elif name == "another_object_took_the_id":
+            seed_mapping(make_device(f"owner-{self.tag}"), "default", own=self.librenms_id)
+        elif name == "linked_meanwhile":
+            seed_mapping(Device.objects.get(pk=self.device.pk), "default", own=self.librenms_id + 1)
+        elif name == "stored_value_invalid":
+            seed_quarantined(Device.objects.get(pk=self.device.pk))
+        elif name == "name_changed":
+            Device.objects.filter(pk=self.device.pk).update(name=f"renamed-{self.tag}")
+            self.device.name = f"renamed-{self.tag}"
+        elif name == "description_changed":
+            Device.objects.filter(pk=self.device.pk).update(description="changed")
+        elif name == "another_id_taken":
+            seed_mapping(make_device(f"unrelated-{self.tag}"), "default", own=self.librenms_id + 2)
+        elif name == "other_server_linked":
+            seed_mapping(Device.objects.get(pk=self.device.pk), "other", own=self.librenms_id)
+        else:
+            raise AssertionError(name)
+
+    def remove_target(self):
+        self.ip.delete()
+
+    def revoke(self, action):
+        from users.models import ObjectPermission
+
+        ObjectPermission.objects.filter(users=self.user, actions=[action], object_types__model="device").delete()
+
+    def other_subject(self):
+        other = make_device(f"other-subject-{self.tag}")
+        links.give_primary_ip(other, "198.51.100.20/24")
+        links.register_match(self.server, "198.51.100.20", self.librenms_id + 3)
+        return other
+
+    def prepare_server(self, server_key):
+        pass
+
+    def legacy_tokens(self):
+        legacy = signing.dumps(
+            {"object_pk": self.device.pk, "librenms_id": self.librenms_id, "server_key": "default"},
+            salt="netbox_librenms_plugin.librenms_id",
+            compress=True,
+        )
+        return [legacy, f"mapping_lifecycle:{legacy}"]
+
+
 SCENARIOS = {
     (intent.Resource.VLAN, "create"): _VLANCreateScenario,
     (intent.Resource.VLAN, "update"): _VLANUpdateScenario,
+    (intent.Resource.MAPPING_LIFECYCLE, "link"): _LinkScenario,
 }
 ACTION_IDS = {key: f"{key[0]}.{key[1]}" for key in SCENARIOS}
 
@@ -214,11 +336,11 @@ def _facts(kind):
 
 
 @pytest.fixture
-def scenario_for(client, settings):
+def scenario_for(client, settings, librenms_server):
     configure_librenms_servers(settings, SERVERS)
 
     def build(key, tag=None):
-        return SCENARIOS[key](tag or ACTION_IDS[key].replace(".", "-"), client)
+        return SCENARIOS[key](tag or ACTION_IDS[key].replace(".", "-"), client, settings, librenms_server)
 
     return build
 
@@ -242,10 +364,14 @@ def _stale_paths(response, vid):
 
 
 def _resign(token, change):
-    _prefix, _separator, signed = token.partition(":")
-    envelope = signing.loads(signed, salt=f"{intent.SALT_NAMESPACE}:vlan")
+    prefix, _separator, signed = token.partition(":")
+    envelope = signing.loads(signed, salt=f"{intent.SALT_NAMESPACE}:{prefix}")
     change(envelope)
-    return f"vlan:{signing.dumps(envelope, salt=f'{intent.SALT_NAMESPACE}:vlan', compress=True)}"
+    return f"{prefix}:{signing.dumps(envelope, salt=f'{intent.SALT_NAMESPACE}:{prefix}', compress=True)}"
+
+
+def _foreign_resource(resource):
+    return intent.Resource.IP_ADDRESS if resource is not intent.Resource.IP_ADDRESS else intent.Resource.VLAN
 
 
 def test_every_registered_action_has_one_scenario():
@@ -265,7 +391,7 @@ class TestContract:
 
         response = scenario.submit([scenario.mint()])
 
-        assert response.status_code == 200
+        assert response.status_code in (200, 302)
         assert scenario.applied()
 
     @_facts("relevant")
@@ -276,7 +402,7 @@ class TestContract:
 
         response = _assert_refused(scenario, [token])
 
-        assert SCENARIOS[key].relevant[fact] in _stale_paths(response, scenario.vid)
+        assert SCENARIOS[key].relevant[fact] in scenario.stale_paths(response)
 
     @_facts("unrelated")
     def test_an_unrelated_change_still_applies(self, scenario_for, key, fact):
@@ -296,7 +422,7 @@ class TestContract:
 
         response = _assert_refused(scenario, [token])
 
-        assert scenario.target_gone_path in _stale_paths(response, scenario.vid)
+        assert scenario.target_gone_path in scenario.stale_paths(response)
 
     @_actions()
     def test_an_expired_approval_refuses(self, scenario_for, key, monkeypatch):
@@ -318,19 +444,20 @@ class TestContract:
     def test_a_cross_resource_token_refuses(self, scenario_for, key):
         scenario = scenario_for(key)
         token = scenario.mint()
-        _prefix, _separator, signed = token.partition(":")
-        envelope = signing.loads(signed, salt=f"{intent.SALT_NAMESPACE}:vlan")
-        foreign = signing.dumps(envelope, salt=f"{intent.SALT_NAMESPACE}:ip_address", compress=True)
+        prefix, _separator, signed = token.partition(":")
+        other = _foreign_resource(scenario.resource).value
+        envelope = signing.loads(signed, salt=f"{intent.SALT_NAMESPACE}:{prefix}")
+        foreign = signing.dumps(envelope, salt=f"{intent.SALT_NAMESPACE}:{other}", compress=True)
 
-        _assert_refused(scenario, [f"ip_address:{signed}"])
-        _assert_refused(scenario, [f"ip_address:{foreign}"])
-        _assert_refused(scenario, [f"vlan:{foreign}"])
+        _assert_refused(scenario, [f"{other}:{signed}"])
+        _assert_refused(scenario, [f"{other}:{foreign}"])
+        _assert_refused(scenario, [f"{prefix}:{foreign}"])
 
     @_actions()
     def test_another_actor_refuses(self, scenario_for, key, client):
         scenario = scenario_for(key)
         token = scenario.mint()
-        client.force_login(make_user_with_perms(f"other-actor-{scenario.tag}", VLAN_PERMISSIONS))
+        client.force_login(make_user_with_perms(f"other-actor-{scenario.tag}", scenario.permissions))
 
         _assert_refused(scenario, [token])
 
@@ -338,16 +465,15 @@ class TestContract:
     def test_another_subject_refuses(self, scenario_for, key):
         scenario = scenario_for(key)
         token = scenario.mint()
-        other = seed_mapping(make_device(f"other-subject-{scenario.tag}"), "default", own=43)
-        scenario.seed(device=other)
+        other = scenario.other_subject()
 
-        _assert_refused(scenario, [token], device=other)
+        _assert_refused(scenario, [token], subject=other)
 
     @_actions()
     def test_another_server_refuses(self, scenario_for, key):
         scenario = scenario_for(key)
         token = scenario.mint()
-        scenario.seed(server_key="other")
+        scenario.prepare_server("other")
 
         _assert_refused(scenario, [token], server_key="other")
 
@@ -355,7 +481,7 @@ class TestContract:
     def test_another_action_refuses(self, scenario_for, key):
         scenario = scenario_for(key)
         token = scenario.mint()
-        others = sorted({action for _resource, action in SCENARIOS} - {key[1]}) + ["delete"]
+        others = sorted({action for _resource, action in SCENARIOS} - {key[1]}) + ["delete", "unlink"]
 
         for other in others:
             _assert_refused(scenario, [_resign(token, lambda envelope, other=other: envelope.update(action=other))])
@@ -379,21 +505,9 @@ class TestContract:
     def test_a_legacy_token_refuses(self, scenario_for, key):
         scenario = scenario_for(key)
         scenario.mint()
-        legacy = signing.dumps(
-            {
-                "vid": scenario.vid,
-                "object_type": "device",
-                "object_pk": str(scenario.device.pk),
-                "server_key": "default",
-                "target_group_id": scenario.group.pk,
-                "proposed_name": scenario.source_name,
-            },
-            salt="netbox_librenms_plugin.vlan_conflict",
-            compress=True,
-        )
 
-        _assert_refused(scenario, [legacy])
-        _assert_refused(scenario, [f"vlan:{legacy}"])
+        for legacy in scenario.legacy_tokens():
+            _assert_refused(scenario, [legacy])
 
     @_actions()
     def test_a_revoked_permission_refuses(self, scenario_for, key):
@@ -544,6 +658,19 @@ class TestDependentVLANOperations:
         texts = message_texts(response)
         assert any(text.startswith("VLAN 200: ") and "add permission" in text for text in texts)
         assert any(text.startswith("VLAN 100: ") and "group failed" in text for text in texts)
+
+    def test_a_rolled_back_group_sends_no_event(self, client, settings, flushed_events):
+        """The rename wrote and the create was refused; both roll back, so neither save's event is sent."""
+        from netbox_librenms_plugin.tests.view_test_helpers import grant
+
+        permissions = [permission for permission in VLAN_PERMISSIONS if permission != ("add", VLAN)]
+        case = _DependentRename(client, settings, "rollback-events", permissions)
+        client.force_login(grant(case.user, "add", VLAN, constraints={"vid": 999}))
+
+        sync(client, case.device, [case.rename, case.create], confirm=True)
+
+        assert case.names() == {100: "users"}
+        assert flushed_events == []
 
     def test_an_unconfirmed_group_is_disclosed_whole_and_its_tokens_apply_it(self, client, settings):
         case = _DependentRename(client, settings, "disclosure")

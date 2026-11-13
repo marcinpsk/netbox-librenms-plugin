@@ -304,8 +304,8 @@
 {% if not migrated_to_marker and not is_vc_member or not migrated_to_marker and object.pk == librenms_sync_device.pk %}
 <!-- Device Status and Sync Cards Side by Side -->
 <div class="row mb-3">
-    <!-- Left: Device Status Card (Smaller) -->
-    <div class="col-md-3">
+    <!-- Left: Device Status Card; wider for a proposed match, which has no sync card beside it -->
+    <div class="{% if link %}col-md-6{% else %}col-md-3{% endif %}">
         <div class="card">
             <h5 class="card-header d-flex justify-content-between align-items-center">
                 LibreNMS Status
@@ -322,17 +322,22 @@
                         <tr>
                             <th scope="row" style="width: 40%; padding-left: 1rem;">Status</th>
                             <td>
-                                <span class="{% if device_info_unavailable %}text-warning{% elif found_in_librenms %}text-success{% else %}text-danger{% endif %}">
+                                <span class="{% if device_info_unavailable %}text-warning{% elif found_in_librenms %}text-success{% elif link %}text-secondary{% else %}text-danger{% endif %}">
                                     {% if device_info_unavailable %}
                                     <i class="mdi mdi-alert-circle-outline"></i> Details unavailable
                                     {% elif found_in_librenms %}
                                     <i class="mdi mdi-check-circle"></i> Found
+                                    {% elif link %}
+                                    <i class="mdi mdi-link-variant-off"></i> Not linked
                                     {% else %}
                                     <i class="mdi mdi-close-circle"></i> Not found
                                     {% endif %}
                                 </span>
                             </td>
                         </tr>
+                        {% if link %}
+                        {% include "netbox_librenms_plugin/inc/_link_match_rows.html" %}
+                        {% endif %}
 
                         {% if found_in_librenms %}
                         <!-- LibreNMS ID Row -->
@@ -483,7 +488,7 @@
                                 </a>
                             </td>
                         </tr>
-                        {% elif not device_info_unavailable %}
+                        {% elif show_add_device %}
                         <!-- Add to LibreNMS -->
                         <tr>
                             <th scope="row" style="padding-left: 1rem;">Action</th>
@@ -766,7 +771,7 @@
         </div>
     </div>
     {% endif %}
-{% elif librenms_device_id or migrated_to_marker or librenms_lookup_error %}
+{% elif librenms_device_id or migrated_to_marker %}
 {% comment %}
 A migrated donor has its active librenms_id cleared (so it is never found_in_librenms), but the
 banner above directs the user to the per-row "Move to winner" actions that live in these tabs.
@@ -783,19 +788,12 @@ that may well be correct.
     <div>
         <strong>LibreNMS lookup failed:</strong>
         {{ librenms_lookup_error.message }}
-        {% if librenms_device_id %}
         Whether LibreNMS has the device with <code>librenms_id</code> <code>{{ librenms_device_id }}</code> is unknown.
         <hr class="my-2">
         <span class="text-muted">
             Leave the custom field as it is and retry once LibreNMS answers again. If this
             continues, check the LibreNMS server and its logs for that device.
         </span>
-        {% else %}
-        <hr class="my-2">
-        <span class="text-muted">
-            The discovered mapping was not stored. Resolve the reported conflict, then retry.
-        </span>
-        {% endif %}
     </div>
 </div>
 {% endif %}
@@ -906,13 +904,7 @@ that may well be correct.
             <span class="text-muted">
                 <strong>Options to resolve:</strong>
                 <ul class="mb-2">
-                    <li><strong>Remove the custom field value</strong> to enable automatic matching. The plugin will attempt to find the device using:
-                        <ul>
-                            <li>Primary IP address</li>
-                            <li>Primary IP DNS name (FQDN)</li>
-                            <li>Device name</li>
-                        </ul>
-                    </li>
+                    <li><strong>Remove the custom field value</strong>. The page then looks for the device by primary IP address, its DNS name and name, and offers <strong>Link</strong> for a match.</li>
                     <li><strong>Update the custom field</strong> with the correct LibreNMS device ID</li>
                     <li><strong>Verify the device exists</strong> in LibreNMS at the configured server</li>
                 </ul>
@@ -923,19 +915,26 @@ that may well be correct.
 </div>
 {% endif %}
 {% else %}
-<div class="alert alert-warning">
+<div class="alert alert-warning" id="librenms-not-linked">
     <div>
-        <strong>Device not found in LibreNMS.</strong> To match a device, use one of these methods:
-        <ul>
-            <li><strong>Automatic matching:</strong> Ensure one of these identifiers matches the LibreNMS hostname/IP:
-                <ul>
-                    <li>Primary IP address</li>
-                    <li>Primary IP DNS name (FQDN)</li>
-                    <li>Device name</li>
-                </ul>
-            </li>
-            <li><strong>Manual matching:</strong> Set the <code>librenms_id</code> custom field with the device ID from LibreNMS</li>
-        </ul>
+        <strong>Not linked to {{ link.server_name|default:"this LibreNMS server" }}.</strong>
+        {% if link.state == "match" %}
+        LibreNMS has a device that matches this object. Check the match under LibreNMS Status, then click <strong>Link</strong> to store it.
+        {% elif link.state == "owned" %}
+        The matching LibreNMS device is already linked to another object. Fix that link first.
+        {% elif link.state == "unreachable" or link.state == "not_checked" %}
+        LibreNMS could not be reached, so no match was checked. Reload the page to try again.
+        {% elif link.state == "refused" %}
+        <span data-link-branch="refused">
+            The stored LibreNMS mapping of this object cannot be read, so no match was looked up. Repair the
+            <code>librenms_id</code> custom field value, or clear it and set the IDs in the mapping editor.
+        </span>
+        {% else %}
+        <span data-link-branch="no_match">
+            No LibreNMS device matches the primary IP address, its DNS name or the name of this object.
+            Add the device to LibreNMS, or enter its LibreNMS ID in the mapping editor.
+        </span>
+        {% endif %}
     </div>
 </div>
 {% endif %}
@@ -1010,7 +1009,7 @@ that may well be correct.
 {% endif %}
 
 
-{% if not found_in_librenms and not device_info_unavailable %}
+{% if show_add_device %}
 <!-- Add to LibreNMS Modal -->
 <div class="modal fade" id="add-device-modal" tabindex="-1" aria-labelledby="addDeviceModalLabel" aria-hidden="true">
     <div class="modal-dialog modal-lg">

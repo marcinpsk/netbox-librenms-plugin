@@ -1,0 +1,44 @@
+{# The match that the page proposes for an object without a stored link, as rows of the LibreNMS Status card. #}
+<tr>
+    <th scope="row" style="padding-left: 1rem;">Match</th>
+    <td data-link-state="{{ link.state }}">
+        {% if link.state == "match" or link.state == "owned" %}
+        <span class="text-nowrap">LibreNMS ID {{ link.librenms_id }}</span>
+        {% if link.hostname or link.sysname %}
+        <div class="text-muted small">
+            {% if link.hostname %}{{ link.hostname }}{% endif %}{% if link.hostname and link.sysname and link.sysname != link.hostname %} / {% endif %}{% if link.sysname and link.sysname != link.hostname %}{{ link.sysname }}{% endif %}
+        </div>
+        {% endif %}
+        <div class="text-muted small">Matched by {{ link.matched_by }}</div>
+        {% if link.state == "owned" %}
+        <div class="text-warning small">
+            <i class="mdi mdi-alert-outline"></i>
+            Already linked to {{ link.owner_label|default:"another object" }}
+        </div>
+        {% endif %}
+        {% elif link.state == "unreachable" or link.state == "not_checked" %}
+        <span class="text-warning" data-link-branch="unreachable"><i class="mdi mdi-alert-circle-outline"></i> LibreNMS could not be reached</span>
+        {% elif link.state == "refused" %}
+        <span class="text-warning" data-link-branch="refused"><i class="mdi mdi-alert-outline"></i> Stored mapping needs repair</span>
+        {% else %}
+        <span class="text-danger" data-link-branch="no_match"><i class="mdi mdi-close-circle"></i> Not found</span>
+        {% endif %}
+    </td>
+</tr>
+{% if link.token %}
+<tr>
+    <th scope="row" style="padding-left: 1rem;">Action</th>
+    <td>
+        <form method="post" action="{{ link.action_url }}" class="d-inline" id="librenms-link-form">
+            {% csrf_token %}
+            <input type="hidden" name="server_key" value="{{ link.server_key }}">
+            <input type="hidden" name="tab" value="{{ active_sync_tab|default:'' }}">
+            <input type="hidden" name="confirmation_intent" value="{{ link.token }}">
+            <button type="submit" class="btn btn-primary btn-sm"
+                    title="Store LibreNMS ID {{ link.librenms_id }} as the link of this object">
+                <i class="mdi mdi-link-variant"></i> Link
+            </button>
+        </form>
+    </td>
+</tr>
+{% endif %}

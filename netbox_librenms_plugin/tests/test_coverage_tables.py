@@ -74,15 +74,16 @@ class TestDeviceStatusTable:
     @pytest.mark.parametrize(
         ("value", "css_class", "label"),
         [
-            (True, "text-success", "Found"),
-            (False, "text-danger", "Not Found"),
-            (None, "text-secondary", "Unknown"),
+            ("linked", "text-success", "linked"),
+            ("refused", "text-warning", "refused"),
+            # A row that the page did not match, such as a row of a table export, was not checked.
+            (None, "text-secondary", "not_checked"),
         ],
     )
     def test_status_links_to_the_real_sync_route(self, value, css_class, label):
         from netbox_librenms_plugin.tables.device_status import DeviceStatusTable
 
-        device = make_device(f"status-{label.lower().replace(' ', '-')}")
+        device = make_device(f"status-{label}")
         table = DeviceStatusTable(type(device).objects.none())
 
         html = str(table.render_librenms_status(value, device))
@@ -95,7 +96,7 @@ class TestDeviceStatusTable:
             in html
         )
         assert css_class in html
-        assert label in html
+        assert f'data-link-state="{label}"' in html
 
     def test_virtual_chassis_member_links_to_the_real_sync_member(self, client, settings, librenms_server):
         from netbox_librenms_plugin.tests.conftest import bind_librenms_server

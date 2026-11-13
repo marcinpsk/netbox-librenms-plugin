@@ -52,7 +52,9 @@ The Device Import feature automatically sets the `librenms_id` custom field, ena
     - Primary IP configured
     - Valid DNS name (set on the Primary IP)
     - hostname (that matches LibreNMS hostname)
-2. The plugin will populate the `librenms_id` custom field if the device is found in LibreNMS
+2. Open the **LibreNMS Sync** tab. When LibreNMS has a matching device, the page shows it; click **Link**
+   to store its `librenms_id`. The device and VM status lists link many objects at once with **Link
+   selected**. See [Link a device or virtual machine](../configuration/custom_field.md#link-a-device-or-virtual-machine).
 
 ### Virtual Chassis
 
@@ -90,7 +92,7 @@ For best results, align chassis member positions with interface naming patterns.
 
 1. Preparation
     - Ensure devices are properly identified in both systems
-    - Open LibreNMS Sync on all devices to populate librenms_id custom field
+    - Link every device to its LibreNMS device: confirm **Link** on its LibreNMS Sync page, or select the devices on the status list and click **Link selected**. Opening the sync page only proposes a match; it does not set the `librenms_id` custom field
     - Remote Device and Remote interface need to be found in NetBox for cable creation to work
     - Check Device and Interface naming
 

@@ -808,15 +808,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             messages.error(request, "Selected LibreNMS server is no longer configured.")
             return self.render_sync_partial(request, obj, self.active_server_key, {"module_sync": empty})
         owner = self._get_sync_device(obj, server_key=server_key)
-        self.librenms_id, lookup_error = self.resolve_librenms_id(owner)
+        self.librenms_id = self.stored_librenms_id(owner, server_key)
         if self.librenms_id is None:
             source_cache.delete(obj, Resource.MODULES, server_key)
             SyncCacheConsistency(obj).mark_refresh_failure(
                 SyncTab.MODULES, server_key, actor_id=request_actor_id(request)
             )
-            messages.error(
-                request, self.scoped_lookup_message(lookup_error) if lookup_error else "Device not found in LibreNMS."
-            )
+            messages.error(request, self.not_linked_message(server_key))
             return self.render_sync_partial(request, obj, server_key, {"module_sync": empty})
         result = source_cache.refresh(request, obj, Resource.MODULES, server_key)
         if result.error is not None:

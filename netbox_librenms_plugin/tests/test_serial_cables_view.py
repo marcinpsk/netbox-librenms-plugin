@@ -977,10 +977,8 @@ class TestSerialFetchSkippedWithoutHostId:
         result = view._prepare_context(view.request, obj, fetch_fresh=True, server_key=configured_server_key())
 
         assert result is None
-        requested_paths = [request["path"] for request in live_librenms.server.requests]
-        # The only call is the hostname discovery lookup: no host id means no links fetch.
-        assert requested_paths == [f"/api/v0/devices/{obj.name}"]
-        assert all("/devices/None/links" not in path for path in requested_paths)
+        # No stored host id means no request at all: a refresh never looks the device up.
+        assert live_librenms.server.requests == []
 
 
 # ---------------------------------------------------------------------------

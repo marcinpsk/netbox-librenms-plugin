@@ -72,15 +72,11 @@ class BaseVLANTableView(
                 },
             )
 
-        # Discovery may find the LibreNMS device by IP or hostname and store the mapping; acquisition
-        # then reads that mapping and never writes.
-        self.librenms_id, lookup_error = self.resolve_librenms_id(obj)
+        self.librenms_id = self.stored_librenms_id(obj, server_key)
         if self.librenms_id is None:
             # A failed refresh on a previously-synced device must not leave a stale VLAN table to act on.
             source_cache.delete(obj, Resource.VLANS, server_key)
-            error_message = (
-                self.scoped_lookup_message(lookup_error) if lookup_error else "Device not found in LibreNMS."
-            )
+            error_message = self.not_linked_message(server_key)
         else:
             error = source_cache.refresh(request, obj, Resource.VLANS, server_key).error
             error_message = error and f"Failed to fetch VLANs: {error}"

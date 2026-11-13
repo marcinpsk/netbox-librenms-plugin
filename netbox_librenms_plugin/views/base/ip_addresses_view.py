@@ -174,7 +174,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
     def post(self, request, pk):
         """Refresh the IP snapshot from LibreNMS and render the tab."""
         obj = self.get_object(pk)
-        # Rebind the API to the POSTed server, so discovery and acquisition use the server of the tab.
+        # Rebind the API to the POSTed server, so the stored link and acquisition use the server of the tab.
         server_key = self.rebind_api_for_posted_server(request.POST)
         if server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
@@ -192,13 +192,10 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
                 {"ip_sync": self._empty_context(request, obj, None, active_server_key)},
             )
 
-        # Discovery may find the LibreNMS device by IP or hostname and store the mapping; acquisition
-        # then reads that mapping and never writes.
-        librenms_id, lookup_error = self.resolve_librenms_id(obj)
-        if librenms_id is None:
+        if self.stored_librenms_id(obj, server_key) is None:
             # A failed refresh must not leave an older snapshot to act on.
             source_cache.delete(obj, Resource.IP_ADDRESSES, server_key)
-            error_message = self.scoped_lookup_message(lookup_error) if lookup_error else "Device not found in LibreNMS"
+            error_message = self.not_linked_message(server_key)
         else:
             result = source_cache.refresh(request, obj, Resource.IP_ADDRESSES, server_key)
             snapshot = result.snapshot

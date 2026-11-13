@@ -1,25 +1,15 @@
+import json
 import logging
 import math
+import threading
+import time
 import urllib.parse
 from dataclasses import dataclass
-from uuid import uuid4
 
 import requests
+import urllib3
 from django.core.cache import cache
-from django.core.exceptions import ObjectDoesNotExist
-from django.db import transaction
 from netbox.plugins import get_plugin_config
-
-from netbox_librenms_plugin.ip_addressing import primary_ips
-from netbox_librenms_plugin.server_mappings import (
-    AmbiguousLibreNMSIdError,
-    assign_own,
-    can_store_device_mapping,
-    copy_persisted_mapping,
-    lock_librenms_id_assignment,
-    persist_mapping,
-    read_mapping,
-)
 
 # HTTP request timeout constants (in seconds)
 DEFAULT_API_TIMEOUT = 10
@@ -36,45 +26,6 @@ DEVICE_INFO_CACHE_TIMEOUT = 60
 HTTP_NOT_FOUND = 404
 
 logger = logging.getLogger(__name__)
-
-
-def librenms_id_cache_key(obj, server_key):
-    """
-    Return the cache key that holds the discovered LibreNMS ID of *obj* on *server_key*.
-
-    Args:
-        obj: NetBox object with model metadata and an optional primary key.
-        server_key (str): The LibreNMS server key.
-
-    Returns:
-        str: The cache key.
-
-    """
-    object_id = obj.pk
-    if object_id is None:
-        object_id = getattr(obj, "_librenms_cache_identity", None)
-        if object_id is None:
-            object_id = f"unsaved-{uuid4().hex}"
-            obj._librenms_cache_identity = object_id
-    return f"librenms_device_id_{obj._meta.model_name}_{object_id}_{server_key}"
-
-
-def stored_librenms_id(obj, server_key):
-    """
-    Return the stored or cached LibreNMS ID of *obj* on *server_key*, without discovery.
-
-    Args:
-        obj: NetBox object with a mapping or a cache identity.
-        server_key (str): The LibreNMS server key.
-
-    Returns:
-        object: The stored ID, the cached value as stored, or None.
-
-    """
-    librenms_id = read_mapping(obj).own_id(server_key)
-    if librenms_id is not None:
-        return librenms_id
-    return cache.get(librenms_id_cache_key(obj, server_key))
 
 
 def _validate_api_url(url):
@@ -99,18 +50,6 @@ def librenms_id_owned_message(librenms_id):
     return f"LibreNMS ID {librenms_id} is already assigned to another NetBox object."
 
 
-class LibreNMSIDConflictError(ValueError):
-    """A LibreNMS device ID cannot be assigned: another NetBox object owns it, or discovery found two devices."""
-
-    def __init__(self, message, *, conflict=None, named_message=None):
-        super().__init__(message)
-        # The claim searches unrestricted Device and VirtualMachine rows, so naming the owner
-        # would disclose an object the viewer may not see. The plain message stays generic and
-        # only a permission-checked caller upgrades it through named_message.
-        self.conflict = conflict
-        self.named_message = named_message or message
-
-
 @dataclass(frozen=True)
 class LibreNMSLookupError:
     """
@@ -122,8 +61,6 @@ class LibreNMSLookupError:
 
     message: str
     status_code: int | None = None
-    conflict: object | None = None
-    named_message: str | None = None
 
 
 def configured_cache_timeout(server_key):
@@ -197,6 +134,96 @@ class _TokenScopedSession(requests.Session):
 
 # Module-level so every call shares one connection pool, and so tests have one seam to patch.
 _session = _TokenScopedSession()
+
+
+# The match probes of one server that may run at once. A probe that finds no free slot is not checked, so
+# nothing queues. Known limit: a server that sends its headers slowly, inside each read timeout, holds its
+# slot until it stops; http.client bounds the header size, and only that server's matching degrades.
+MATCH_PROBE_WORKERS = 4
+# A device answer is a few KiB; a longer one is no usable answer.
+MATCH_PROBE_MAX_BYTES = 1 << 20
+_match_probe_slots = {}
+_match_probe_slots_lock = threading.Lock()
+
+
+def _probe_slots(server_url):
+    """Return the probe slots of the server at *server_url*, created on first use."""
+    with _match_probe_slots_lock:
+        if server_url not in _match_probe_slots:
+            _match_probe_slots[server_url] = threading.BoundedSemaphore(MATCH_PROBE_WORKERS)
+        return _match_probe_slots[server_url]
+
+
+class _ProbeAnswer:
+    """The answer of one match probe, which its worker sets once."""
+
+    def __init__(self):
+        self.ready = threading.Event()
+        self.value = None
+        self.error = None
+
+
+def _keep_redirect_body_unread(response, **kwargs):
+    """Drop the redirect target, so requests does not read the body to prepare a redirect that it never follows."""
+    if response.is_redirect:
+        del response.headers["location"]
+
+
+def _read_body(response, ends_at):
+    """Return the body of a streamed response, or None when it exceeds the size cap or *ends_at* passes."""
+    parts, size = [], 0
+    while part := response.raw.read1(65536, decode_content=False):
+        size += len(part)
+        if size > MATCH_PROBE_MAX_BYTES or time.monotonic() >= ends_at:
+            return None
+        parts.append(part)
+    return b"".join(parts)
+
+
+def _match_probe(answer, slots, url, headers, timeout, verify, ends_at):
+    """
+    Run one match probe GET with a session of its own, set *answer*, and free the probe slot.
+
+    The body is read undecoded until it ends, passes the size cap, or the caller's deadline *ends_at* (a
+    ``time.monotonic()`` value) passes. A transport or configuration error (a missing CA bundle
+    raises a plain OSError) is no answer from the server. Any other error is a bug; the caller
+    raises it while it still waits.
+    """
+    try:
+        with _TokenScopedSession() as session:
+            response = session.get(
+                url,
+                headers=headers,
+                timeout=timeout,
+                verify=verify,
+                allow_redirects=False,
+                stream=True,
+                hooks={"response": _keep_redirect_body_unread},
+            )
+            try:
+                if 300 <= response.status_code < 400:
+                    answer.value = response.status_code, None
+                elif response.headers.get("Content-Encoding", "identity").strip().lower() not in ("", "identity"):
+                    # The probe asked for none; an encoded body could expand past the size cap when decoded.
+                    answer.value = None, None
+                elif (body := _read_body(response, ends_at)) is None:
+                    answer.value = None, None
+                else:
+                    try:
+                        answer.value = response.status_code, json.loads(body)
+                    except ValueError:
+                        answer.value = response.status_code, None
+            finally:
+                response.close()
+    except (requests.exceptions.RequestException, OSError, urllib3.exceptions.HTTPError):
+        answer.value = None, None
+    except Exception as exc:
+        # Not a transport error, so a bug: the caller raises it unread, in its own thread, before its deadline.
+        # nosemgrep: caught-error-text  # noqa: ERA001
+        answer.error = exc
+    finally:
+        answer.ready.set()
+        slots.release()
 
 
 class LibreNMSAPI:
@@ -443,245 +470,6 @@ class LibreNMSAPI:
                 return {"default": f"Default Server ({legacy_url})"}
             return {}
 
-    def get_stored_librenms_id(self, obj, server_key=None):
-        """
-        Return the stored or cached LibreNMS ID for an object without discovery.
-
-        This helper is safe for generic NetBox objects such as interfaces,
-        where IP/hostname-based discovery would be expensive or incorrect.
-
-        Args:
-            obj: NetBox object with a librenms_id custom field or cache identity
-            server_key: LibreNMS server key to read the per-server id under; defaults
-                to this client's bound ``server_key``. A caller scoped to a specific
-                server (e.g. the module verify path, which sets ``_active_server_key``
-                but leaves the API bound to the default client) must pass its key so
-                the multi-server dict CF is read under the right server rather than the
-                client's default.
-
-        Returns:
-            int: LibreNMS ID if found in the custom field or cache, None otherwise
-
-        """
-        return stored_librenms_id(obj, server_key or self.server_key)
-
-    def get_cached_librenms_id(self, obj, server_key=None):
-        """Return the LibreNMS ID cached for *obj* on the server, or None."""
-        return self.get_cached_librenms_ids([obj], server_key)[0]
-
-    def get_cached_librenms_ids(self, objs, server_key=None):
-        """Return the LibreNMS ID cached for each of *objs* on the server, or None, in one cache read."""
-        keys = [librenms_id_cache_key(obj, server_key or self.server_key) for obj in objs]
-        cached = cache.get_many(keys)
-        return [cached.get(key) for key in keys]
-
-    def get_librenms_id(self, obj):
-        """
-        Resolve a LibreNMS device ID for a NetBox object.
-
-        Args:
-            obj: NetBox object with a librenms_id custom field or discovery identity.
-
-        Returns:
-            int: LibreNMS device ID if found, None otherwise
-
-        Notes:
-            Lookup order:
-            1. Custom field 'librenms_id' on object
-            2. Cached librenms_id value
-            3. API lookup using:
-                a. each primary IP address
-                b. the DNS name of each primary IP, when no address names a device
-                c. hostname if FQDN
-
-            If found via API, stores ID in custom field if available,
-            otherwise caches the value.
-
-        Raises:
-            LibreNMSIDConflictError: The primary IP addresses, or their DNS names, name different
-                LibreNMS devices, or another object owns the discovered ID.
-
-        """
-        librenms_id = self.get_stored_librenms_id(obj)
-        if librenms_id is not None:
-            return librenms_id
-
-        # Determine dynamically from API when the object exposes device identity fields.
-        addresses = primary_ips(obj)
-        hostname = getattr(obj, "name", None)
-
-        librenms_id = self._discover_one_id(
-            self.get_device_id_by_ip, [address.address.ip for address in addresses], "primary IP addresses"
-        )
-        if librenms_id is None:
-            dns_names = dict.fromkeys(address.dns_name for address in addresses if address.dns_name)
-            librenms_id = self._discover_one_id(self.get_device_id_by_hostname, dns_names, "primary DNS names")
-        # Try hostname if FQDN
-        if librenms_id is None and hostname:
-            librenms_id = self._normalize_librenms_id(self.get_device_id_by_hostname(hostname))
-        if librenms_id is not None:
-            self._store_librenms_id(obj, librenms_id)
-        return librenms_id
-
-    def _discover_one_id(self, lookup, keys, label):
-        """
-        Return the one LibreNMS ID that *lookup* finds for *keys*, or None when no key names a device.
-
-        Raises:
-            LibreNMSIDConflictError: Two keys name different LibreNMS devices, so no key is trusted.
-
-        """
-        found = {self._normalize_librenms_id(lookup(key)) for key in keys}
-        found.discard(None)
-        if len(found) > 1:
-            ids = ", ".join(str(librenms_id) for librenms_id in sorted(found))
-            raise LibreNMSIDConflictError(f"The {label} name different LibreNMS devices ({ids}).")
-        return next(iter(found), None)
-
-    @staticmethod
-    def _normalize_librenms_id(value):
-        """
-        Coerce a raw LibreNMS ID value to int or None.
-
-        Thin wrapper around :func:`netbox_librenms_plugin.librenms_ids.coerce_librenms_id`
-        kept for back-compat with internal callers in this module.
-
-        Args:
-            value: The raw LibreNMS id value (int, digit string, or other).
-
-        Returns:
-            int | None: The coerced id, or None if it can't be coerced.
-
-        """
-        from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
-
-        return coerce_librenms_id(value)
-
-    def _get_cache_key(self, obj, server_key=None):
-        """
-        Generate a unique cache key for an object.
-
-        Args:
-            obj: NetBox object with model metadata and an optional primary key
-            server_key: LibreNMS server key to scope the key to; defaults to this
-                client's bound ``server_key``. Pass an explicit key when reading on
-                behalf of a different (scoped) server than the client is bound to.
-
-        Returns:
-            str: Cache key
-
-        """
-        return librenms_id_cache_key(
-            obj, server_key if server_key is not None else getattr(self, "server_key", "default")
-        )
-
-    def _store_librenms_id(self, obj, librenms_id):
-        """
-        Persist a saved device/VM mapping, or cache the ID for another object.
-
-        Args:
-            obj: NetBox object associated with the LibreNMS ID
-            librenms_id: LibreNMS device ID
-
-        Returns:
-            None
-
-        """
-        if can_store_device_mapping(obj):
-            with transaction.atomic():
-                try:
-                    locked_obj, conflict = lock_librenms_id_assignment(
-                        librenms_id,
-                        self.server_key,
-                        owner_queryset=type(obj).objects.all(),
-                        owner_pk=obj.pk,
-                    )
-                except AmbiguousLibreNMSIdError as exc:
-                    # resolve_librenms_id turns only LibreNMSIDConflictError into a user-facing
-                    # message, so an ambiguous claim would otherwise reach the view as a 500.
-                    # The ambiguity text names the unrestricted owners by pk, so it stays in the
-                    # log and the rendered message says only that the claim is ambiguous.
-                    logger.warning("Ambiguous LibreNMS ID claim: %s", exc)
-                    raise LibreNMSIDConflictError(
-                        f"LibreNMS ID {librenms_id} is claimed by more than one NetBox object."
-                    ) from None
-                except ObjectDoesNotExist:
-                    # A concurrent delete removes the row this claim locks, and the bare
-                    # DoesNotExist would reach the view as a 500 for the same reason.
-                    raise LibreNMSIDConflictError(
-                        f"The object claiming LibreNMS ID {librenms_id} no longer exists."
-                    ) from None
-                if conflict is not None:
-                    object_label = "VM" if conflict._meta.model_name == "virtualmachine" else "device"
-                    raise LibreNMSIDConflictError(
-                        librenms_id_owned_message(librenms_id),
-                        conflict=conflict,
-                        named_message=(
-                            f"LibreNMS ID {librenms_id} is already assigned to {object_label} '{conflict.name}'"
-                        ),
-                    )
-                locked_obj.snapshot()
-                persist_mapping(
-                    locked_obj,
-                    assign_own(locked_obj, self.server_key, librenms_id),
-                    write=lambda row, fields: row.save(update_fields=[*fields, "last_updated"]),
-                )
-            # locked_obj is a second row read of the same object, so copying its whole field data
-            # would discard every custom-field edit the caller has not saved yet.
-            copy_persisted_mapping(locked_obj, obj)
-        else:
-            # Use cache as fallback
-            cache_key = self._get_cache_key(obj)
-            cache.set(cache_key, librenms_id, timeout=self.cache_timeout)
-
-    def get_device_id_by_ip(self, ip_address):
-        """
-        Retrieve the device ID using the device's IP address.
-
-        Args:
-            ip_address: Device IP address
-
-        Retruns:
-            int: LibreNMS device ID if found, None otherwise
-
-        """
-        try:
-            response = _session.get(
-                f"{self.librenms_url}/api/v0/devices/{ip_address}",
-                headers=self.headers,
-                timeout=DEFAULT_API_TIMEOUT,
-                verify=self.verify_ssl,
-            )
-            response.raise_for_status()
-            device_data = response.json()["devices"][0]
-            return device_data["device_id"]
-        except (requests.exceptions.RequestException, ValueError, IndexError, KeyError, TypeError):
-            return None
-
-    def get_device_id_by_hostname(self, hostname):
-        """
-        Retrieve the device ID using the device's hostname.
-
-        Args:
-            hostname: Device hostname
-
-        Returns:
-            int: LibreNMS device ID if found, None otherwise
-
-        """
-        try:
-            response = _session.get(
-                f"{self.librenms_url}/api/v0/devices/{hostname}",
-                headers=self.headers,
-                timeout=DEFAULT_API_TIMEOUT,
-                verify=self.verify_ssl,
-            )
-            response.raise_for_status()
-            device_data = response.json()["devices"][0]
-            return device_data["device_id"]
-        except (requests.exceptions.RequestException, ValueError, IndexError, KeyError, TypeError):
-            return None
-
     def get_device_info(self, device_id, use_cache=True):
         """
         Fetch device information from LibreNMS using its primary IP.
@@ -791,6 +579,54 @@ class LibreNMSAPI:
         except ValueError:
             body = None
         return response.status_code, body
+
+    def get_response_before(self, path: str, remaining) -> tuple[int | None, object] | None:
+        """
+        Issue a GET that must answer before a deadline, and return ``(status_code, body)``, or None.
+
+        ``remaining()`` returns the seconds left. The request runs in a daemon thread, and this call
+        waits for it only that long: a socket timeout limits each wait for data, not the whole
+        request. The thread holds one of the ``MATCH_PROBE_WORKERS`` slots of its server, and stops
+        reading the body at the deadline; a probe that finds no free slot does not run. A redirect is
+        not followed: its own status comes back. The probe asks for an unencoded body. A transport
+        error, an encoded body, or a body over ``MATCH_PROBE_MAX_BYTES`` yields ``(None, None)``, and a
+        non-JSON body ``(status_code, None)``.
+
+        Args:
+            path (str): API path relative to ``/api/v0/``.
+            remaining (Callable[[], float]): The seconds left before the deadline.
+
+        Returns:
+            tuple | None: ``(status, body)``; None when the deadline passed first or no probe slot was free.
+
+        """
+        left = remaining()
+        if left <= 0:
+            return None
+        slots = _probe_slots(self.librenms_url)
+        if not slots.acquire(blocking=False):
+            return None
+        try:
+            answer = _ProbeAnswer()
+            arguments = (
+                answer,
+                slots,
+                f"{self.librenms_url}/api/v0/{path.lstrip('/')}",
+                {**self.headers, "Accept-Encoding": "identity"},
+                min(DEFAULT_API_TIMEOUT, left),
+                self.verify_ssl,
+                time.monotonic() + left,
+            )
+            threading.Thread(target=_match_probe, args=arguments, name="librenms-match-probe", daemon=True).start()
+        except BaseException:
+            slots.release()
+            raise
+        # An answer after the deadline is late, also an error: the request has moved on.
+        if not answer.ready.wait(timeout=left) or remaining() <= 0:
+            return None
+        if answer.error is not None:
+            raise answer.error
+        return answer.value
 
     def add_device(self, data):
         """

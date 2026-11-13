@@ -5800,19 +5800,21 @@ class TestInterfacePortIdActiveServerScope:
         # Must resolve under the active server (222), not the default-bound client (111).
         assert contexts[device.pk]["port_holders"] == {222: ("dcim.interface", iface.pk)}
 
-    def test_get_stored_librenms_id_honors_explicit_server_key(self):
-        """LibreNMSAPI.get_stored_librenms_id(obj, server_key=...) reads that server's dict entry."""
+    def test_the_stored_id_read_honors_an_explicit_server_key(self):
+        """``stored_librenms_id(obj, server_key)`` reads that server's entry; without one, the bound server's."""
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface
         from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
         device = make_device("mod-verify-scope-api")
         iface = make_interface(device, "Gi0/2")
         seed_mapping(iface, self._real_configured_api().server_key, own=111, save=False)
         seed_mapping(iface, "server2", own=222)
+        view = object.__new__(BaseModuleTableView)
+        view._librenms_api = self._real_configured_api()
 
-        api = self._real_configured_api()
-        assert api.get_stored_librenms_id(iface) == 111  # bound client key
-        assert api.get_stored_librenms_id(iface, server_key="server2") == 222  # explicit override
+        assert view.stored_librenms_id(iface) == 111
+        assert view.stored_librenms_id(iface, "server2") == 222
 
 
 @pytest.mark.django_db

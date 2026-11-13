@@ -197,6 +197,7 @@ from .sync.interfaces import (
 )
 from .sync.ip_addresses import CreateVRFFromIPRowView, SyncIPAddressesView
 from .sync.locations import SyncSiteLocationView
+from .sync.mapping_lifecycle import BulkLinkView, MappingLifecycleView
 from .sync.migrate import (
     MoveInterfaceToWinnerView,
     MoveIPAddressToWinnerView,

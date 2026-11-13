@@ -13,8 +13,8 @@ from utilities.permissions import get_permission_for_model
 
 from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGIN
 from netbox_librenms_plugin.interface_sync import ApplicationResult, write_interface_row
-from netbox_librenms_plugin.librenms_api import LibreNMSAPI, LibreNMSIDConflictError, LibreNMSLookupError
-from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
+from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.utils import coerce_model_pk, effective_vlan_mode
 
 logger = logging.getLogger(__name__)
@@ -561,32 +561,14 @@ class LibreNMSAPIMixin:
             self._librenms_api = LibreNMSAPI()
         return self._librenms_api
 
-    def resolve_librenms_id(self, obj):
-        """Return a normalized LibreNMS ID or a user-facing assignment error."""
-        try:
-            return coerce_librenms_id(self.librenms_api.get_librenms_id(obj)), None
-        except LibreNMSIDConflictError as exc:
-            return None, LibreNMSLookupError(
-                str(exc),
-                conflict=getattr(exc, "conflict", None),
-                named_message=getattr(exc, "named_message", None),
-            )
+    def stored_librenms_id(self, obj, server_key=None):
+        """Return the own LibreNMS ID that *obj* stores on the server (the bound one by default), or None. It never writes."""
+        return read_mapping(obj).own_id(server_key or self.librenms_api.server_key)
 
-    def scoped_lookup_message(self, error):
-        """Return a lookup message, naming a conflicting object only when this user may view it."""
-        message = getattr(error, "message", None) or str(error)
-        conflict = getattr(error, "conflict", None)
-        named = getattr(error, "named_message", None)
-        scope = getattr(self, "restricted_queryset", None)
-        if conflict is None or not named or scope is None:
-            return message
-        # Fail closed: without a readable row the generic message stands, so a view that cannot
-        # scope never discloses the owner.
-        try:
-            visible = scope(type(conflict), "view").filter(pk=conflict.pk).exists()
-        except (AttributeError, TypeError, ValueError):
-            return message
-        return named if visible else message
+    def not_linked_message(self, server_key=None):
+        """Return the refusal for an object that has no stored link to the server."""
+        server_key = server_key or self.librenms_api.server_key
+        return f"Not linked to {LibreNMSAPI.get_available_servers().get(server_key, server_key)}."
 
     def _render_server_key(self):
         """
