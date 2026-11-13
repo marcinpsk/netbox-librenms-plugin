@@ -1951,3 +1951,181 @@ class TestMergeEntryNormalization:
         assert merge.summary["oob_from_donor"] == {"id": 7, "type": "ipmi"}
         assert stored_mapping_for_test(winner) == {"default": {"id": 5}}
         assert stored_mapping_for_test(donor) == {"default": {"oob": {"id": 7, "type": "ipmi"}}}
+
+
+@pytest.mark.django_db
+class TestHostChangeScope:
+    """One service returns the interface cascade of every entry change of a Device or VM on one server."""
+
+    @staticmethod
+    def _entry(own=None, oob=None, oob_type=None):
+        from netbox_librenms_plugin.server_mappings import ServerState
+
+        return ServerState("default", own_id=own, oob_id=oob, oob_type=oob_type)
+
+    @pytest.mark.parametrize(
+        ("seed", "after"),
+        [
+            ({}, {"own": 11}),
+            ({"own": 10}, {"own": 10, "oob": 12, "oob_type": "idrac"}),
+            ({"own": 10, "oob": 12, "oob_type": "ilo"}, {"own": 10, "oob": 12, "oob_type": "idrac"}),
+            ({"oob": 12, "oob_type": "ilo"}, {"own": 11, "oob": 12, "oob_type": "ilo"}),
+        ],
+        ids=["create", "oob-add", "type-only", "own-add"],
+    )
+    def test_a_change_that_removes_no_host_id_has_an_empty_cascade_and_runs_no_query(self, seed, after):
+        from netbox_librenms_plugin.server_mappings import host_change_scope
+
+        device = make_device(f"scope-empty-{next(_counter)}")
+        if seed:
+            seed_mapping(device, "default", **seed)
+        seed_mapping(make_interface(device, "eth0"), "default", own=500)
+
+        with CaptureQueriesContext(connection) as queries:
+            scope = host_change_scope(device, "default", self._entry(**after))
+
+        assert (scope.changes_host, scope.is_empty, len(queries)) == (False, True, 0)
+
+    @pytest.mark.parametrize(
+        "after",
+        [None, {"own": 11, "oob": 12, "oob_type": "ilo"}, {"own": 10}, {"own": 10, "oob": 13, "oob_type": "ilo"}],
+        ids=["unlink", "relink", "oob-clear", "oob-replace"],
+    )
+    def test_a_removed_or_replaced_host_id_cascades_to_every_chassis_member(self, after):
+        from netbox_librenms_plugin.server_mappings import host_change_scope
+
+        _chassis, (first, second) = make_virtual_chassis_members(f"scope-chassis-{next(_counter)}")
+        seed_mapping(first, "default", own=10, save=False)
+        seed_mapping(first, "default", oob=12, oob_type="ilo")
+        ported = seed_mapping(make_interface(second, "eth0"), "default", own=501)
+        seed_mapping(make_interface(first, "eth0"), "other", own=502)
+        make_interface(first, "eth1")
+
+        scope = host_change_scope(first, "default", None if after is None else self._entry(**after))
+
+        assert scope.changes_host
+        assert [cascade.interface.pk for cascade in scope.interfaces] == [ported.pk]
+        assert [member.pk for member in scope.members] == sorted([first.pk, second.pk])
+        assert scope.refused == ()
+
+    def test_the_digest_binds_each_exact_entry_and_the_membership_binds_the_members(self):
+        from netbox_librenms_plugin.server_mappings import host_change_scope
+
+        _chassis, (first, second) = make_virtual_chassis_members(f"scope-digest-{next(_counter)}")
+        seed_mapping(first, "default", own=10)
+        interface = seed_mapping(make_interface(second, "eth0"), "default", own=501)
+        before = host_change_scope(first, "default", None)
+
+        seed_mapping(interface, "default", own=503)
+        moved = host_change_scope(first, "default", None)
+        second.virtual_chassis = None
+        second.vc_position = None
+        second.save()
+        left = host_change_scope(first, "default", None)
+
+        assert len(before.digest) == 64
+        assert moved.digest != before.digest and moved.membership_digest == before.membership_digest
+        assert left.membership_digest != before.membership_digest and left.interfaces == ()
+
+    def test_a_legacy_or_invalid_interface_value_refuses_and_a_vm_scope_is_its_interfaces(self):
+        from virtualization.models import VMInterface
+
+        from netbox_librenms_plugin.server_mappings import host_change_scope
+        from netbox_librenms_plugin.tests.mapping_fixtures import seed_legacy, seed_quarantined
+
+        vm = seed_mapping(make_vm(f"scope-vm-{next(_counter)}"), "default", own=10)
+        legacy = seed_legacy(VMInterface.objects.create(virtual_machine=vm, name="e0"), 77)
+        invalid = seed_quarantined(VMInterface.objects.create(virtual_machine=vm, name="e1"))
+        ported = seed_mapping(VMInterface.objects.create(virtual_machine=vm, name="e2"), "default", own=601)
+
+        scope = host_change_scope(vm, "default", None)
+
+        assert [row.pk for row in scope.refused] == [legacy.pk, invalid.pk]
+        assert [cascade.interface.pk for cascade in scope.interfaces] == [ported.pk]
+        assert [member.pk for member in scope.members] == [vm.pk]
+
+
+# --- One mapping-only writer -----------------------------------------------------------------------
+
+_MAPPING_ONLY_COPIES = [
+    """
+def _save_mapping_fields(row, fields):
+    row.save(update_fields=[*fields, "last_updated"])
+    return row
+""",
+    """
+def _save_mapping_only(row, mapping_fields):
+    row.save(update_fields=[*mapping_fields, "last_updated"])
+""",
+]
+_OTHER_WRITERS = [
+    """
+def bind(candidate, update_fields):
+    def save(row, mapping_fields=frozenset()):
+        row.save(update_fields=[*update_fields, *mapping_fields, "last_updated"])
+""",
+    """
+def _save_row(row, _mapping_fields=frozenset()):
+    row.save()
+""",
+    """
+def rename(row):
+    row.save(update_fields=["name", "_name", "last_updated"])
+""",
+]
+
+
+def _mapping_only_writers(source):
+    """
+    Return each function in *source* that saves only the fields its caller names, and ``last_updated``.
+
+    It is the shape of ``save_mapping_fields``. Limit: the scan reads only a literal list or tuple
+    that holds one starred parameter of the function.
+    """
+    import ast
+
+    found = []
+    for function in ast.walk(ast.parse(source)):
+        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        parameters = {argument.arg for argument in function.args.args}
+        for call in ast.walk(function):
+            if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and call.func.attr == "save"):
+                continue
+            for keyword in call.keywords:
+                elements = getattr(keyword.value, "elts", None) if keyword.arg == "update_fields" else None
+                starred = [element for element in elements or () if isinstance(element, ast.Starred)]
+                rest = {ast.unparse(element) for element in elements or () if not isinstance(element, ast.Starred)}
+                if (
+                    len(starred) == 1
+                    and isinstance(starred[0].value, ast.Name)
+                    and starred[0].value.id in parameters
+                    and rest == {"'last_updated'"}
+                ):
+                    found.append(function.name)
+    return found
+
+
+@pytest.mark.parametrize("source", _MAPPING_ONLY_COPIES)
+def test_the_mapping_writer_scan_finds_a_private_copy(source):
+    assert _mapping_only_writers(source)
+
+
+@pytest.mark.parametrize("source", _OTHER_WRITERS)
+def test_the_mapping_writer_scan_passes_other_writers(source):
+    assert _mapping_only_writers(source) == []
+
+
+def test_only_server_mappings_saves_just_the_mapping_fields():
+    """A writer that saves only the mapping uses ``save_mapping_fields``, which validates those fields first."""
+    from pathlib import Path
+
+    package = Path(__file__).resolve().parents[1]
+    found = [
+        (path.relative_to(package).as_posix(), name)
+        for path in sorted(package.rglob("*.py"))
+        if path.relative_to(package).parts[0] not in {"tests", "migrations"}
+        for name in _mapping_only_writers(path.read_text())
+    ]
+
+    assert found == [("server_mappings.py", "save_mapping_fields")]

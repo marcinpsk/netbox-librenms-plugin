@@ -1050,3 +1050,70 @@ def test_module_type_apply_records_the_type_before_and_after(client, settings):
     )
     assert change.prechange_data["type"] == "1000base-t"
     assert change.postchange_data["type"] == "10gbase-x-sfpp"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_the_type_update_locks_its_interfaces_in_pk_order(client, settings):
+    """The host change cascade locks interfaces by pk, so the type update must not lock a higher pk first."""
+    from threading import Event
+
+    from dcim.models import Interface
+    from django.db import DatabaseError, connection
+
+    from netbox_librenms_plugin.tests.conftest import (
+        bounded_executor,
+        configure_default_librenms_server,
+        make_superuser,
+    )
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import (
+        backend_pid,
+        lock_row,
+        second_connection,
+        wait_for_lock_wait,
+    )
+
+    configure_default_librenms_server(settings)
+    device, module = _module_with_templates(
+        "type-lock-order", [("a-eth", "10gbase-x-sfpp"), ("z-eth", "10gbase-x-sfpp")]
+    )
+    # Names in the opposite order of the pks.
+    first = Interface.objects.create(device=device, module=module, name="z-eth", type="1000base-t")
+    second = Interface.objects.create(device=device, module=module, name="a-eth", type="1000base-t")
+    client.force_login(make_superuser("type-lock-order-user"))
+    update_pid = backend_pid(connection)
+    held = Event()
+
+    def hold_the_first_row_and_probe_the_second():
+        with second_connection() as holder:
+            lock_row(holder, Interface, first.pk)
+            held.set()
+            wait_for_lock_wait(holder, update_pid)
+            with second_connection() as probe:
+                try:
+                    with probe.cursor() as cursor:
+                        cursor.execute('SELECT 1 FROM "dcim_interface" WHERE id = %s FOR KEY SHARE NOWAIT', [second.pk])
+                except DatabaseError:
+                    return True
+            return False
+
+    with bounded_executor(max_workers=1) as executor:
+        probed = executor.submit(hold_the_first_row_and_probe_the_second)
+        assert held.wait(5)
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:apply_module_interface_types", kwargs={"pk": device.pk}),
+            {
+                "server_key": "default",
+                "selected_device_id": str(device.pk),
+                "module_id": str(module.pk),
+                "interface_id": [str(first.pk), str(second.pk)],
+                **{f"current_type_{row.pk}": "1000base-t" for row in (first, second)},
+                **{f"template_type_{row.pk}": "10gbase-x-sfpp" for row in (first, second)},
+            },
+        )
+        second_was_locked_while_the_update_waited = probed.result(timeout=10)
+
+    assert response.status_code == 302
+    assert second_was_locked_while_the_update_waited is False
+    assert set(Interface.objects.filter(pk__in=[first.pk, second.pk]).values_list("type", flat=True)) == {
+        "10gbase-x-sfpp"
+    }

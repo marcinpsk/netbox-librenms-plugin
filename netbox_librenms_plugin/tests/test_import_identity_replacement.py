@@ -1,6 +1,7 @@
 """Request-level tests for confirming a same-server LibreNMS identity replacement."""
 
 import re
+from contextlib import contextmanager
 from copy import deepcopy
 
 import pytest
@@ -11,7 +12,12 @@ from netbox_librenms_plugin.identity_replacement import (
     load_identity_replacement_intent,
     sign_identity_replacement_intent,
 )
-from netbox_librenms_plugin.tests.conftest import make_device, make_superuser, make_vm
+from netbox_librenms_plugin.tests.conftest import (
+    make_device,
+    make_superuser,
+    make_vm,
+    transactional_db_with_all_apps,
+)
 from netbox_librenms_plugin.tests.import_server_helpers import librenms_device
 from netbox_librenms_plugin.tests.mapping_fixtures import (
     mapping_summary,
@@ -566,3 +572,207 @@ def test_the_signed_schema_matches_the_intent_dataclass():
     from netbox_librenms_plugin.identity_replacement import INTENT_FIELD_TYPES
 
     assert set(INTENT_FIELD_TYPES) == {field.name for field in fields(IdentityReplacementIntent)}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("value", ["port", "legacy"])
+def test_a_replacement_with_an_interface_cascade_is_sent_to_the_sync_page(client, secondary_server, value):
+    """The interfaces hold ports of the replaced host, which only the sync page confirmation clears."""
+    from netbox_librenms_plugin.tests.conftest import make_interface
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_legacy
+
+    device = seed_mapping(make_device(f"replace-cascade-{value}"), "secondary", own=52301)
+    interface = make_interface(device, "eth0")
+    if value == "port":
+        seed_mapping(interface, "secondary", own=52302)
+    else:
+        seed_legacy(interface, 52302)
+    client.force_login(make_superuser("identity-replacement-cascade"))
+
+    response = _post_action(
+        client, 52401, device, "link", server=_serve_secondary(secondary_server, 52401, device.name)
+    )
+
+    assert response.status_code == 200
+    assert b"Change it on the sync page" in response.content
+    assert _INTENT_PATTERN.search(response.content.decode()) is None
+    device.refresh_from_db()
+    assert mapping_summary(device) == {"secondary": {"own": 52301}}
+
+
+@pytest.mark.django_db
+def test_a_confirmed_replacement_meets_a_port_written_after_the_offer(client, secondary_server):
+    from netbox_librenms_plugin.tests.conftest import make_interface
+
+    device = seed_mapping(make_device("replace-cascade-late"), "secondary", own=52311)
+    interface = make_interface(device, "eth0")
+    client.force_login(make_superuser("identity-replacement-cascade-late"))
+    server = _serve_secondary(secondary_server, 52411, device.name)
+    token = _offered_token(_post_action(client, 52411, device, "link", server=server))
+    seed_mapping(interface, "secondary", own=52312)
+
+    response = _post_confirmation(client, 52411, token, server=server)
+
+    assert b"Change it on the sync page" in response.content
+    device.refresh_from_db()
+    assert mapping_summary(device) == {"secondary": {"own": 52311}}
+    interface.refresh_from_db()
+    assert mapping_summary(interface) == {"secondary": {"own": 52312}}
+
+
+@transactional_db_with_all_apps()
+def test_a_confirmed_replacement_waits_for_a_port_writer_on_a_scope_interface_and_then_refuses(
+    client, secondary_server
+):
+    """The port writer holds the interface row: the replacement waits for its commit, then sees the port."""
+    from dcim.models import Interface
+
+    from netbox_librenms_plugin.tests.conftest import make_interface
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import commit_when_waited
+
+    device = seed_mapping(make_device("replace-cascade-race"), "secondary", own=52321)
+    interface = make_interface(device, "eth0")
+    client.force_login(make_superuser("identity-replacement-cascade-race"))
+    server = _serve_secondary(secondary_server, 52421, device.name)
+    token = _offered_token(_post_action(client, 52421, device, "link", server=server))
+    port = seed_mapping(Interface(), "secondary", own=52322, save=False)
+
+    response = commit_when_waited(
+        lambda other: seed_mapping_row(interface, port, connection=other),
+        lambda: _post_confirmation(client, 52421, token, server=server),
+    )
+
+    assert b"Change it on the sync page" in response.content
+    device.refresh_from_db()
+    assert mapping_summary(device) == {"secondary": {"own": 52321}}
+    interface.refresh_from_db()
+    assert mapping_summary(interface) == {"secondary": {"own": 52322}}
+
+
+@contextmanager
+def _before_first_statement(matches, action):
+    """Run *action* once, just before the first statement on the test's connection that *matches* runs."""
+    from django.db import connection
+
+    ran = []
+
+    def hook(execute, sql, params, many, context):
+        if not ran and matches(sql):
+            ran.append(sql)
+            action()
+        return execute(sql, params, many, context)
+
+    with connection.execute_wrapper(hook):
+        yield ran
+
+
+def _chassis_lock(sql):
+    return 'FROM "dcim_virtualchassis"' in sql and "FOR UPDATE" in sql
+
+
+def _interface_lock(sql):
+    return 'FROM "dcim_interface"' in sql and "FOR UPDATE" in sql
+
+
+@transactional_db_with_all_apps()
+def test_a_replacement_refuses_when_the_device_moves_to_another_chassis_before_the_lock(client, secondary_server):
+    """The import read chassis A, the device moved to B before the lock: B's scope is not locked, so it refuses."""
+    from dcim.models import Device
+
+    from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import commit_row_change, second_connection
+    from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE
+
+    _first, (_master, device) = make_virtual_chassis_members("replace-moved")
+    other_chassis, _members = make_virtual_chassis_members("replace-moved-to", count=1)
+    seed_mapping(device, "secondary", own=52331)
+    client.force_login(make_superuser("identity-replacement-moved"))
+    server = _serve_secondary(secondary_server, 52431, device.name)
+    token = _offered_token(_post_action(client, 52431, device, "link", server=server))
+
+    def move_the_device():
+        with second_connection() as other:
+            commit_row_change(other, Device, device.pk, {"virtual_chassis_id": other_chassis.pk, "vc_position": 5})
+
+    with _before_first_statement(_chassis_lock, move_the_device) as ran:
+        response = _post_confirmation(client, 52431, token, server=server)
+
+    assert ran
+    assert TRY_AGAIN_MESSAGE.encode() in response.content
+    device.refresh_from_db()
+    assert device.virtual_chassis_id == other_chassis.pk
+    assert mapping_summary(device) == {"secondary": {"own": 52331}}
+
+
+@transactional_db_with_all_apps()
+def test_a_device_that_joins_the_locked_chassis_waits_for_the_replacement(client, secondary_server):
+    """The import holds the chassis row, so a join, which locks that row for key share, waits for the commit."""
+    from queue import Queue
+
+    from netbox_librenms_plugin.tests.conftest import bounded_executor, make_interface, make_virtual_chassis_members
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import backend_pid, second_connection, wait_for_lock_wait
+
+    chassis, (_master, device) = make_virtual_chassis_members("replace-join")
+    joiner = make_device("replace-join-new-member")
+    seed_mapping(make_interface(joiner, "eth0"), "secondary", own=52342)
+    seed_mapping(device, "secondary", own=52341)
+    client.force_login(make_superuser("identity-replacement-join"))
+    server = _serve_secondary(secondary_server, 52441, device.name)
+    token = _offered_token(_post_action(client, 52441, device, "link", server=server))
+    pids = Queue()
+
+    joins = []
+
+    def join_the_chassis():
+        with second_connection() as other:
+            pids.put(backend_pid(other))
+            with other.cursor() as cursor:
+                cursor.execute(
+                    'UPDATE "dcim_device" SET "virtual_chassis_id" = %s, "vc_position" = 5 WHERE id = %s',
+                    [chassis.pk, joiner.pk],
+                )
+            other.commit()
+
+    with bounded_executor(max_workers=1) as executor:
+
+        def start_the_join_and_wait_until_it_waits():
+            joins.append(executor.submit(join_the_chassis))
+            with second_connection() as observer:
+                wait_for_lock_wait(observer, pids.get(timeout=5))
+
+        with _before_first_statement(_interface_lock, start_the_join_and_wait_until_it_waits) as ran:
+            response = _post_confirmation(client, 52441, token, server=server)
+        joins[0].result(timeout=10)
+
+    assert ran
+    assert response.status_code == 200
+    device.refresh_from_db()
+    joiner.refresh_from_db()
+    assert mapping_summary(device) == {"secondary": {"own": 52441}}
+    assert joiner.virtual_chassis_id == chassis.pk
+
+
+@transactional_db_with_all_apps()
+def test_a_conflict_at_the_commit_sends_no_event_of_the_replacement(client, secondary_server, flushed_events):
+    """The change record's user foreign key meets a real 55P03 at the commit, after the device event was queued."""
+    from django.contrib.auth import get_user_model
+
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import lock_row, lock_timeout, second_connection
+    from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE
+
+    device = seed_mapping(make_device("replace-late"), "secondary", own=52351)
+    user = make_superuser("identity-replacement-late")
+    client.force_login(user)
+    server = _serve_secondary(secondary_server, 52451, device.name)
+    token = _offered_token(_post_action(client, 52451, device, "link", server=server))
+    flushed_events.clear()
+
+    with second_connection() as other:
+        lock_row(other, get_user_model(), user.pk)
+        with lock_timeout(200):
+            response = _post_confirmation(client, 52451, token, server=server)
+
+    assert TRY_AGAIN_MESSAGE.encode() in response.content
+    device.refresh_from_db()
+    assert mapping_summary(device) == {"secondary": {"own": 52351}}
+    assert flushed_events == []

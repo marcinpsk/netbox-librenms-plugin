@@ -153,7 +153,7 @@ class TestSyncPageRouting:
         assert response.status_code == 200
         assert response.context["server_selection_blocked"] is True
         assert response.context["server_key"] == "retired"
-        assert response.context["lookup_device_pk"] == mapped.pk
+        assert response.context["mapping_owner"] == mapped
         assert response.context["has_librenms_id"] is False
         assert [mapping.server_key for mapping in response.context["all_server_mappings"]] == [SERVER_KEY]
 

@@ -12,13 +12,13 @@ import re
 import time
 
 import pytest
-from dcim.models import Device
+from dcim.models import Device, Interface
 from django.core import signing
 from ipam.models import VLAN, VLANGroup
 
 from netbox_librenms_plugin import confirmation_intent as intent
 from netbox_librenms_plugin.tests import link_intent_helpers as links
-from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, make_device
+from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, make_device, make_interface
 from netbox_librenms_plugin.tests.mapping_fixtures import mapping_summary, seed_mapping, seed_quarantined
 from netbox_librenms_plugin.tests.view_test_helpers import domain_state, make_user_with_perms
 from netbox_librenms_plugin.tests.vlan_intent_helpers import message_texts, reassess, seed_vlans, sync, tab_tokens
@@ -318,10 +318,138 @@ class _LinkScenario:
         return [legacy, f"mapping_lifecycle:{legacy}"]
 
 
+class _HostChangeScenario:
+    """A device linked on two servers, with a port on one interface, and a user who may change it and its interfaces."""
+
+    resource = intent.Resource.MAPPING_LIFECYCLE
+    permissions = [(action, model) for model in (Device, Interface) for action in ("view", "change")]
+    relevant = {
+        "port_changed": "effects.interfaces.digest",
+        "interface_added": "effects.interfaces.count",
+        "oob_changed": "assumptions.entry.oob_id",
+        "stored_value_invalid": "assumptions.scoped",
+    }
+    unrelated = ("name_changed", "description_changed", "other_server_port", "port_outside_the_scope")
+    target_gone_path = "effects.interfaces.count"
+    revoked = "change"
+
+    def __init__(self, tag, client, settings, librenms_server):
+        self.tag = tag
+        self.client = client
+        self.device = self.linked(f"contract-{tag}")
+        self.interface = make_interface(self.device, "eth0")
+        seed_mapping(self.interface, "default", own=7400)
+        self.user = make_user_with_perms(f"contract-{tag}", self.permissions)
+        client.force_login(self.user)
+
+    @staticmethod
+    def linked(name):
+        device = seed_mapping(make_device(name), "default", own=7200, save=False)
+        seed_mapping(device, "default", oob=7201, oob_type="idrac", save=False)
+        return seed_mapping(device, "other", own=7300)
+
+    def submit(self, tokens, *, subject=None, server_key="default"):
+        subject = subject or self.device
+        return self.client.post(links.lifecycle_url(subject), {"server_key": server_key, intent.FIELD: list(tokens)})
+
+    def stale_paths(self, response):
+        return links.stale_paths(response, self.device.name)
+
+    def entry(self):
+        return mapping_summary(Device.objects.get(pk=self.device.pk)).get("default", {})
+
+    def change(self, name):
+        if name == "port_changed":
+            seed_mapping(Interface.objects.get(pk=self.interface.pk), "default", own=7401)
+        elif name == "interface_added":
+            seed_mapping(make_interface(self.device, "eth1"), "default", own=7402)
+        elif name == "oob_changed":
+            seed_mapping(Device.objects.get(pk=self.device.pk), "default", oob=7202, oob_type="ilo")
+        elif name == "stored_value_invalid":
+            seed_quarantined(Device.objects.get(pk=self.device.pk))
+        elif name == "another_object_took_the_id":
+            seed_mapping(make_device(f"owner-{self.tag}"), "default", own=self.claimed)
+        elif name == "name_changed":
+            Device.objects.filter(pk=self.device.pk).update(name=f"renamed-{self.tag}")
+            self.device.name = f"renamed-{self.tag}"
+        elif name == "description_changed":
+            Device.objects.filter(pk=self.device.pk).update(description="changed")
+        elif name == "other_server_port":
+            seed_mapping(Interface.objects.get(pk=self.interface.pk), "other", own=7403)
+        elif name == "port_outside_the_scope":
+            seed_mapping(make_interface(make_device(f"outside-{self.tag}"), "eth0"), "default", own=7404)
+        else:
+            raise AssertionError(name)
+
+    def remove_target(self):
+        self.interface.delete()
+
+    def revoke(self, action):
+        from users.models import ObjectPermission
+
+        ObjectPermission.objects.filter(users=self.user, actions=[action], object_types__model="device").delete()
+
+    def other_subject(self):
+        return self.linked(f"other-subject-{self.tag}")
+
+    def prepare_server(self, server_key):
+        pass
+
+    def legacy_tokens(self):
+        legacy = signing.dumps(
+            {"object_pk": self.device.pk, "server_key": "default"}, salt="netbox_librenms_plugin.unlink", compress=True
+        )
+        return [legacy, f"mapping_lifecycle:{legacy}"]
+
+
+class _UnlinkScenario(_HostChangeScenario):
+    """The Unlink action of the sync page offers the unlink of the default server."""
+
+    action = "unlink"
+
+    def mint(self):
+        return links.offered_token(links.unlink_page(self.client, self.device))
+
+    def applied(self):
+        return mapping_summary(Device.objects.get(pk=self.device.pk)) == {"other": {"own": 7300}}
+
+
+class _RelinkScenario(_HostChangeScenario):
+    """The mapping editor offers the replacement of the own ID 7200 with 7210."""
+
+    action = "relink"
+    claimed = 7210
+    relevant = {**_HostChangeScenario.relevant, "another_object_took_the_id": "assumptions.owned"}
+
+    def mint(self):
+        return links.offered_token(links.edit_mapping(self.client, self.device, own_id=str(self.claimed)))
+
+    def applied(self):
+        return self.entry().get("own") == self.claimed
+
+
+class _ChangeOOBScenario(_HostChangeScenario):
+    """The mapping editor offers the replacement of the OOB controller 7201 with 7211."""
+
+    action = "change_oob"
+    claimed = 7211
+    relevant = {**_HostChangeScenario.relevant, "another_object_took_the_id": "assumptions.owned"}
+
+    def mint(self):
+        typed = {"oob_id": str(self.claimed), "oob_type": "ilo"}
+        return links.offered_token(links.edit_mapping(self.client, self.device, **typed))
+
+    def applied(self):
+        return self.entry().get("oob") == self.claimed
+
+
 SCENARIOS = {
     (intent.Resource.VLAN, "create"): _VLANCreateScenario,
     (intent.Resource.VLAN, "update"): _VLANUpdateScenario,
     (intent.Resource.MAPPING_LIFECYCLE, "link"): _LinkScenario,
+    (intent.Resource.MAPPING_LIFECYCLE, "unlink"): _UnlinkScenario,
+    (intent.Resource.MAPPING_LIFECYCLE, "relink"): _RelinkScenario,
+    (intent.Resource.MAPPING_LIFECYCLE, "change_oob"): _ChangeOOBScenario,
 }
 ACTION_IDS = {key: f"{key[0]}.{key[1]}" for key in SCENARIOS}
 
@@ -481,7 +609,7 @@ class TestContract:
     def test_another_action_refuses(self, scenario_for, key):
         scenario = scenario_for(key)
         token = scenario.mint()
-        others = sorted({action for _resource, action in SCENARIOS} - {key[1]}) + ["delete", "unlink"]
+        others = sorted({action for _resource, action in SCENARIOS} - {key[1]}) + ["delete", "convert"]
 
         for other in others:
             _assert_refused(scenario, [_resign(token, lambda envelope, other=other: envelope.update(action=other))])

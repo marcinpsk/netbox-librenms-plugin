@@ -7,7 +7,10 @@ from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 # Views that apply no assessed change carry no confirmation intent (section 4 of the #177 design).
 EXEMPT_VIEWS = {
     "SetPreferredServerView": "the operator names the server",
-    "EditServerMappingView": "the operator names the server and its IDs",
+    "EditServerMappingView": (
+        "the operator names the server and its IDs; a replacement or a clear only renders the "
+        "MappingLifecycleView confirmation and writes nothing"
+    ),
     "AddDeviceToLibreNMSView": "writes LibreNMS, outside NetBox reconciliation",
     "UpdateDeviceLocationView": "writes LibreNMS, outside NetBox reconciliation",
     "SyncSiteLocationView": "writes LibreNMS, outside NetBox reconciliation",
@@ -35,7 +38,6 @@ MIGRATION_INVENTORY = {
     "CreateAndAssignPlatformView": "device_field",
     "CreateAndAssignVMPlatformView": "device_field",
     "AssignVCSerialView": "device_field",
-    "RemoveServerMappingView": "mapping_lifecycle",
     "ConvertLegacyLibreNMSIdView": "mapping_lifecycle",
     "SyncInterfacesView": "interface",
     "SyncInterfaceLagView": "interface",
@@ -79,7 +81,6 @@ _INVENTORY_CEILING = frozenset(
         "CreateAndAssignPlatformView",
         "CreateAndAssignVMPlatformView",
         "AssignVCSerialView",
-        "RemoveServerMappingView",
         "ConvertLegacyLibreNMSIdView",
         "SyncInterfacesView",
         "SyncInterfaceLagView",
@@ -148,7 +149,6 @@ def pytest_generate_tests(metafunc):
             "SyncIPAddressesView",
             "CreateVRFFromIPRowView",
             "AddDeviceToLibreNMSView",
-            "RemoveServerMappingView",
             "SetPreferredServerView",
             "EditServerMappingView",
             "ConvertLegacyLibreNMSIdView",
@@ -424,4 +424,4 @@ class TestConfirmationInventory:
         }
         assert {"SyncVLANsView", "MappingLifecycleView", "BulkLinkView"} <= migrated
         assert migrated & set(MIGRATION_INVENTORY) == set()
-        assert {"RemoveServerMappingView", "AddAsOOBView", "ConvertLegacyLibreNMSIdView"} <= set(MIGRATION_INVENTORY)
+        assert {"AddAsOOBView", "ConvertLegacyLibreNMSIdView"} <= set(MIGRATION_INVENTORY)

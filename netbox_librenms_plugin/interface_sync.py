@@ -8,7 +8,6 @@ from copy import copy, deepcopy
 from typing import NamedTuple
 
 from dcim.models import Device, Interface, MACAddress
-from django.db import transaction
 from virtualization.models import VirtualMachine, VMInterface
 
 from netbox_librenms_plugin.constants import INTERFACE_NAME_KEY, INTERFACE_SYNC_FIELD_PAIRS
@@ -34,7 +33,7 @@ from netbox_librenms_plugin.utils import (
     convert_speed_to_kbps,
     interface_name_rejection_reason,
 )
-from netbox_librenms_plugin.transactions import first_at_version, row_changed, save_at_version
+from netbox_librenms_plugin.transactions import atomic_with_events, first_at_version, row_changed, save_at_version
 
 logger = logging.getLogger(__name__)
 
@@ -364,7 +363,7 @@ def assign_interface_mac(interface, mac_address):
     return changed
 
 
-@transaction.atomic
+@atomic_with_events()
 def update_interface_from_port(  # noqa: C901
     interface,
     librenms_interface,
@@ -455,7 +454,7 @@ def update_interface_from_port(  # noqa: C901
     return write_interface_row(interface, apply_port, fresh_read_queryset=fresh_read_queryset, created=created)
 
 
-@transaction.atomic
+@atomic_with_events()
 def resolve_or_create_interface_from_port(  # noqa: C901
     owner,
     librenms_interface,

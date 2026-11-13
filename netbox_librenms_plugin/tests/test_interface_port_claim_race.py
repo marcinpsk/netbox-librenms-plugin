@@ -4,8 +4,7 @@ from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_mapped_modules
 
 import time
-from concurrent.futures import wait
-from threading import Event
+from threading import Event, local
 
 from netbox_librenms_plugin.tests.source_snapshot_helpers import transceiver_row
 
@@ -13,6 +12,7 @@ import pytest
 from django.apps import apps
 
 from netbox_librenms_plugin.server_mappings import MappingRole, identity_q
+from netbox_librenms_plugin.sync_cache import SyncCacheConsistency
 from netbox_librenms_plugin.tests.conftest import (
     bounded_executor,
     configure_default_librenms_server,
@@ -25,7 +25,6 @@ from netbox_librenms_plugin.tests.interface_sync_post_helpers import (
     seed_ports,
     sync_port,
 )
-from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE
 
 PORT = 9301
 LIBRENMS_DEVICE_ID = 71
@@ -45,6 +44,10 @@ _INVENTORY_ITEM = {
     "entPhysicalModelName": "port-claim-mt",
 }
 _SNAPSHOT_FIELDS = ("name", "mtu", "description", "enabled", "custom_field_data", "last_updated", "module_id")
+SYNCED = "Selected interfaces synced successfully."
+TABS_CLEARED = "Other sync tabs were cleared because you synchronized data from LibreNMS."
+# Per thread: the event that the tab cleanup of this writer waits for; the race sets it for each writer.
+_writer = local()
 
 pytestmark = pytest.mark.django_db(
     transaction=True,
@@ -60,6 +63,19 @@ def restore_librenms_id_custom_field():
     executed_aliases = getattr(_ensure_librenms_id_custom_field, "_executed_aliases", set())
     executed_aliases.discard("default")
     _ensure_librenms_id_custom_field(sender=None, using="default")
+
+
+@pytest.fixture(autouse=True)
+def first_writer_clears_the_tabs_after_the_second_answers(monkeypatch):
+    """Hold the first writer's post-commit tab cleanup, so the second writer reads the same snapshots in every run."""
+    real_apply = SyncCacheConsistency._apply_mutation
+
+    def apply_after_the_second_answer(self, *args, **kwargs):
+        if (second_answered := getattr(_writer, "cleanup_waits_for", None)) is not None:
+            assert second_answered.wait(timeout=RELEASE_TIMEOUT_SECONDS), "the second writer did not answer"
+        return real_apply(self, *args, **kwargs)
+
+    monkeypatch.setattr(SyncCacheConsistency, "_apply_mutation", apply_after_the_second_answer)
 
 
 def _seed():
@@ -149,11 +165,12 @@ def _module_bind(user_pk, form):
     return messages_on(response.wsgi_request)
 
 
-def _on_own_connection(writer, *args, pids, role, paused=None, resume=None):
+def _on_own_connection(writer, *args, pids, role, paused=None, resume=None, answered):
     """Run *writer* on a bounded connection of this thread; pause at the first interface write if *paused* is set."""
     from django.db import close_old_connections, connection
 
     first_write = True
+    _writer.cleanup_waits_for = answered if role == "first" else None
 
     def pause_at_first_interface_write(execute, sql, params, many, context):
         nonlocal first_write
@@ -174,24 +191,35 @@ def _on_own_connection(writer, *args, pids, role, paused=None, resume=None):
             return writer(*args)
     finally:
         connection.close()
+        if role == "second":
+            answered.set()
 
 
 def _race(first, second, while_first_paused):
     """Pause *first* at its first interface write, run *second*, observe, then release *first*."""
-    first_paused, resume, pids = Event(), Event(), {}
+    first_paused, resume, second_answered, pids = Event(), Event(), Event(), {}
     with bounded_executor(max_workers=2) as executor:
         try:
             first_future = executor.submit(
-                _on_own_connection, *first, pids=pids, role="first", paused=first_paused, resume=resume
+                _on_own_connection,
+                *first,
+                pids=pids,
+                role="first",
+                paused=first_paused,
+                resume=resume,
+                answered=second_answered,
             )
             assert first_paused.wait(timeout=PAUSE_TIMEOUT_SECONDS), "the first writer never reached its write"
-            second_future = executor.submit(_on_own_connection, *second, pids=pids, role="second")
+            second_future = executor.submit(
+                _on_own_connection, *second, pids=pids, role="second", answered=second_answered
+            )
             observed = while_first_paused(second_future, pids)
             resume.set()
             first_result = first_future.result(timeout=PAUSE_TIMEOUT_SECONDS)
             second_result = second_future.result(timeout=PAUSE_TIMEOUT_SECONDS)
         finally:
             resume.set()
+            second_answered.set()
     return first_result, second_result, observed
 
 
@@ -208,12 +236,6 @@ def _second_waits_on_first(_second_future, pids):
                     return True
         time.sleep(0.05)
     return False
-
-
-def _second_finishes_alone(second_future, _pids):
-    """Return True when the second writer finishes while the first writer is still paused."""
-    done, _pending = wait([second_future], timeout=PAUSE_TIMEOUT_SECONDS)
-    return second_future in done
 
 
 def test_two_interface_syncs_of_one_device_wait_on_the_device_row_lock(settings):
@@ -237,15 +259,15 @@ def test_two_interface_syncs_of_one_device_wait_on_the_device_row_lock(settings)
             f"Interface '{SHORT_NAME}' kept its current name because the reported name is in use "
             f"on the same interface owner: '{LONG_NAME}'.",
         ),
-        ("success", "Selected interfaces synced successfully."),
+        ("success", SYNCED),
     ]
     assert _persisted(long) == before
 
 
 @pytest.mark.parametrize("first_writer", ["interface_sync", "module_bind"])
-def test_module_bind_and_interface_sync_of_one_device_leave_one_holder(settings, first_writer):
+def test_module_bind_and_interface_sync_of_one_device_wait_on_the_device_row_lock(settings, first_writer):
     """The module action binds Gi0/1 by ifName while the ifDescr sync binds GigabitEthernet0/1."""
-    # The module action takes no device row lock, so only the port claim can refuse the second writer.
+    # The module action locks the device row FOR KEY SHARE and the sync FOR UPDATE, so the second writer waits.
     configure_default_librenms_server(settings)
     device, module, short, long = _seed()
     user_pk = make_superuser("port-claim-user").pk
@@ -256,12 +278,28 @@ def test_module_bind_and_interface_sync_of_one_device_leave_one_holder(settings,
     before = _persisted(loser)
     _winner_row, winner_changes = _persisted(winner)
 
-    _first, second_messages, second_finished_alone = _race(first, second, _second_finishes_alone)
+    _first, second_messages, second_waited = _race(first, second, _second_waits_on_first)
 
-    assert second_finished_alone, "the second writer did not finish while the first writer held its claim"
+    assert second_waited, "the second writer did not wait on the first writer's backend"
     assert _port_holders() == [winner.pk]
-    # A busy claim is a lock conflict: both writers answer with the middleware's one "try again" text.
-    assert second_messages == [("error", TRY_AGAIN_MESSAGE)]
     assert _persisted(loser) == before
     # A change record for the winner shows that both writers run with change logging on.
     assert _persisted(winner)[1] > winner_changes
+    if first_writer == "interface_sync":
+        # The bind finds the port on the interface that the sync bound, and moves it into the module.
+        assert second_messages == [
+            ("success", f"Updated interface {LONG_NAME} for port-claim-mt in port-claim-bay."),
+            ("info", TABS_CLEARED),
+        ]
+        long.refresh_from_db()
+        assert long.module_id == module.pk
+    else:
+        assert second_messages == [
+            (
+                "warning",
+                f"Interface '{SHORT_NAME}' kept its current name because the reported name is in use "
+                f"on the same interface owner: '{LONG_NAME}'.",
+            ),
+            ("success", SYNCED),
+            ("info", TABS_CLEARED),
+        ]

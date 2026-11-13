@@ -9,7 +9,7 @@ from urllib.parse import quote_plus, urlsplit
 
 from django.contrib import messages
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError, models, transaction
+from django.db import IntegrityError, connection, models
 from django.http import HttpResponse, QueryDict
 from django.shortcuts import redirect, render
 from django.urls import reverse
@@ -45,6 +45,7 @@ from netbox_librenms_plugin.server_mappings import (
     persist_mapping,
     prefetch_mappings,
     read_mapping,
+    save_mapping_fields,
 )
 from netbox_librenms_plugin.serial_identity import (
     RELOCATION_HELD,
@@ -305,7 +306,8 @@ def _resolve_destination(page_device, selected_device_id, devices):
     """
     Return the posted target: the page device, or a member of its Virtual Chassis in *devices*.
 
-    Every module view refuses an invalid target instead of falling back to the page device.
+    Every module view refuses an invalid target instead of falling back to the page device. A
+    writer checks the target again under lock with ``_lock_module_destinations``.
 
     Args:
         page_device (Device): The device whose Modules page posted the action.
@@ -332,6 +334,34 @@ def _resolve_destination(page_device, selected_device_id, devices):
     )
 
 
+def _lock_module_destinations(page_device, target_ids):
+    """
+    Lock the page device and the write targets in pk order, and refuse a target that left the page's chassis.
+
+    A module writer calls this in its transaction before its first row lock. A member that leaves
+    the chassis changes a key column of its Device row (the chassis position is unique), so the
+    leave waits until the writer commits. The page device must keep the chassis it had when the
+    request read it.
+
+    Raises:
+        GrantRefused: DESTINATION when a target is gone, or is not the page device or a member of its chassis.
+
+    """
+    chassis_id = page_device.virtual_chassis_id
+    # Key share (Django has no API for it): a chassis change or a delete waits; a counter update does not.
+    with connection.cursor() as cursor:
+        cursor.execute(
+            'SELECT "id", "virtual_chassis_id" FROM "dcim_device" WHERE "id" = ANY(%s) ORDER BY "id" FOR KEY SHARE',
+            [sorted({page_device.pk, *target_ids})],
+        )
+        locked = dict(cursor.fetchall())
+    if page_device.pk not in locked or locked[page_device.pk] != chassis_id:
+        raise GrantRefused(GrantRefusal.DESTINATION)
+    for target_id in target_ids:
+        if target_id != page_device.pk and (chassis_id is None or locked.get(target_id) != chassis_id):
+            raise GrantRefused(GrantRefusal.DESTINATION)
+
+
 @dataclass(frozen=True)
 class _GrantedInventory:
     """An authenticated grant with the snapshot and the policy it was checked against."""
@@ -351,8 +381,34 @@ class _GrantedInventory:
         return item
 
 
+def _lock_module_scope(page_device):
+    """
+    Lock the page device and every member of its chassis in pk order, before a writer reads its grant.
+
+    A bulk writer learns its targets from the grant, so it locks every possible target first. The
+    locks are the ones that ``_lock_module_destinations`` takes, so a later call for the targets waits for nothing.
+
+    Raises:
+        GrantRefused: DESTINATION when the page device left its chassis, or a member left it meanwhile.
+
+    """
+    from dcim.models import Device
+
+    members = set()
+    if page_device.virtual_chassis_id:
+        members = set(
+            Device.objects.filter(virtual_chassis_id=page_device.virtual_chassis_id).values_list("pk", flat=True)
+        )
+    _lock_module_destinations(page_device, members)
+
+
 def _authorize_module_grant(page_device, server_key, action, token):
-    """Read the granted source and policy before a module write."""
+    """
+    Read the granted source and policy before a module write.
+
+    A writer locks the page device first. The read then loads the page device again, so the source
+    binding includes a host change that committed while the writer waited for the lock.
+    """
     from dcim.models import Device
     from netbox_librenms_plugin.models import RuleConfigurationError
 
@@ -360,6 +416,10 @@ def _authorize_module_grant(page_device, server_key, action, token):
     from netbox_librenms_plugin.acquisition.registry import Resource
     from netbox_librenms_plugin.acquisition.resources import blocked_scopes
 
+    try:
+        page_device.refresh_from_db()
+    except Device.DoesNotExist as exc:
+        raise GrantRefused(GrantRefusal.SNAPSHOT) from exc
     sync_device = _get_sync_device_for_inventory(page_device, server_key)
     snapshot = source_cache.read(sync_device, Resource.MODULES, server_key)
     if snapshot is None:
@@ -580,7 +640,7 @@ def _adopt_existing_template_interfaces(device, module, interfaces):
         }
 
     adopted_names = []
-    with transaction.atomic():
+    with atomic_with_events():
         for interface in adoptable:
             interface.snapshot()
             interface.module = module
@@ -822,7 +882,20 @@ def _module_may_own_interface(device, module_pk, name):
     return get_module_adoptable_interface_names(device, module).may_move(name)
 
 
-# Its own savepoint: callers catch a non-conflict error and keep their transaction.
+def _lock_module_on_device(module_pk, device_id):
+    """Lock the module row and return whether the module is still on *device_id*."""
+    from dcim.models import Module
+
+    return (
+        Module.objects.select_for_update(of=("self",))
+        .filter(pk=module_pk, device_id=device_id)
+        .values_list("pk", flat=True)
+        .first()
+        is not None
+    )
+
+
+# Its own savepoint: callers keep their transaction for a non-conflict error, but not for a refusal.
 @row_savepoint()
 def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces):
     """
@@ -844,6 +917,8 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
 
     Raises:
         LibreNMSPortBindingBusy: Another open transaction holds the claim on the port.
+        _ModuleActionRefused: The module is no longer on the device, so the whole action rolls back.
+        ValidationError: A field that the bind writes is not valid.
 
     """
     port_id, interface_names = _get_item_port_identity(item)
@@ -902,7 +977,13 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
         update_fields.append("module")
 
     def save(row, mapping_fields=frozenset()):
-        row.save(update_fields=[*update_fields, *mapping_fields, "last_updated"])
+        # NetBox does not check that the module is on the interface's device; the lock waits for a move.
+        if set_module and not _lock_module_on_device(module_pk, row.device_id):
+            raise _ModuleActionRefused(
+                f"Nothing was changed: the module is no longer on the device of {row.name}. Refresh and try again."
+            )
+        # A ValidationError reaches the caller's handler, which shows the text that the user may read.
+        save_mapping_fields(row, [*update_fields, *mapping_fields])
 
     if bind_port:
         persist_mapping(candidate, assign_own(candidate, server_key, port_id), write=save)
@@ -1052,6 +1133,7 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         try:
             with atomic_with_events():
                 _lock_page_device_serials(page_device)
+                _lock_module_destinations(page_device, {target_device.pk})
                 bind_item = None
                 incoming = None
                 serial = ""
@@ -1115,6 +1197,8 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                             server_key,
                             changeable_interfaces,
                         )
+                    except _ModuleActionRefused:
+                        raise
                     except Exception as exc:
                         if classify_conflict(exc):
                             raise
@@ -1221,6 +1305,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         # The advisory lock does not refresh model instances loaded before its wait.
         page_device = self.restrict_object_or_404(Device, pk=page_device.pk)
         try:
+            _lock_module_scope(page_device)
             granted = _authorize_module_grant(
                 page_device, server_key, ACTION_INSTALL_BRANCH, request.POST.get("inventory_binding")
             )
@@ -1254,6 +1339,11 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         }
         if len(targets) != len({target_id for _item, target_id in entries}):
             messages.error(request, "An inventory destination is unavailable. Refresh Modules and try again.")
+            return
+        try:
+            _lock_module_destinations(page_device, set(targets))
+        except GrantRefused as exc:
+            messages.error(request, exc.refusal.message)
             return
 
         # The parent-module walk keeps a row's whole attributed subtree, hidden holders too.
@@ -1326,6 +1416,9 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                             changeable_interfaces,
                         )
                         bound_any = _record_bind_outcome(bind_result, result, skipped) or bound_any
+        except _ModuleActionRefused as exc:
+            exc.report(request)
+            return
         except (AbortRequest, ValidationError, IntegrityError) as e:
             if classify_conflict(e):
                 raise
@@ -1974,6 +2067,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         try:
             with atomic_with_events():
                 _lock_page_device_serials(page_device)
+                _lock_module_scope(page_device)
                 granted = _authorize_module_grant(
                     page_device, server_key, ACTION_INSTALL_SELECTED, request.POST.get("inventory_binding")
                 )
@@ -2106,6 +2200,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         }
         if len(targets) != len(target_ids):
             raise GrantRefused(GrantRefusal.DESTINATION)
+        _lock_module_destinations(page_device, target_ids)
         return [(granted.row(index), targets[target_id], pinned) for index, target_id, pinned in plan]
 
 
@@ -2149,6 +2244,7 @@ class UpdateModuleSerialView(
 
         try:
             with atomic_with_events():
+                _lock_module_destinations(page_device, {target_device.pk})
                 granted = _authorize_module_grant(
                     page_device, server_key, ACTION_UPDATE_SERIAL, request.POST.get("inventory_binding")
                 )
@@ -2244,8 +2340,9 @@ class UpdateModuleInterfaceView(
         bind_result = None
         adoption_failed = False
         try:
-            # One transaction: a lock conflict in the bind or the adoption rolls back both.
-            with transaction.atomic():
+            # One transaction: a lock conflict in the bind or the adoption rolls back both, and their events.
+            with atomic_with_events():
+                _lock_module_destinations(page_device, {target_device.pk})
                 granted = _authorize_module_grant(
                     page_device, server_key, ACTION_UPDATE_INTERFACE, request.POST.get("inventory_binding")
                 )
@@ -2305,6 +2402,8 @@ class UpdateModuleInterfaceView(
                 server_key,
                 changeable_interfaces,
             )
+        except _ModuleActionRefused:
+            raise
         except Exception as exc:
             if classify_conflict(exc):
                 raise
@@ -2327,7 +2426,7 @@ class UpdateModuleInterfaceView(
             # A hard conflict/skip is left untouched so we don't mutate past an unresolved issue.
             if bind_result is None or bind_result.get("status") == "bound":
                 try:
-                    with transaction.atomic():
+                    with atomic_with_events():
                         adopt_result = _adopt_existing_template_interfaces(
                             target_device,
                             module,
@@ -2531,14 +2630,17 @@ class ApplyModuleInterfaceTypesView(
         }
         validation_failures = []
         try:
-            with transaction.atomic():
+            with atomic_with_events():
+                _lock_module_destinations(page_device, {target_device.pk})
                 template_types = _module_interface_type_targets(target_device, module)
-                interfaces = list(
+                # The host change cascade locks interfaces in pk order too; the messages list them by name.
+                locked = (
                     self.restricted_queryset(Interface, "change")
                     .select_for_update(of=("self",))
                     .filter(module=module, pk__in=interface_ids)
-                    .order_by("name", "pk")
+                    .order_by("pk")
                 )
+                interfaces = sorted(locked, key=lambda interface: (interface.name, interface.pk))
                 unavailable_count = len(interface_ids) - len(interfaces)
                 for interface in interfaces:
                     template_type = template_types.get(interface.name)
@@ -2553,6 +2655,9 @@ class ApplyModuleInterfaceTypesView(
                         validation_failures.append((interface.name, reason))
                     else:
                         outcomes[outcome].append(interface.name)
+        except GrantRefused as exc:
+            messages.error(request, exc.refusal.message)
+            return _modules_action_response(request, page_device, server_key)
         except _InterfaceChangeScopeViolation as exc:
             messages.error(
                 request,
@@ -2884,6 +2989,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
             adopted_components = 0
             vc_adjustments = {"renamed": 0, "adopted": 0, "removed": 0, "skipped": 0}
             with atomic_with_events():
+                _lock_module_destinations(page_device, {target_device.pk})
                 granted = _authorize_module_grant(
                     page_device, server_key, ACTION_REPLACE_MODULE, request.POST.get("inventory_binding")
                 )
@@ -2995,6 +3101,8 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                             server_key,
                             changeable_interfaces,
                         )
+                    except _ModuleActionRefused:
+                        raise
                     except Exception as exc:
                         if classify_conflict(exc):
                             raise
@@ -3098,6 +3206,25 @@ class MoveModuleView(
     SYNC_SUBJECT_MODEL_LABEL = "dcim.device"
     DROP_SYNC_SUBJECT_CLAIM_WITHOUT_SERVER = True
 
+    def _remove_bay_occupant(self, module, occupant_id, target_device, target_bay):
+        """Delete the posted occupant of the target bay when it is not *module*; return the message, or None."""
+        from dcim.models import Module
+
+        if not occupant_id or occupant_id == module.pk:
+            return None
+        # Scoped by "delete": the device and bay filters prove where the row sits, not that
+        # the grant covers it, and the gate asked has_perm without an instance.
+        occupant = (
+            self.restricted_queryset(Module, "delete")
+            .select_for_update(of=("self",))
+            .filter(pk=occupant_id, device=target_device, module_bay=target_bay)
+            .first()
+        )
+        if occupant is None:
+            return None
+        occupant.delete()
+        return f"Removed {occupant.module_type.model} from {target_bay.name}."
+
     def post(self, request, pk):
         from dcim.models import Device, Module, ModuleBay
 
@@ -3137,19 +3264,7 @@ class MoveModuleView(
 
         def move(module):
             nonlocal occupant_removed_msg, from_device, from_bay
-            # Remove whatever is currently in the target bay (if provided and different).
-            # Scoped by "delete": the device and bay filters prove where the row sits, not that
-            # the grant covers it, and the gate asked has_perm without an instance.
-            if module_id and module_id != module.pk:
-                occupant = (
-                    self.restricted_queryset(Module, "delete")
-                    .select_for_update(of=("self",))
-                    .filter(pk=module_id, device=target_device, module_bay=target_bay)
-                    .first()
-                )
-                if occupant:
-                    occupant_removed_msg = f"Removed {occupant.module_type.model} from {target_bay.name}."
-                    occupant.delete()
+            occupant_removed_msg = self._remove_bay_occupant(module, module_id, target_device, target_bay)
             _refuse_identity_move(module, target_device, moving, serial_rules)
             from_device, from_bay = module.device.name, module.module_bay.name
             module.module_bay = target_bay
@@ -3158,9 +3273,10 @@ class MoveModuleView(
         serial_rules = SerialRules.load()
         moving = module_subtree_serials(conflict_module_id)
         try:
-            with transaction.atomic():
+            with atomic_with_events():
                 # The identity locks of the moved serials come before any row lock.
                 assignment_lock([serial for _pk, serial in moving], model=Module, rules=serial_rules)
+                _lock_module_destinations(page_device, {target_device.pk})
                 # Lock target bay to prevent concurrent modifications
                 target_bay = (
                     self.restricted_queryset(ModuleBay)
@@ -3195,6 +3311,8 @@ class MoveModuleView(
             messages.success(request, moved_msg)
             if server_key:
                 _schedule_module_cache_mutation(request, page_device, server_key)
+        except GrantRefused as exc:
+            messages.error(request, exc.refusal.message)
         except (AbortRequest, ValidationError, IntegrityError) as e:
             if classify_conflict(e):
                 raise
@@ -3487,7 +3605,7 @@ class AddBayTemplateView(
                 manufacturer=manufacturer,
             )
             try:
-                with transaction.atomic():
+                with atomic_with_events():
                     mapping.full_clean()
                     mapping.save()
             except (ValidationError, IntegrityError) as exc:
@@ -3709,7 +3827,7 @@ class AddBayTemplateView(
         try:
             mapping_created = False
             instantiated_count = 0
-            with transaction.atomic():
+            with atomic_with_events():
                 bay_template = ModuleBayTemplate(**kwargs)
                 bay_template.full_clean()
                 bay_template.save()
@@ -3997,7 +4115,7 @@ class MarkBuiltInView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libr
             return _modules_action_response(request, page_device)
 
         try:
-            with transaction.atomic():
+            with atomic_with_events():
                 plan = self._plan(page_device, server_key, request.POST, write=True)
                 self.required_object_permissions = {"POST": self._permissions(plan)}
                 if error := self.require_object_permissions("POST"):

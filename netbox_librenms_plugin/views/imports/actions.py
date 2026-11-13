@@ -119,9 +119,13 @@ from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
     ContainerStatus,
     SameServerIdentityConflict,
+    ServerState,
     attach_oob,
     convert_legacy,
+    host_change_scope,
+    host_entry,
     link_import,
+    lock_host_change_owner,
     lock_librenms_id_assignment,
     merge_links,
     persist_mapping,
@@ -129,6 +133,7 @@ from netbox_librenms_plugin.server_mappings import (
     prefetch_mappings,
     promote_to_host,
     read_mapping,
+    save_mapping_fields,
 )
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device, parse_configured_server_key
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
@@ -328,6 +333,25 @@ def _invalid_import_intent_response(request, device_id: int) -> HttpResponse | N
     return None
 
 
+HOST_CHANGE_ON_SYNC_PAGE = (
+    "This change removes or replaces a LibreNMS ID, and the interfaces of this object hold port IDs of that "
+    "server, or a legacy port value. Change it on the sync page: its confirmation names each interface it clears."
+)
+
+
+def _host_change_refusal(obj, server_key, *, own_id, oob_id, oob_type):
+    """
+    Lock the scope's interfaces, and return the HTMX refusal of a host ID change with an interface cascade.
+
+    Only the sync page confirms a cascade. The caller locked the owner rows with
+    ``lock_host_change_owner`` before its target lock, and holds the locks through its write.
+    """
+    new_entry = ServerState(server_key, own_id=own_id, oob_id=oob_id, oob_type=oob_type)
+    if host_change_scope(obj, server_key, new_entry, lock=True).is_empty:
+        return None
+    return _htmx_error_response(HOST_CHANGE_ON_SYNC_PAGE)
+
+
 def _render_identity_replacement_confirmation(request, obj, action, force, conflict) -> HttpResponse:
     """
     Offer the signed confirmation for one blocked same-server identity replacement.
@@ -427,7 +451,7 @@ def _write_mapping_in_scope(view, model, lookup, duplicate_message, *, field, ta
     A lock conflict propagates, so the lock-conflict middleware gives the "try again" answer.
     """
     try:
-        with transaction.atomic():
+        with atomic_with_events():
             return _write_mapping_rows(
                 view,
                 model,
@@ -768,7 +792,7 @@ def _targeted_device_checks(row, update_fields):
     return None
 
 
-@transaction.atomic
+@atomic_with_events()
 def _save_device(device, update_fields: list[str], request=None, mapping=None) -> HttpResponse | None:
     """
     Save the columns *update_fields* of a Device or VirtualMachine row, returning an HttpResponse on failure or None on success.
@@ -845,11 +869,6 @@ def _save_device(device, update_fields: list[str], request=None, mapping=None) -
     if mapping is None:
         return write(stored)
     return persist_mapping(stored, mapping, write=write)
-
-
-def _save_mapping_only(row, mapping_fields):
-    """Save only the mapping: an ID-only write must not gate on the row's other fields."""
-    row.save(update_fields=[*mapping_fields, "last_updated"])
 
 
 def _get_hostname_for_action(request, validation: dict, libre_device: dict) -> str:
@@ -2298,6 +2317,7 @@ class DeviceConflictActionView(
         # object tables. The target-row lock separately preserves concurrent changes to the
         # object receiving the mapping.
         if action in {"link", "update", "update_serial"}:
+            # A conflict rolls back the write and drops its events; the middleware then answers "try again".
             with atomic_with_events():
                 server_key = self.librenms_api.server_key
                 writes_serial = action != "link" and existing_model is Device
@@ -2311,6 +2331,8 @@ class DeviceConflictActionView(
                     retype_lock(retyped, rules=serial_rules, serials=lock_serials)
                 elif lock_serials:
                     assignment_lock(lock_serials, model=Device, rules=serial_rules)
+                # The shared host change order: the chassis and its members before the target lock.
+                lock_host_change_owner(existing_model, existing_device.pk)
                 existing_device, lock_error = _lock_librenms_id_assignment_target(
                     self,
                     existing_model,
@@ -2336,6 +2358,12 @@ class DeviceConflictActionView(
                     )
                 if current_mapping.container is ContainerStatus.INVALID:
                     return _htmx_error_response("The existing LibreNMS mapping has an invalid format.")
+
+                entry = host_entry(existing_device, server_key)
+                if refusal := _host_change_refusal(
+                    existing_device, server_key, own_id=librenms_id, oob_id=entry.oob_id, oob_type=entry.oob_type
+                ):
+                    return refusal
 
                 try:
                     mapping_change = link_import(
@@ -2563,7 +2591,7 @@ class DeviceConflictActionView(
                 # the migration over unrelated pre-existing validation issues (e.g. legacy rack
                 # face/position without a rack), which is too strict for an ID-only migration.
                 try:
-                    persist_mapping(locked_device, mapping_change, write=_save_mapping_only)
+                    persist_mapping(locked_device, mapping_change, write=save_mapping_fields)
                 except IntegrityError:
                     logger.exception(
                         "Failed to persist migrated LibreNMS mapping for %s pk=%s",
@@ -3051,10 +3079,13 @@ class AddAsOOBView(
         oob_type = oob_candidate.get("type") or ""
         oob_ip_str = oob_candidate.get("ip") or None
 
-        with transaction.atomic():
+        # A conflict rolls back the write and drops its events; the middleware then answers "try again".
+        with atomic_with_events():
             # The OOB candidate is a serial match: the serial identity lock comes before the claim and the row lock.
             serial_rules = SerialRules.load()
             assignment_lock([libre_device.get("serial")], model=Device, rules=serial_rules)
+            # The shared host change order: the chassis and its members before the target lock.
+            lock_host_change_owner(Device, sync_device.pk)
             try:
                 sync_device, id_conflict = lock_librenms_id_assignment(
                     librenms_id,
@@ -3094,6 +3125,15 @@ class AddAsOOBView(
                 return _htmx_error_response(
                     "Device has a legacy bare-integer librenms_id; use 'Convert mapping' to migrate first."
                 )
+
+            if refusal := _host_change_refusal(
+                sync_device,
+                server_key,
+                own_id=locked_mapping.own_id(server_key),
+                oob_id=librenms_id,
+                oob_type=oob_type,
+            ):
+                return refusal
 
             # Reject if the locked OOB link differs from what this (possibly stale) modal
             # is about to write — by id OR by type. oob_type is already a canonical OOB_TYPES
@@ -3404,7 +3444,7 @@ class AddAsOOBView(
         Reads ``oob_interface_id`` from the OOB-attach form: an interface PK, or the
         sentinel ``"__new__"`` to create one named ``oob_new_interface_name``.
 
-        The caller runs inside ``transaction.atomic()``. The add-vs-reuse permission
+        The caller runs inside an atomic block. The add-vs-reuse permission
         decision can only be made from the locked row: the unlocked pre-flight in
         ``_missing_oob_ip_permissions`` can race a concurrent delete and wave through
         a change-Device-only user, so re-verify ``add`` here before creating.
@@ -3455,7 +3495,7 @@ class AddAsOOBView(
             # transaction. A concurrent create of the same (device, name) — guarded by the
             # dcim_interface_unique_device_name constraint — means we just reuse the winner.
             try:
-                with transaction.atomic():
+                with atomic_with_events():
                     iface = Interface(device=device, name=name, type="other")
                     # Validate field formats/length (an invalid/oversized name would otherwise
                     # raise ValidationError/DataError and surface as a 500). Skip the uniqueness
@@ -3528,7 +3568,7 @@ class AddAsOOBView(
         except ValueError:
             return None, "invalid"
 
-        # Lock the candidate row(s) — the caller runs inside transaction.atomic() — so a
+        # Lock the candidate row(s) — the caller runs inside an atomic block — so a
         # concurrent attach can't flip the assignment between this ownership check and
         # the save. NetBox places no unique constraint on IPAddress.address, so the
         # create path stays best-effort: this narrows the TOCTOU window, it can't close it.
@@ -3583,11 +3623,11 @@ class AddAsOOBView(
             return None, "permission_add"
 
         mask = "/128" if parsed.version == 6 else "/32"
-        # Nested savepoint: the caller runs inside transaction.atomic(), and catching
+        # Nested savepoint: the caller runs inside an atomic block, and catching
         # IntegrityError from create() without one would leave the outer transaction
         # rollback-only (poisoned), breaking the later _save_device() call.
         try:
-            with transaction.atomic():
+            with atomic_with_events():
                 return (
                     IPAddress.objects.create(
                         address=netaddr.IPNetwork(f"{parsed}{mask}"), assigned_object=interface, status="active"
@@ -3704,7 +3744,8 @@ class PromoteToHostView(
                 "Device has a legacy bare-integer librenms_id; use 'Convert mapping' to migrate first."
             )
 
-        with transaction.atomic():
+        # A conflict rolls back the write and drops its events; the middleware then answers "try again".
+        with atomic_with_events():
             # The promotion rests on a serial match: the serial identity lock comes before the claim and the row lock.
             # A type override decides the identity of the stored serials too.
             serial_rules = SerialRules.load()
@@ -3713,6 +3754,8 @@ class PromoteToHostView(
                 retype_lock(retyped, rules=serial_rules, serials=[libre_device.get("serial")])
             else:
                 assignment_lock([libre_device.get("serial")], model=Device, rules=serial_rules)
+            # The shared host change order: the chassis and its members before the target lock.
+            lock_host_change_owner(Device, existing_device.pk)
             existing_device, lock_error = _lock_librenms_id_assignment_target(
                 self,
                 Device,
@@ -3737,6 +3780,10 @@ class PromoteToHostView(
                 return _htmx_error_response(
                     "OOB link already set; this device may have been promoted by a concurrent request."
                 )
+            if refusal := _host_change_refusal(
+                existing_device, server_key, own_id=new_host_id, oob_id=existing_libre_id, oob_type=oob_type
+            ):
+                return refusal
             try:
                 # The incoming LibreNMS device becomes the host; the previous one moves to the OOB slot.
                 mapping_change = promote_to_host(
@@ -3914,7 +3961,7 @@ class MergeNetBoxDevicesView(
         # back to the same rows, so the common path is unchanged. The oob_ip transfer and the
         # candidate-match check deliberately stay on the user-selected winner/donor: oob_ip is a
         # per-device FK on those rows, not a VC link.
-        with transaction.atomic():
+        with atomic_with_events():
             # Lock the selected winner/donor AND every current member of their virtual chassis, in
             # deterministic pk order to avoid deadlocks, BEFORE resolving the sync device:
             # get_librenms_sync_device scans every VC member's librenms_id custom field, so resolving

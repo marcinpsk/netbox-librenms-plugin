@@ -10,7 +10,7 @@ from django.contrib import messages
 from django.contrib.contenttypes.models import ContentType
 from django.core.cache import cache
 from django.core.exceptions import PermissionDenied, ValidationError
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError
 from django.http import HttpResponse
 from django.shortcuts import redirect, render
 from django.urls import reverse
@@ -44,6 +44,7 @@ from netbox_librenms_plugin.server_mappings import (
     prefetch_mappings,
     read_mapping,
     resolve_device_port,
+    save_mapping_fields,
 )
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.sync_cache import (
@@ -59,6 +60,7 @@ from netbox_librenms_plugin.transactions import (
     TRY_AGAIN_MESSAGE,
     CommittedFollowUpError,
     TransactionConflict,
+    atomic_with_events,
     classify_conflict,
     run_transaction,
     saved_in_scope,
@@ -307,7 +309,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             # failure — and an untagged cable isn't recognized as plugin-owned, so the
             # user's retry hits a force-confirm conflict against their own cable. The
             # savepoint also protects the overwrite path's per-interface atomic block.
-            with transaction.atomic():
+            with atomic_with_events():
                 server_key = getattr(self, "_post_server_key", None)
                 sync_settings = sync_settings or self._get_cable_sync_settings(lock=True)
                 base_desc = sync_settings.cable_sync_description
@@ -368,7 +370,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         """
         channel_topology = _channel_topology(local_term)
         extra_endpoints = channel_write_endpoints(local_term)
-        with transaction.atomic():
+        with atomic_with_events():
             locked_terms = self._lock_cable_terminations(
                 local_term,
                 remote_term,
@@ -837,7 +839,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
     def _extend_breakout_cable(cable, b_terminations, request):
         """Append the new far end to the B side of *cable*; the existing far ends keep their connectors."""
         try:
-            with transaction.atomic():
+            with atomic_with_events():
                 cable.snapshot()
                 cable.b_terminations = list(b_terminations)
                 cable.full_clean()
@@ -1465,12 +1467,6 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
                 getattr(messages, level)(request, template.format(items=", ".join(interfaces)))
 
 
-def _save_mapping_fields(row, fields):
-    """Save only the new far end's mapping: its insert already ran the validation."""
-    row.save(update_fields=[*fields, "last_updated"])
-    return row
-
-
 class _RemoteCreateAborted(Exception):
     """Abandon the whole action: the interface and the cable are created together or not at all."""
 
@@ -1547,7 +1543,7 @@ class CableRemoteCreateView(SyncCablesView):
             return self._sync_response(request, obj, server_key, redirect_url, close_modal=True)
         port_records = self._snapshot_cable_port_records(context["row"], (context["local_interface"],))
         try:
-            with transaction.atomic():
+            with atomic_with_events():
                 self._lock_create_owners(obj, context, server_key)
                 interface = self._create_remote_interface(request, context)
                 self._initial_device = obj
@@ -1846,7 +1842,7 @@ class CableRemoteCreateView(SyncCablesView):
             # Nested savepoint: an IntegrityError caught without one poisons the outer
             # transaction. Two simultaneous POSTs both find the name free, so the
             # dcim_interface_unique_device_name constraint is what actually settles it.
-            with transaction.atomic():
+            with atomic_with_events():
                 # Skip the uniqueness check: the existence check above and that constraint own it.
                 interface.full_clean(validate_unique=False)
                 interface.save()
@@ -1864,4 +1860,5 @@ class CableRemoteCreateView(SyncCablesView):
         # The row resolves by LibreNMS port id from now on, never by name luck.
         interface.snapshot()
         change = assign_own(interface, context["server_key"], port_key)
-        return persist_mapping(interface, change, write=_save_mapping_fields)
+        persist_mapping(interface, change, write=save_mapping_fields)
+        return interface

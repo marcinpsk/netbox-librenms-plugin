@@ -59,6 +59,7 @@ from netbox_librenms_plugin.utils import (
     save_user_pref,
 )
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
+from netbox_librenms_plugin.views.sync.mapping_lifecycle import sync_page_url
 
 # Remembering the tab is what makes the page usable across a detour into NetBox proper:
 # an operator who leaves to fix a bay mapping comes back to the tab they were working in.
@@ -302,6 +303,22 @@ class BaseLibreNMSSyncView(
             "object_type": owner._meta.model_name,
         }
 
+    def _mapping_controls(self, selection, obj):
+        """Return the mapping owner, the guidance to another owner, the mapping editor, and whether rows offer Unlink."""
+        owner = selection.mapping_owner if selection is not None else None
+        editor = self._mapping_editor(selection, obj)
+        guidance = None
+        if owner is not None and (type(owner) is not type(obj) or owner.pk != obj.pk):
+            # Only an owner in the user's view scope is named and linked.
+            visible = visible_object_label(owner, self.request.user)
+            guidance = {"name": visible[1], "url": sync_page_url(owner)} if visible else {"name": None, "url": None}
+        return {
+            "mapping_owner": owner,
+            "mapping_owner_guidance": guidance,
+            "mapping_editor": editor,
+            "can_unlink": editor is not None,
+        }
+
     def _render_server_selection_blocked(self, request, obj, selection):
         """Render the object page shell without constructing or querying an API client."""
         from netbox_librenms_plugin.utils import build_migrated_context
@@ -310,8 +327,6 @@ class BaseLibreNMSSyncView(
         applicable_tab_names = {tab.value for tab in applicable_tabs}
         requested_tab = request.GET.get("tab") or SyncTab.INTERFACES.value
         active_sync_tab = requested_tab if requested_tab in applicable_tab_names else SyncTab.INTERFACES.value
-        mapping_owner = selection.mapping_owner
-        self._librenms_lookup_device = mapping_owner
         self._server_key_unresolved = True
         self._scoped_render_server_key = selection.active_key
         self.librenms_id = None
@@ -332,15 +347,13 @@ class BaseLibreNMSSyncView(
                 "server_selection_preferred_key": selection.preferred_key,
                 "server_selection_has_usable_mapping": selection.has_usable_mapping,
                 "can_manage_server_preference": self._can_manage_server_preference(selection),
-                "mapping_editor": self._mapping_editor(selection, obj),
+                **self._mapping_controls(selection, obj),
                 "server_selection_blocked": True,
                 "has_librenms_id": False,
                 "found_in_librenms": False,
                 "librenms_device_details": {},
                 "platform_info": {},
                 "has_write_permission": self.has_write_permission(),
-                "lookup_device_pk": mapping_owner.pk,
-                "lookup_device_model_name": mapping_owner._meta.model_name,
                 "object_model_name": obj._meta.model_name,
                 **build_migrated_context(obj, selection.active_key),
             },
@@ -519,11 +532,10 @@ class BaseLibreNMSSyncView(
                 "server_selection_active_name": selection.active_display_name if selection is not None else None,
                 "server_selection_preferred_key": selection.preferred_key if selection is not None else None,
                 "can_manage_server_preference": self._can_manage_server_preference(selection),
-                "mapping_editor": self._mapping_editor(selection, obj),
+                **self._mapping_controls(selection, obj),
                 "librenms_id_is_legacy": librenms_id_is_legacy,
                 "librenms_id_serial_confirmed": librenms_id_serial_confirmed,
-                # Lookup device may differ from object (e.g. VC master vs member).
-                # Used by the Remove server mapping form to post to the correct device.
+                # The active server's lookup device, which can differ from the mapping owner on a VC member page.
                 "lookup_device_pk": _lookup_device.pk if _lookup_device else obj.pk,
                 "lookup_device_model_name": (
                     _lookup_device._meta.model_name if _lookup_device else obj._meta.model_name

@@ -178,7 +178,6 @@ from .sync.device_fields import (
     CreateAndAssignPlatformView,
     CreateAndAssignVMPlatformView,
     EditServerMappingView,
-    RemoveServerMappingView,
     SetPreferredServerView,
     UpdateDeviceNameView,
     UpdateDevicePlatformView,

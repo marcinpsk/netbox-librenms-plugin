@@ -23,7 +23,12 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
     transactional_db_with_all_apps,
 )
-from netbox_librenms_plugin.tests.lock_conflict_helpers import lock_row, lock_timeout, second_connection
+from netbox_librenms_plugin.tests.lock_conflict_helpers import (
+    commit_when_waited,
+    lock_row,
+    lock_timeout,
+    second_connection,
+)
 from netbox_librenms_plugin.tests.mapping_fixtures import (
     mapping_summary,
     seed_mapping,
@@ -5919,6 +5924,66 @@ class TestAddAsOOBViewPost:
             "oob_type": "ilo",
         }
 
+    @pytest.mark.parametrize("cascade", [True, False], ids=["port-on-an-interface", "no-port"])
+    def test_a_replaced_oob_with_an_interface_cascade_is_sent_to_the_sync_page(self, cascade):
+        """A replacement of the stored OOB ID clears the scope's ports, which only the sync page confirms."""
+        from dcim.models import Device
+
+        view = self._make_view()
+        existing_device = seed_mapping(make_device("oob-cascade", serial="OOB-CASCADE-SERIAL"), self.server_key, own=10)
+        interface = make_interface(existing_device, "eth0")
+        if cascade:
+            seed_mapping(interface, self.server_key, own=900)
+        self._register_oob_device(17, "controller-node", serial=existing_device.serial, generic=True)
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
+            user=self._device_writer("oob-cascade-user"),
+            HTTP_HX_REQUEST="true",
+        )
+
+        def store_another_oob():
+            seed_mapping_row(
+                existing_device,
+                seed_mapping(Device(), self.server_key, own=10, oob=16, oob_type="oob", save=False),
+            )
+
+        response = self._post_after_validation(view, request, 17, store_another_oob)
+
+        assert response.status_code == 200
+        assert (b"Change it on the sync page" in response.content) is cascade
+        assert (b"modified concurrently" in response.content) is (not cascade)
+        assert mapping_summary(Device.objects.get(pk=existing_device.pk))[self.server_key] == {
+            "own": 10,
+            "oob": 16,
+            "oob_type": "oob",
+        }
+
+    @transactional_db_with_all_apps()
+    def test_a_conflict_at_the_commit_sends_no_event_of_the_attach(self, client, flushed_events):
+        """The change record's user foreign key meets a real 55P03 at the commit, after the device event was queued."""
+        from dcim.models import Device
+        from django.contrib.auth import get_user_model
+
+        existing_device = seed_mapping(make_device("oob-late", serial="OOB-LATE-SERIAL"), self.server_key, own=10)
+        self._register_oob_device(17, "controller-late", serial=existing_device.serial, generic=True)
+        user = make_superuser("oob-late-user")
+        client.force_login(user)
+        flushed_events.clear()
+
+        with second_connection() as other:
+            lock_row(other, get_user_model(), user.pk)
+            with lock_timeout(200):
+                response = client.post(
+                    url_for("plugins:netbox_librenms_plugin:device_add_as_oob", kwargs={"device_id": 17}),
+                    {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
+                    headers={"HX-Request": "true"},
+                )
+
+        assert TRY_AGAIN_MESSAGE.encode() in response.content
+        assert mapping_summary(Device.objects.get(pk=existing_device.pk))[self.server_key] == {"own": 10}
+        assert flushed_events == []
+
 
 @pytest.mark.django_db
 class TestPromoteToHostViewPost:
@@ -6282,6 +6347,87 @@ class TestPromoteToHostViewPost:
         # Nothing committed: the host slot is unchanged and no OOB slot was written.
         assert mapping_summary(Device.objects.get(pk=existing_device.pk))[self.server_key] == {"own": 10}
         assert mapping_summary(Device.objects.get(pk=conflicting_device.pk))[self.server_key] == {"own": 17}
+
+    @transactional_db_with_all_apps()
+    def test_a_conflict_at_the_commit_sends_no_event_of_the_promotion(self, client, flushed_events):
+        """The change record's user foreign key meets a real 55P03 at the commit, after the device event was queued."""
+        from dcim.models import Device
+        from django.contrib.auth import get_user_model
+
+        existing_device = seed_mapping(
+            make_device("promote-late", serial="PROMOTE-LATE-SERIAL"), self.server_key, own=10
+        )
+        self._register_host_device(17, "promote-late-host", serial=existing_device.serial)
+        user = make_superuser("promote-late-user")
+        client.force_login(user)
+        flushed_events.clear()
+
+        with second_connection() as other:
+            lock_row(other, get_user_model(), user.pk)
+            with lock_timeout(200):
+                response = client.post(
+                    url_for("plugins:netbox_librenms_plugin:device_promote_to_host", kwargs={"device_id": 17}),
+                    {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
+                    headers={"HX-Request": "true"},
+                )
+
+        assert TRY_AGAIN_MESSAGE.encode() in response.content
+        assert mapping_summary(Device.objects.get(pk=existing_device.pk))[self.server_key] == {"own": 10}
+        assert flushed_events == []
+
+    def test_a_promotion_with_an_interface_cascade_is_sent_to_the_sync_page(self):
+        """The promotion replaces the host ID, so the ports of the old host on its interfaces need the sync page."""
+        from dcim.models import Device
+
+        view = self._make_view()
+        existing_device = seed_mapping(
+            make_device("promote-cascade", serial="PROMOTE-CASCADE-SERIAL"), self.server_key, own=10
+        )
+        interface = seed_mapping(make_interface(existing_device, "eth0"), self.server_key, own=901)
+        self._register_host_device(17, "promote-cascade-host", serial=existing_device.serial)
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
+            user=self._device_writer("promote-cascade-user"),
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = post_view(view, request, device_id=17)
+
+        assert response.status_code == 200
+        assert b"Change it on the sync page" in response.content
+        assert mapping_summary(Device.objects.get(pk=existing_device.pk))[self.server_key] == {"own": 10}
+        interface.refresh_from_db()
+        assert mapping_summary(interface) == {self.server_key: {"own": 901}}
+
+    @transactional_db_with_all_apps()
+    def test_a_promotion_waits_for_a_port_writer_on_a_scope_interface_and_then_refuses(self):
+        """The port writer holds the interface row: the promotion waits for its commit, then sees the port."""
+        from dcim.models import Device, Interface
+
+        view = self._make_view()
+        existing_device = seed_mapping(
+            make_device("promote-race", serial="PROMOTE-RACE-SERIAL"), self.server_key, own=10
+        )
+        interface = make_interface(existing_device, "eth0")
+        self._register_host_device(17, "promote-race-host", serial=existing_device.serial)
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
+            user=self._device_writer("promote-race-user"),
+            HTTP_HX_REQUEST="true",
+        )
+        port = seed_mapping(Interface(), self.server_key, own=902, save=False)
+
+        response = commit_when_waited(
+            lambda other: seed_mapping_row(interface, port, connection=other),
+            lambda: post_view(view, request, device_id=17),
+        )
+
+        assert b"Change it on the sync page" in response.content
+        assert mapping_summary(Device.objects.get(pk=existing_device.pk))[self.server_key] == {"own": 10}
+        interface.refresh_from_db()
+        assert mapping_summary(interface) == {self.server_key: {"own": 902}}
 
 
 @pytest.mark.django_db
