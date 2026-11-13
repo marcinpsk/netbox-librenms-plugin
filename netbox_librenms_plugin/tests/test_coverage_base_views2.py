@@ -125,7 +125,7 @@ class TestLibreNMSIdentityQueries:
 
 
 class TestIPAddressVerifyHelpers:
-    """Exercise address verification helpers with real models and realistic cache rows."""
+    """Exercise address verification helpers with real models."""
 
     def _view(self):
         from netbox_librenms_plugin.views.base.ip_addresses_view import SingleIPAddressVerifyView
@@ -159,35 +159,6 @@ class TestIPAddressVerifyHelpers:
     def test_address_parser_rejects_incomplete_or_invalid_values(self, value):
         with pytest.raises(ValueError):
             self._view()._parse_ip_address(value)
-
-    @pytest.mark.parametrize(
-        "cached",
-        [
-            None,
-            [],
-            "legacy",
-            {"ip_addresses": [None, "bad", {"ip_with_mask": "invalid"}]},
-        ],
-    )
-    def test_malformed_or_missing_cache_is_a_clean_miss(self, cached):
-        assert self._view()._find_in_cache(cached, "198.18.2.8", 24) == (None, None, None)
-
-    def test_cache_match_returns_the_original_vrf_and_port(self):
-        entry = {
-            "ip_with_mask": "198.18.2.8/24",
-            "vrf_id": 17,
-            "port_id": 29,
-            "interface_name": "Ethernet29",
-        }
-
-        match = self._view()._find_in_cache(
-            {"ip_addresses": ["bad", entry]},
-            "198.18.2.8",
-            24,
-        )
-
-        assert match == ({**entry, "row_id": entry["ip_with_mask"]}, 17, 29)
-        assert "row_id" not in entry
 
     def test_existing_global_address_returns_its_real_url(self):
         ip = make_ip("198.18.3.1/24")
@@ -278,46 +249,6 @@ class TestIPAddressVerifyEndpoint:
 
         assert response.status_code == 404
         assert _json(response)["message"] == "Object with ID 2147483647 not found"
-
-    def test_cached_original_vrf_renders_synced_without_an_ip_row(self):
-        from ipam.models import VRF
-
-        from netbox_librenms_plugin.views.base.ip_addresses_view import SingleIPAddressVerifyView
-
-        device = make_device("ip-cached-vrf")
-        interface = make_interface(device, "Ethernet7")
-        vrf = VRF.objects.create(name="cached-vrf", rd="64512:9")
-        view = SingleIPAddressVerifyView()
-        cache.set(
-            view.get_cache_key(device, "ip_addresses", "default"),
-            {
-                "ip_addresses": [
-                    {
-                        "ip_with_mask": "198.18.7.1/24",
-                        "vrf_id": vrf.pk,
-                        "port_id": interface.pk,
-                        "interface_name": interface.name,
-                    }
-                ]
-            },
-            timeout=300,
-        )
-
-        response = view_post(
-            view,
-            _request(
-                {
-                    "device_id": device.pk,
-                    "object_type": "device",
-                    "ip_address": "198.18.7.1/24",
-                    "vrf_id": str(vrf.pk),
-                    "server_key": "default",
-                }
-            ),
-        )
-
-        assert response.status_code == 200
-        assert "Synced" in _json(response)["formatted_row"]["status"]
 
     def test_existing_address_in_selected_vrf_renders_synced(self):
         device = make_device("ip-existing")

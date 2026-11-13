@@ -12,8 +12,8 @@ All four sync resources (interfaces, cables, IP addresses, VLANs) follow the sam
    - `BaseLibreNMSSyncView` — tabbed sync page, orchestrates all tabs via abstract `get_*_context()` methods.
    - `BaseInterfaceTableView` — fetch ports → enrich with VLANs → cache → compare with NetBox interfaces → render table.
    - `BaseCableTableView` — fetch links → match remote devices → check cable status → render table.
-   - `BaseIPAddressTableView` — fetch IPs → resolve interfaces → detect existing/update/new → render table.
-   - `BaseVLANTableView` — fetch VLANs → compare with NetBox VLANs → auto-select groups → render table.
+   - `BaseIPAddressTableView` — acquire the IP snapshot → assess it for the user (`assess_snapshot`) → render table.
+   - `BaseVLANTableView` — acquire the VLAN snapshot → compare with NetBox VLANs → auto-select groups → render table.
 
 2. **Object sync views** (`views/object_sync/`) — wire base views to NetBox models:
    - Use `@register_model_view(Device, name="librenms_sync", path="librenms-sync")` to inject as a tab on Device/VM detail pages.
@@ -25,9 +25,19 @@ All four sync resources (interfaces, cables, IP addresses, VLANs) follow the sam
    - Cable sync returns `_cable_sync_content.html` for HTMX so the response matches `#cable-sync-content`. Other actions can use `HX-Redirect` when they require full navigation.
 
 ## Data Pipeline (Base Views)
-Every base table view follows: **fetch → cache → compare → render**.
+The IP and VLAN tabs follow: **acquire → store → assess → render**.
 
-- **Fetch:** Call LibreNMS API (e.g., `get_ports()`, `get_device_ips()`, `get_device_vlans()`).
+- **Acquire:** `acquisition.coordinator.acquire(subject, server_key=..., resources=[...])` obtains the
+  LibreNMS responses with no request or user, reads the mapping and writes nothing. It returns a
+  `SourceSnapshot`: each response with its outcome. `snapshot.value(resource, part)` raises
+  `IncompleteSource` for a part that was not obtained; never read a failed part as an empty list.
+- **Store:** `source_cache.refresh()` runs after discovery and stores the snapshot under the
+  `CacheMixin` key; `source_cache.read()` is the one reader for the tab, the verify views and the sync.
+- **Assess:** derive the rows at read time, for the current user. The snapshot holds source facts only.
+
+The interfaces, cables and modules tabs still follow **fetch → cache → compare → render**:
+
+- **Fetch:** Call LibreNMS API (e.g., `get_ports()`).
 - **Cache:** Store results via `CacheMixin` keys: `librenms_{data_type}_{model_name}_{pk}_{server_key}`. Also store fetch timestamp at `librenms_{data_type}_last_fetched_{model_name}_{pk}_{server_key}`. Every key needs a configured server key; a blank key raises `ValueError`.
 - **Compare:** Match LibreNMS data against NetBox objects. Each resource implements its own comparison (interface matching by name, IP matching by address/mask, VLAN matching by VID+group).
 - **Render:** Build a django-tables2 table, return a partial template (`_*_sync_content.html`).

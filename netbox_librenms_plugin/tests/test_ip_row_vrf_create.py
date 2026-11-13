@@ -8,12 +8,13 @@ import pytest
 from django.contrib.auth import get_user
 from django.contrib.messages import get_messages
 from django.db import IntegrityError
+from django.test import Client
 from django.urls import reverse
 
 from netbox_librenms_plugin.data_shapes.recordings_store import load_recording
 from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, make_device, make_superuser, make_vm
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
-from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, make_user_with_perms, make_view
+from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
 
 SERVER_KEY = "test"
 _RECORDING = load_recording("iosxe-subinterfaces")
@@ -47,25 +48,28 @@ pytestmark = pytest.mark.django_db
 
 @pytest.fixture
 def seeded(recording_server, settings):
-    """Cache a fresh iosxe-subinterfaces IP snapshot for a new Device or VM, the way a refresh does."""
+    """Refresh the iosxe-subinterfaces IP snapshot of a new Device or VM through the real refresh view."""
 
     def _seed(name, *, object_type="device"):
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceIPAddressTableView
-        from netbox_librenms_plugin.views.object_sync.vms import VMIPAddressTableView
-
         recording = load_recording("iosxe-subinterfaces")
-        server, api = recording_server(recording, server_key=SERVER_KEY)
+        server, _api = recording_server(recording, server_key=SERVER_KEY)
         configure_librenms_servers(settings, {SERVER_KEY: {"librenms_url": server.url, "api_token": "test-token"}})
         librenms_cf = {SERVER_KEY: {"id": recording["device_id"]}}
         if object_type == "device":
-            owner, view_class = make_device(name, librenms_cf=librenms_cf), DeviceIPAddressTableView
+            owner, route = make_device(name, librenms_cf=librenms_cf), "device_ipaddress_sync"
         else:
-            owner, view_class = make_vm(name), VMIPAddressTableView
+            owner, route = make_vm(name), "vm_ipaddress_sync"
             seed_stored_mapping(owner, librenms_cf)
             owner.save()
-        view = make_view(view_class, None, librenms_api=api)
-        view.librenms_api.cache_timeout = 300
-        assert view._prepare_context(make_request("get"), owner, "ifName", fetch_fresh=True, server_key=SERVER_KEY)
+        refresher = Client()
+        refresher.force_login(make_superuser(f"{name}-refresher"))
+        response = refresher.post(
+            reverse(f"plugins:netbox_librenms_plugin:{route}", kwargs={"pk": owner.pk}),
+            {"server_key": SERVER_KEY},
+            HTTP_HX_REQUEST="true",
+        )
+        assert response.status_code == 200
+        assert "IP address data refreshed successfully." in [str(m) for m in get_messages(response.wsgi_request)]
         return owner
 
     return _seed

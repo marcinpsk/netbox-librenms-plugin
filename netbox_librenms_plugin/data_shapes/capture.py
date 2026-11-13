@@ -91,14 +91,12 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
         allow_empty=True,
     ):
         """Issue one raw GET and store it under its route key (key_params=None → path-only)."""
-        status, body = api._raw_get(path, request_params)
+        status, body = api.get_response(path, request_params)
         if key_params == "__same__":
             key_params = request_params
-        # A transport error yields status 0 (no HTTP response was received). Recording it as
-        # [0, body] would bake an un-replayable route into the recording — the mock replay server
-        # calls send_response(0), an out-of-range HTTP status — so skip any route that never produced
-        # a real HTTP status. A genuine non-2xx (e.g. 404) IS a real status and is still recorded.
-        if not (MIN_HTTP_STATUS <= status <= MAX_HTTP_STATUS):
+        # A transport error yields no status. Skip any route that never produced a real HTTP status,
+        # because replay cannot serve it. A genuine non-2xx (e.g. 404) IS a real status and is recorded.
+        if status is None or not (MIN_HTTP_STATUS <= status <= MAX_HTTP_STATUS):
             # A required structural route that never answered means the capture is incomplete:
             # persisting it would ship a partial fixture (missing device/ports/port_stack) as if
             # capture succeeded. Every required route must return an HTTP response.
