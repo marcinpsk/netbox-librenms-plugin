@@ -103,6 +103,10 @@ def _table_attr(html, name):
     return unescape(re.search(rf'{name}="([^"]*)"', table).group(1))
 
 
+def _selection_scope(html):
+    return unescape(re.search(r'data-sync-filter-tab="cables" data-selection-scope="([^"]*)"', html).group(1))
+
+
 def _device(tag):
     return make_device(f"cables-{tag}", librenms_cf={SERVER_KEY: {"id": LIBRENMS_ID}})
 
@@ -427,9 +431,9 @@ class TestWholeSnapshotData:
         assert list(_rows(filtered)) == [peer_b]
         assert f'name="select" value="{peer_b}"' in filtered
         assert _table_attr(filtered, "data-filter-active") == "true"
-        assert _table_attr(filtered, "data-filter-signature") == (
-            "cables_filter_remote_device=peer-b&interface_name_field=ifName&server_key=default"
-        )
+        # The selection belongs to the tab, so a filter keeps the rows already selected.
+        assert _selection_scope(filtered) == "interface_name_field=ifName&server_key=default"
+        assert _selection_scope(filtered) == _selection_scope(_tab(client, device))
 
     def test_the_selection_signature_changes_with_the_interface_name_field(self, client, settings):
         client = _superuser_client(client, settings, "cable-signature")
@@ -437,10 +441,7 @@ class TestWholeSnapshotData:
         _seed(device, [_link(6101, "uplink", "peer-a", "xe-1")])
 
         signatures = {
-            field: _table_attr(
-                _tab(client, device, cables_filter_local_port="uplink", interface_name_field=field),
-                "data-filter-signature",
-            )
+            field: _selection_scope(_tab(client, device, cables_filter_local_port="uplink", interface_name_field=field))
             for field in ("ifName", "ifDescr")
         }
 
@@ -520,6 +521,8 @@ class TestInvalidFilters:
         assert _rows(html) == {}
         assert 'id="cables_filter-errors"' in html
         assert 'data-filter-invalid="true"' in html
+        # The tab names its selection scope also with no table, so the browser can drop other scopes.
+        assert re.search(r'data-sync-filter-tab="cables" data-selection-scope="[^"]*interface_name_field=', html)
         field = next(iter(params))
         if field in ("cables_sync_state", "cables_q"):
             assert re.search(rf'id="id_{field}"[^>]*aria-invalid="true"', html, re.S)

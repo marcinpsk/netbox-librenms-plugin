@@ -41,6 +41,7 @@ from netbox_librenms_plugin.sync_cache import (
     SyncCacheConsistency,
     SyncTab,
     sync_cache_browser_contract,
+    withhold_unavailable_snapshots,
 )
 from netbox_librenms_plugin.sync_query import SyncQuery
 from netbox_librenms_plugin.utils import (
@@ -281,13 +282,10 @@ class BaseLibreNMSSyncView(
         # overwrite the choice, and an unchanged choice must not cost a write per page view.
         if posted_sync_tab in applicable_tab_names and active_sync_tab != remembered_sync_tab:
             save_user_pref(request, SYNC_TAB_PREFERENCE, active_sync_tab)
-        sync_tab_urls = {}
-        for sync_tab in applicable_tabs:
-            query = request.GET.copy()
-            query["tab"] = sync_tab.value
-            # The tab link adds the selected name field itself, so a copy here would grow per click.
-            query.pop("interface_name_field", None)
-            sync_tab_urls[sync_tab.value] = f"{request.path}?{query.urlencode()}"
+        page_query = SyncQuery.from_request(request)
+        sync_tab_urls = {
+            sync_tab.value: page_query.tab_url(request.path, sync_tab.value) for sync_tab in applicable_tabs
+        }
 
         # Add our specific context
         context.update(
@@ -449,17 +447,7 @@ class BaseLibreNMSSyncView(
 
         if sync_cache_status is not None:
             object_type = obj._meta.model_name
-            for sync_tab in applicable_tabs:
-                if sync_cache_status[sync_tab.value]["snapshot_available"]:
-                    continue
-                spec = TAB_SPECS[sync_tab]
-                tab_context = context.get(spec.context_name)
-                if isinstance(tab_context, dict):
-                    context[spec.context_name] = {
-                        **tab_context,
-                        spec.table_context_key: None,
-                        "cache_expiry": None,
-                    }
+            withhold_unavailable_snapshots(context, sync_cache_status, applicable_tabs)
             context.update(
                 {
                     "sync_cache_status": sync_cache_status,
