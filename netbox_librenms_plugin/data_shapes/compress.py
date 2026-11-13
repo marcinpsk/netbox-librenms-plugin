@@ -39,8 +39,10 @@ from netbox_librenms_plugin.data_shapes.recordings_store import recording_meta
 _SUB_RE = re.compile(r"\.\d+$")
 
 
-def _route_key(recording, suffix):
+def _route_key(recording, suffix, *, device_id=None):
     """Return the first response key whose path (query stripped) ends with *suffix*, or None."""
+    if device_id is not None:
+        suffix = f"devices/{device_id}{suffix}"
     for key in recording.get("responses", {}):
         if key.split("?", 1)[0].endswith(suffix):
             return key
@@ -59,9 +61,9 @@ def _rewrap(original, new_body):
     return wrap_response(status, new_body)
 
 
-def _port_stack_referenced(recording):
+def _port_stack_referenced(recording, device_id):
     """Return the set of str port ids named by any ``port_stack`` mapping (0/"0" sentinel excluded)."""
-    ps_key = _route_key(recording, "/port_stack")
+    ps_key = _route_key(recording, "/port_stack", device_id=device_id)
     referenced = set()
     if ps_key is None:
         return referenced
@@ -77,7 +79,7 @@ def _port_stack_referenced(recording):
     return referenced
 
 
-def _transceiver_referenced(recording):
+def _transceiver_referenced(recording, device_id):
     """
     Return the set of str port ids referenced by any captured transceiver (0/"0" excluded).
 
@@ -87,12 +89,13 @@ def _transceiver_referenced(recording):
 
     Args:
         recording (dict): A recording that can contain transceiver responses.
+        device_id: The device whose ports are compressed.
 
     Returns:
         set[str]: Port ids referenced by captured transceivers, excluding 0 and ``"0"``.
 
     """
-    tx_key = _route_key(recording, "/transceivers")
+    tx_key = _route_key(recording, "/transceivers", device_id=device_id)
     referenced = set()
     if tx_key is None:
         return referenced
@@ -195,7 +198,7 @@ def _fingerprint(port, compiled_lag_patterns=()):
 _PORT_REFERENCING_ROUTES = (("/ip", "addresses", "port_id"), ("/links", "links", "local_port_id"))
 
 
-def _prune_vrf_rows(recording, responses, kept_ports):
+def _prune_vrf_rows(recording, responses, kept_ports, device_id):
     """Trim the VRF list to the VRFs the surviving ports still reference."""
     key = _route_key(recording, "/routing/vrf")
     if key is None:
@@ -205,7 +208,13 @@ def _prune_vrf_rows(recording, responses, kept_ports):
     if not isinstance(rows, list):
         return
     referenced = {str(port.get("ifVrf")) for port in kept_ports if isinstance(port, dict) and port_has_vrf(port)}
-    kept_rows = [row for row in rows if not isinstance(row, dict) or str(row.get("vrf_id")) in referenced]
+    kept_rows = [
+        row
+        for row in rows
+        if not isinstance(row, dict)
+        or str(row.get("device_id", device_id)) != str(device_id)
+        or str(row.get("vrf_id")) in referenced
+    ]
     # Compression must never change the novelty signature, and the vrf facet is "the list is
     # non-empty". A device whose ports name a vrf_id the table does not list would otherwise flip
     # it, so an empty result means leave the list alone.
@@ -218,10 +227,10 @@ def _prune_vrf_rows(recording, responses, kept_ports):
     responses[key] = _rewrap(responses[key], new_body)
 
 
-def _prune_port_references(recording, responses, keep_ids):
+def _prune_port_references(recording, responses, keep_ids, device_id):
     """Drop /ip and /links rows whose local port was compressed away."""
     for suffix, row_field, id_field in _PORT_REFERENCING_ROUTES:
-        key = _route_key(recording, suffix)
+        key = _route_key(recording, suffix, device_id=device_id)
         if key is None:
             continue
         body = _unwrap(responses[key])
@@ -262,6 +271,7 @@ def compress_recording(recording):
     ports_key = _route_key(recording, f"devices/{recording.get('device_id')}/ports") or _route_key(recording, "/ports")
     if ports_key is None:
         return recording
+    device_id = ports_key.split("?", 1)[0].split("/")[-2]
     ports_body = _unwrap(recording["responses"][ports_key])
     if not (isinstance(ports_body, dict) and isinstance(ports_body.get("ports"), list)):
         return recording
@@ -272,7 +282,7 @@ def compress_recording(recording):
 
     # Always keep the ports whose relationships we must preserve: those named by port_stack, plus the
     # base-level ports their ``.N`` names resolve to.
-    referenced = _port_stack_referenced(recording) | _transceiver_referenced(recording)
+    referenced = _port_stack_referenced(recording, device_id) | _transceiver_referenced(recording, device_id)
     keep_ids = {str(p.get("port_id")) for p in dict_ports if str(p.get("port_id")) in referenced}
     _add_name_relationship_ports(dict_ports, name_indexes, keep_ids)
 
@@ -282,7 +292,7 @@ def compress_recording(recording):
     compiled_lag_patterns = compile_lag_patterns(recording)
     route_port_ids = []
     for suffix, rows_key, port_key in _PORT_REFERENCING_ROUTES:
-        key = _route_key(recording, suffix)
+        key = _route_key(recording, suffix, device_id=device_id)
         body = _unwrap(recording["responses"][key]) if key else None
         rows = body.get(rows_key, []) if isinstance(body, dict) else []
         rows = rows if isinstance(rows, list) else []
@@ -305,8 +315,8 @@ def compress_recording(recording):
         new_body["count"] = len(kept)
     new_responses = dict(recording["responses"])
     new_responses[ports_key] = _rewrap(recording["responses"][ports_key], new_body)
-    _prune_port_references(recording, new_responses, {str(p.get("port_id")) for p in kept})
-    _prune_vrf_rows(recording, new_responses, kept)
+    _prune_port_references(recording, new_responses, {str(p.get("port_id")) for p in kept}, device_id)
+    _prune_vrf_rows(recording, new_responses, kept, device_id)
 
     out = dict(recording)
     out["responses"] = new_responses

@@ -5,6 +5,8 @@ The system board reports itself as "Slot 1" (ioModule), "MDA 1/1" (mdaModule, be
 (cpmModule), all with the chassis part number and serial. The transceiver in port 1/1/c1 sits below MDA 1/1.
 """
 
+from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_mapped_modules
+
 from html.parser import HTMLParser
 from urllib.parse import parse_qsl, urlsplit
 
@@ -46,13 +48,8 @@ def ixr_inventory():
 
 def seed_snapshot(device, inventory):
     """Cache *inventory* as the device's LibreNMS snapshot, as a Modules refresh stores it."""
-    from django.core.cache import cache
 
-    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
-    from netbox_librenms_plugin.views.mixins import CacheMixin
-
-    payload = trusted_module_inventory_payload(device, inventory, server_key=SERVER_KEY)
-    cache.set(CacheMixin().get_cache_key(device, "inventory", server_key=SERVER_KEY), payload)
+    seed_mapped_modules(device, inventory, server_key=SERVER_KEY)
 
 
 def ixr_device(name, *, part_number=PART_NUMBER):
@@ -534,11 +531,9 @@ class TestMarkBuiltIn:
 
         assert seeded.FIXED_PLATFORM_RULE == BUILT_IN_UNITS_RULE
 
-    def test_an_entity_row_that_the_transceiver_api_confirms_is_no_candidate(self, settings, librenms_server):
+    def test_an_entity_row_that_the_transceiver_api_confirms_is_no_candidate(self):
         """A module-class optic below the chassis matched no bay, but the transceiver API names it an optic."""
-        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.tests.test_modules_view import configure_servers
-        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+        from netbox_librenms_plugin.tests.source_snapshot_helpers import transceiver_row
 
         optic = 90
         device = ixr_device("ixr-api-optic", part_number="")
@@ -557,26 +552,15 @@ class TestMarkBuiltIn:
         ]
         seed_snapshot(device, inventory)
         assert optic in controls(device)
-        configure_servers(
-            settings, {SERVER_KEY: {"librenms_url": librenms_server.url, "api_token": "t", "verify_ssl": False}}
-        )
-        view = object.__new__(BaseModuleTableView)
-        view._device_manufacturer = None
-        view.librenms_id = 101
-        view._librenms_api = LibreNMSAPI(server_key=SERVER_KEY)
-        transceiver = {"port_id": 99, "entity_physical_index": optic, "model": "SFP-10G-LR", "serial": "OPT-SN-9"}
-        librenms_server.register(
-            "/api/v0/devices/101/transceivers", {"status": "ok", "transceivers": [transceiver]}, method="GET"
-        )
-        librenms_server.register(
-            "/api/v0/devices/101/ports", {"status": "ok", "ports": [{"port_id": 99, "ifName": "1/1/c2"}]}, method="GET"
-        )
-        from netbox_librenms_plugin.serial_identity import SerialRules
 
-        merged, error = view._merge_transceiver_data(inventory, serial_context=SerialRules.load().context(None))
-        assert error is None
-
-        seed_snapshot(device, merged)
+        # The read merges the transceiver row into the entity it confirms.
+        seed_mapped_modules(
+            device,
+            inventory,
+            [{"port_id": 99, "ifName": "1/1/c2"}],
+            [transceiver_row(optic, port_id=99, model="SFP-10G-LR", serial="OPT-SN-9")],
+            server_key=SERVER_KEY,
+        )
 
         assert set(controls(device)) == {SLOT_1, SLOT_A}
 
@@ -604,10 +588,10 @@ class TestMarkBuiltInBelowABuiltInUnit:
         assert controls(device) == {}
 
     def test_a_signed_mark_of_the_card_records_no_part_number(self):
-        device, inventory = self._device("ixr-below-built-in-signed")
+        device, _inventory = self._device("ixr-below-built-in-signed")
         before = written(device)
 
-        mark(device, signed_mark_query(device, MDA, inventory))
+        mark(device, signed_mark_query(device, MDA))
 
         assert written(device) == before
 
@@ -684,7 +668,7 @@ class TestMarkBuiltInWithAPartNumber:
         assert str(form["manufacturer"].value()) == str(device.device_type.manufacturer_id)
 
 
-def signed_mark_query(device, index, inventory=None):
+def signed_mark_query(device, index):
     """Return the query of a "Mark built-in" request for row *index* with a grant signed for the current state."""
     from netbox_librenms_plugin.inventory_policy import load_inventory_policy
     from netbox_librenms_plugin.module_grants import (
@@ -693,6 +677,7 @@ def signed_mark_query(device, index, inventory=None):
         module_inventory_snapshot_digest,
         sign_module_grant,
     )
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import module_inventory
 
     token = sign_module_grant(
         page_device_id=device.pk,
@@ -701,7 +686,7 @@ def signed_mark_query(device, index, inventory=None):
         action=ACTION_MARK_BUILT_IN,
         ent_index=index,
         action_target={"device_type_id": device.device_type_id},
-        inventory_digest=module_inventory_snapshot_digest(inventory or ixr_inventory()),
+        inventory_digest=module_inventory_snapshot_digest(module_inventory(device, SERVER_KEY)),
         policy_fingerprint=load_inventory_policy(device.pk).fingerprint,
         render_mode=RENDER_ATTRIBUTED,
     )

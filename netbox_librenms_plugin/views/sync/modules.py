@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from urllib.parse import quote_plus, urlsplit
 
 from django.contrib import messages
-from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, models, transaction
 from django.http import HttpResponse, QueryDict
@@ -68,8 +67,6 @@ from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     apply_request_cache_transition,
-    cached_module_inventory,
-    module_inventory_oob_matches,
     schedule_request_cache_mutation,
 )
 from netbox_librenms_plugin.transactions import (
@@ -98,6 +95,7 @@ from netbox_librenms_plugin.utils import (
 from netbox_librenms_plugin.utils import coerce_positive_int as _coerce_positive_int
 from netbox_librenms_plugin.views.base.modules_view import (
     BaseModuleTableView,
+    read_module_assessment,
     DeviceIdentity,
     _get_item_port_identity,
     _inventory_item_key,
@@ -268,42 +266,6 @@ def _module_already_on_device(device, incoming, serial_rules, *, exclude_pk=None
     return held.kind in REFUSING
 
 
-def _get_cached_inventory_for_device(sync_device, server_key, get_cache_key):
-    """
-    Return cached inventory for ``sync_device``, or ``None`` when it is absent or stale.
-
-    Cache entries are namespaced by server key and include ``librenms_id``.
-    When both current and cached IDs are valid positive integers, they must
-    match; otherwise cached data is treated as stale. The OOB controller link must
-    match too, the same check the module table makes. A malformed payload or one
-    from an older schema version is deleted and read as absent.
-
-    Args:
-        sync_device (object): The NetBox device whose inventory is requested.
-        server_key (str): The LibreNMS server key for the cache namespace.
-        get_cache_key (Callable): The function that builds the inventory cache key.
-
-    Returns:
-        list[dict] | None: The cached inventory, or ``None`` when it is absent or stale.
-
-    """
-    cache_key = get_cache_key(sync_device, "inventory", server_key=server_key)
-    cached_payload = cache.get(cache_key)
-    inventory = cached_module_inventory(cached_payload)
-    if inventory is None:
-        cache.delete(cache_key)
-        return None
-
-    current_librenms_id = _coerce_positive_int(read_mapping(sync_device).own_id(server_key))
-    cached_librenms_id = _coerce_positive_int(cached_payload.get("librenms_id"))
-    if current_librenms_id is None or cached_librenms_id is None or current_librenms_id != cached_librenms_id:
-        return None
-    if not module_inventory_oob_matches(cached_payload, sync_device, server_key):
-        return None
-
-    return inventory
-
-
 def _module_write_failure(exc, model, user):
     """
     Return the text of a failed module write that a page may show *user*.
@@ -388,32 +350,24 @@ class _GrantedInventory:
         return item
 
 
-def _authorize_module_grant(view, page_device, server_key, action, token):
-    """
-    Return the posted grant of *action* with the current snapshot and policy, or raise GrantRefused.
-
-    A writer calls it inside its write transaction, after the page lock where it takes one, and
-    before any write. A change committed after this read is not detected.
-
-    Args:
-        view (View): The writer, for its cache key.
-        page_device (Device): The device whose Modules page posted the action.
-        server_key (str): The posted LibreNMS server.
-        action (str): The action the grant must name.
-        token (str | None): The posted grant.
-
-    Returns:
-        _GrantedInventory: The grant, the cached snapshot, its index map and the policy.
-
-    """
+def _authorize_module_grant(page_device, server_key, action, token):
+    """Read the granted source and policy before a module write."""
     from dcim.models import Device
-
     from netbox_librenms_plugin.models import RuleConfigurationError
 
+    from netbox_librenms_plugin import source_cache
+    from netbox_librenms_plugin.acquisition.registry import Resource
+    from netbox_librenms_plugin.acquisition.resources import blocked_scopes
+
     sync_device = _get_sync_device_for_inventory(page_device, server_key)
-    inventory = _get_cached_inventory_for_device(sync_device, server_key, view.get_cache_key)
-    if inventory is None:
+    snapshot = source_cache.read(sync_device, Resource.MODULES, server_key)
+    if snapshot is None:
         raise GrantRefused(GrantRefusal.CACHE_MISSING)
+    # An unusable source refuses before the policy: no ready host, or a deleted source owner.
+    owner_pk = snapshot.resources[Resource.MODULES].owner.pk
+    if "host" in blocked_scopes(snapshot, Resource.MODULES) or not Device.objects.filter(pk=owner_pk).exists():
+        raise GrantRefused(GrantRefusal.SNAPSHOT)
+    # One policy read: the assessment merges under its chassis serial context, and the grant checks against it.
     try:
         policy = load_inventory_policy(page_device.pk)
     except Device.DoesNotExist as exc:
@@ -421,6 +375,13 @@ def _authorize_module_grant(view, page_device, server_key, action, token):
     except RuleConfigurationError as exc:
         logger.error("Module action %s on %s refused: %s", action, page_device, exc)
         raise GrantRefused(GrantRefusal.RULE_ERROR) from exc
+    try:
+        assessed = read_module_assessment(
+            sync_device, server_key, snapshot, serial_context=policy.chassis_serial_context()
+        )
+    except Device.DoesNotExist as exc:
+        raise GrantRefused(GrantRefusal.SNAPSHOT) from exc
+    inventory = assessed["inventory"]
     grant = read_module_grant(token, action=action, page_device_id=page_device.pk, server_key=server_key)
     grant.check_state(inventory, policy)
     return _GrantedInventory(grant, inventory, _inventory_index_map(inventory), policy)
@@ -1095,7 +1056,7 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                 serial_rules = None
                 if indexed:
                     granted = _authorize_module_grant(
-                        self, page_device, server_key, ACTION_INSTALL_MODULE, request.POST.get("inventory_binding")
+                        page_device, server_key, ACTION_INSTALL_MODULE, request.POST.get("inventory_binding")
                     )
                     granted.grant.require(
                         device_id=target_device.pk,
@@ -1259,7 +1220,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         page_device = self.restrict_object_or_404(Device, pk=page_device.pk)
         try:
             granted = _authorize_module_grant(
-                self, page_device, server_key, ACTION_INSTALL_BRANCH, request.POST.get("inventory_binding")
+                page_device, server_key, ACTION_INSTALL_BRANCH, request.POST.get("inventory_binding")
             )
             grant = granted.grant.require(
                 device_id=request.POST.get("selected_device_id", ""),
@@ -2012,7 +1973,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             with atomic_with_events():
                 _lock_page_device_serials(page_device)
                 granted = _authorize_module_grant(
-                    self, page_device, server_key, ACTION_INSTALL_SELECTED, request.POST.get("inventory_binding")
+                    page_device, server_key, ACTION_INSTALL_SELECTED, request.POST.get("inventory_binding")
                 )
                 granted.grant.require(device_id=page_device.pk)
                 plan = self._granted_selection(request, granted, selected_list, page_device, server_key)
@@ -2187,7 +2148,7 @@ class UpdateModuleSerialView(
         try:
             with atomic_with_events():
                 granted = _authorize_module_grant(
-                    self, page_device, server_key, ACTION_UPDATE_SERIAL, request.POST.get("inventory_binding")
+                    page_device, server_key, ACTION_UPDATE_SERIAL, request.POST.get("inventory_binding")
                 )
                 granted.grant.require(device_id=target_device.pk, ent_index=request.POST.get("ent_index", ""))
                 librenms_item = granted.row(granted.grant.ent_index)
@@ -2284,7 +2245,7 @@ class UpdateModuleInterfaceView(
             # One transaction: a lock conflict in the bind or the adoption rolls back both.
             with transaction.atomic():
                 granted = _authorize_module_grant(
-                    self, page_device, server_key, ACTION_UPDATE_INTERFACE, request.POST.get("inventory_binding")
+                    page_device, server_key, ACTION_UPDATE_INTERFACE, request.POST.get("inventory_binding")
                 )
                 granted.grant.require(device_id=target_device.pk, ent_index=request.POST.get("ent_index", ""))
                 # Lock the module row, so it stays in the bay that the row matched while the bind runs.
@@ -2700,7 +2661,7 @@ class ModuleMismatchPreviewView(
         action_target = installed_module_target(installed_module.pk, installed_module.module_bay_id)
         try:
             granted = _authorize_module_grant(
-                self, page_device, server_key, ACTION_MISMATCH_PREVIEW, request.GET.get("inventory_binding")
+                page_device, server_key, ACTION_MISMATCH_PREVIEW, request.GET.get("inventory_binding")
             )
             grant = granted.grant.require(
                 device_id=target_device.pk, ent_index=ent_index_int, action_target=action_target
@@ -2922,7 +2883,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
             vc_adjustments = {"renamed": 0, "adopted": 0, "removed": 0, "skipped": 0}
             with atomic_with_events():
                 granted = _authorize_module_grant(
-                    self, page_device, server_key, ACTION_REPLACE_MODULE, request.POST.get("inventory_binding")
+                    page_device, server_key, ACTION_REPLACE_MODULE, request.POST.get("inventory_binding")
                 )
                 granted.grant.require(device_id=target_device.pk, ent_index=request.POST.get("ent_index", ""))
                 librenms_item = granted.row(granted.grant.ent_index)
@@ -3857,9 +3818,7 @@ class MarkBuiltInView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libr
             acquire_advisory_transaction_lock(
                 f"netbox-librenms-plugin:built-in-rule:{target.device_type.manufacturer_id}"
             )
-        granted = _authorize_module_grant(
-            self, page_device, server_key, ACTION_MARK_BUILT_IN, data.get("inventory_binding")
-        )
+        granted = _authorize_module_grant(page_device, server_key, ACTION_MARK_BUILT_IN, data.get("inventory_binding"))
         grant = granted.grant.require(device_id=target.pk, ent_index=data.get("ent_index", ""))
         member = granted.policy.member(target.pk)
         device_type = member.device_type

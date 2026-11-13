@@ -10,6 +10,8 @@ redirect builders and assert the resolved ``server_key`` survives into the built
 structural canary keeps the suite honest if a builder is renamed or removed.
 """
 
+from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_mapped_modules
+
 from pathlib import Path
 from copy import deepcopy
 
@@ -93,7 +95,6 @@ def test_modules_redirect_response_propagates_server_key():
 @pytest.mark.django_db
 def test_modules_action_fragment_keeps_the_server_key(client, settings):
     """The HTMX variant re-renders the module tab with the acted-on server_key still wired in."""
-    from django.core.cache import cache
     from django.urls import reverse
 
     from netbox_librenms_plugin.tests.conftest import (
@@ -103,8 +104,6 @@ def test_modules_action_fragment_keeps_the_server_key(client, settings):
         make_module_type,
         make_superuser,
     )
-    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
-    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
     configure_librenms_servers(
         settings, {"prod": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}}
@@ -112,23 +111,19 @@ def test_modules_action_fragment_keeps_the_server_key(client, settings):
     device = make_device("redir-modules-fragment")
     bay = make_module_bay(device, "Redirect Bay")
     module_type = make_module_type("REDIRECT-CARD")
-    cache.set(
-        DeviceModuleTableView().get_cache_key(device, "inventory", server_key="prod"),
-        trusted_module_inventory_payload(
-            device,
-            [
-                {
-                    "entPhysicalIndex": 8401,
-                    "entPhysicalClass": "module",
-                    "entPhysicalModelName": module_type.model,
-                    "entPhysicalContainedIn": 0,
-                    "entPhysicalName": bay.name,
-                }
-            ],
-            server_key="prod",
-            librenms_id=9401,
-        ),
-        300,
+    seed_mapped_modules(
+        device,
+        [
+            {
+                "entPhysicalIndex": 8401,
+                "entPhysicalClass": "module",
+                "entPhysicalModelName": module_type.model,
+                "entPhysicalContainedIn": 0,
+                "entPhysicalName": bay.name,
+            }
+        ],
+        server_key="prod",
+        librenms_id=9401,
     )
     client.force_login(make_superuser("redir-modules-fragment-user"))
 

@@ -57,11 +57,11 @@ def _ip_view(request):
 
 def _stored_rows(device):
     """Assess the stored IP snapshot of *device* as a superuser and return its rows."""
-    from netbox_librenms_plugin.views.base.ip_addresses_view import assess_ip_snapshot
+    from netbox_librenms_plugin.views.base.ip_addresses_view import read_ip_assessment
 
     snapshot = source_cache.read(device, Resource.IP_ADDRESSES, SERVER_KEY)
     assert snapshot is not None
-    return assess_ip_snapshot(make_request("get"), device, snapshot, SERVER_KEY).rows
+    return read_ip_assessment(make_request("get"), device, snapshot, SERVER_KEY).rows
 
 
 def _refresh_url(device):
@@ -104,7 +104,7 @@ class TestManagementIPResolution:
 
     def test_a_device_record_without_a_string_ip_flags_no_row(self, client, live_librenms):
         """A refresh whose device record carries no string IP stores a snapshot with an empty management IP."""
-        from netbox_librenms_plugin.views.base.ip_addresses_view import assess_ip_snapshot
+        from netbox_librenms_plugin.views.base.ip_addresses_view import read_ip_assessment
 
         device = make_device("ip-render-mgmt-missing", librenms_cf={SERVER_KEY: {"id": 4302}})
         interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
@@ -123,7 +123,7 @@ class TestManagementIPResolution:
         assert response.status_code == 200
         assert _messages(response, "success") == ["IP address data refreshed successfully."]
         snapshot = source_cache.read(device, Resource.IP_ADDRESSES, SERVER_KEY)
-        assessment = assess_ip_snapshot(make_request("get"), device, snapshot, SERVER_KEY)
+        assessment = read_ip_assessment(make_request("get"), device, snapshot, SERVER_KEY)
         assert assessment.mgmt_ip == ""
         assert [row.get("is_mgmt_ip") for row in assessment.rows] == [None]
 

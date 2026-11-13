@@ -62,11 +62,11 @@ def _ip_view(request):
 
 def _assess(device, request=None):
     """Assess the stored snapshot of *device* as a superuser, through the IP table's own entry point."""
-    from netbox_librenms_plugin.views.base.ip_addresses_view import assess_ip_snapshot
+    from netbox_librenms_plugin.views.base.ip_addresses_view import read_ip_assessment
 
     snapshot = source_cache.read(device, Resource.IP_ADDRESSES, SERVER_KEY)
     assert snapshot is not None
-    return assess_ip_snapshot(request or _request(), device, snapshot, SERVER_KEY)
+    return read_ip_assessment(request or _request(), device, snapshot, SERVER_KEY)
 
 
 def _render(device, request=None):
@@ -150,7 +150,7 @@ class TestIpRowInterfaceNames:
 
     def test_render_port_key_work_grows_with_ports_and_rows(self, monkeypatch):
         """A render must not normalize all port keys again for each IP row."""
-        from netbox_librenms_plugin.views.base import ip_addresses_view
+        from netbox_librenms_plugin.assessment import ip_addresses as ip_addresses_view
 
         device = make_device("ip-linear-cache", librenms_cf={SERVER_KEY: {"id": DEVICE_ID}})
         ports = _seed(device, 20)
@@ -170,7 +170,7 @@ class TestIpRowInterfaceNames:
     @pytest.mark.parametrize("port_count", [4, 16])
     def test_assignment_port_lookup_work_grows_with_ports_and_rows(self, monkeypatch, port_count):
         from netbox_librenms_plugin import utils
-        from netbox_librenms_plugin.views.base import ip_addresses_view
+        from netbox_librenms_plugin.assessment import ip_addresses as ip_addresses_view
 
         device = make_device("ip-linear-assignments", librenms_cf={SERVER_KEY: {"id": DEVICE_ID}})
         ports = _seed(device, port_count)
@@ -457,8 +457,8 @@ class TestIpRowVrfSuggestions:
 
     def test_ambiguous_route_distinguisher_does_not_suggest_a_vrf(self, live_librenms):
         """An RD claimed by two NetBox VRFs binds neither one."""
-        from netbox_librenms_plugin.views.base.ip_addresses_view import (
-            BaseIPAddressTableView,
+        from netbox_librenms_plugin.assessment.ip_addresses import (
+            _Assessment,
             _index_snapshot_ports,
             _vrf_identities,
         )
@@ -473,7 +473,7 @@ class TestIpRowVrfSuggestions:
         vrf_identities = _vrf_identities(ports_by_id, rows, snapshot.value(Resource.IP_ADDRESSES, "vrfs"))
 
         assert str(_RD_PORT_ID) in vrf_identities
-        suggestions = BaseIPAddressTableView()._load_vrf_suggestions(vrf_identities, [first, second])
+        suggestions = _Assessment(None, "ifName")._load_vrf_suggestions(vrf_identities, [first, second])
 
         assert str(_RD_PORT_ID) not in suggestions
 
@@ -601,3 +601,44 @@ def test_ip_port_index_preserves_the_canonical_ambiguity_rule(records, expected)
 
     assert index == expected
     assert ip_row_port_record(index, "+42") == expected.get(42)
+
+
+@pytest.mark.django_db
+def test_ip_tab_get_keeps_an_unbound_interface_and_the_source_unchanged(client, live_librenms):
+    from core.models import ObjectChange
+    from dcim.models import Interface
+    from django.core.cache import cache
+
+    device = seed_mapping(make_device("ip-get-no-write"), SERVER_KEY, own=DEVICE_ID)
+    interface = make_interface(device, "Ethernet0")
+    _serve(live_librenms, 1)
+    snapshot = acquire(device, server_key=SERVER_KEY, resources=[Resource.IP_ADDRESSES])
+    assert source_cache.store(device, Resource.IP_ADDRESSES, snapshot)
+    before = (
+        Interface.objects.get(pk=interface.pk).custom_field_data,
+        Interface.objects.get(pk=interface.pk).last_updated,
+        ObjectChange.objects.count(),
+        cache.get(source_cache.snapshot_key(device, Resource.IP_ADDRESSES, SERVER_KEY)),
+    )
+    client.force_login(make_superuser("ip-get-no-write-user"))
+
+    requests = list(live_librenms.server.requests)
+    response = client.get(
+        reverse(
+            "plugins:netbox_librenms_plugin:sync_cache_fragment",
+            kwargs={"object_type": "device", "pk": device.pk, "tab": "ipaddresses"},
+        ),
+        {"server_key": SERVER_KEY},
+    )
+
+    assert response.status_code == 200
+    assert len(list(response.context["ip_sync"]["table"].data)) == 1
+    assert live_librenms.server.requests == requests
+    interface.refresh_from_db()
+    assert (
+        interface.custom_field_data,
+        interface.last_updated,
+        ObjectChange.objects.count(),
+        cache.get(source_cache.snapshot_key(device, Resource.IP_ADDRESSES, SERVER_KEY)),
+    ) == before
+    assert live_librenms.server.requests[-1]["path"] != f"/api/v0/ports/{9000}"

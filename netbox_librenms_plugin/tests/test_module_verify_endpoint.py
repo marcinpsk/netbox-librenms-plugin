@@ -408,6 +408,160 @@ def test_a_module_render_refuses_a_page_that_leaves_its_chassis_during_the_polic
 
             from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, SyncTabState
 
-            assert "Inventory data refreshed successfully." not in response.content.decode()
-            state = cache.get(SyncCacheConsistency(device).state_key(SyncTab.MODULES, SERVER_KEY))
+            # The failure belongs to the page's current scope, which the database row names.
+            current = Device.objects.get(pk=device.pk)
+            state = cache.get(SyncCacheConsistency(current).state_key(SyncTab.MODULES, SERVER_KEY))
             assert state["state"] == SyncTabState.REFRESH_FAILED.value
+
+
+@pytest.mark.django_db
+def test_a_refresh_whose_page_leaves_its_chassis_for_a_refused_snapshot_reports_no_success(
+    client, librenms_server, monkeypatch
+):
+    """The page's new scope holds a snapshot that its binding refuses, so the refresh did not give it a table."""
+    from dcim.models import Device
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin import source_cache
+    from netbox_librenms_plugin.acquisition.registry import Resource
+    from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, SyncTabState
+    from netbox_librenms_plugin.tests.conftest import (
+        make_device_with_module_bays,
+        make_module_type,
+        make_superuser,
+        make_virtual_chassis,
+    )
+    from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+    owner = make_device_with_module_bays("module-scope-owner", ["Bay 1"], serial="CHASSIS-7")
+    seed_mapping(owner, SERVER_KEY, own=LIBRENMS_ID, save=False)
+    owner.save()
+    page = make_device_with_module_bays("module-scope-page", ["Bay 1"])
+    make_virtual_chassis("module-scope-vc", owner, page)
+    page.refresh_from_db()
+    make_module_type("LC-24")
+    _register_inventory(librenms_server, INVENTORY)
+    client.force_login(make_superuser("module-scope-user"))
+    real_context = BaseModuleTableView.get_context_data
+    seeded = []
+
+    def leave_for_a_refused_snapshot(view, request, obj, server_key=None, **kwargs):
+        chassis_key = source_cache.snapshot_key(obj, Resource.MODULES, server_key)
+        Device.objects.filter(pk=obj.pk).update(virtual_chassis=None, vc_position=None)
+        obj.refresh_from_db()
+        # The page's own key now holds the chassis owner's snapshot, which the page's binding refuses.
+        own_key = source_cache.snapshot_key(obj, Resource.MODULES, server_key)
+        cache.set(own_key, cache.get(chassis_key), timeout=300)
+        seeded.append(own_key != chassis_key)
+        return real_context(view, request, obj, server_key=server_key, **kwargs)
+
+    monkeypatch.setattr(BaseModuleTableView, "get_context_data", leave_for_a_refused_snapshot)
+
+    response = _refresh_modules(client, page)
+
+    assert seeded == [True]
+    assert response.status_code == 200
+    assert response.context["module_sync"]["table"] is None
+    assert "Inventory data refreshed successfully" not in response.content.decode()
+    # The refresh records the failure for the page's final scope; the chassis scope keeps its new snapshot.
+    page.refresh_from_db()
+    state = cache.get(SyncCacheConsistency(page).state_key(SyncTab.MODULES, SERVER_KEY))
+    assert state["state"] == SyncTabState.REFRESH_FAILED.value
+
+
+@pytest.mark.django_db
+def test_a_member_that_leaves_its_chassis_in_the_database_during_the_refresh_gets_no_success(
+    client, librenms_server, monkeypatch
+):
+    """Only the database row changes, so the request's device instance still names the old chassis."""
+    from dcim.models import Device
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, SyncTabState
+    from netbox_librenms_plugin.tests.conftest import (
+        make_device_with_module_bays,
+        make_module_type,
+        make_superuser,
+        make_virtual_chassis,
+    )
+
+    owner = make_device_with_module_bays("module-db-leave-owner", ["Bay 1"], serial="CHASSIS-8")
+    seed_mapping(owner, SERVER_KEY, own=LIBRENMS_ID, save=False)
+    owner.save()
+    page = make_device_with_module_bays("module-db-leave-page", ["Bay 1"])
+    make_virtual_chassis("module-db-leave-vc", owner, page)
+    make_module_type("LC-24")
+    _register_inventory(librenms_server, INVENTORY)
+    client.force_login(make_superuser("module-db-leave-user"))
+    real_outcome = SyncCacheConsistency.mark_refresh_outcome
+    left = []
+
+    def publish_then_leave(coordinator, *args, **kwargs):
+        published = real_outcome(coordinator, *args, **kwargs)
+        if not left:
+            # Another transaction commits the leave after the snapshot write; no instance is refreshed.
+            left.append(Device.objects.filter(pk=page.pk).update(virtual_chassis=None, vc_position=None))
+        return published
+
+    monkeypatch.setattr(SyncCacheConsistency, "mark_refresh_outcome", publish_then_leave)
+
+    response = _refresh_modules(client, page)
+
+    assert left == [1]
+    assert response.status_code == 200
+    assert response.context["module_sync"]["table"] is None
+    assert "Inventory data refreshed successfully" not in response.content.decode()
+    standalone = Device.objects.get(pk=page.pk)
+    state = cache.get(SyncCacheConsistency(standalone).state_key(SyncTab.MODULES, SERVER_KEY))
+    assert state["state"] == SyncTabState.REFRESH_FAILED.value
+
+
+@pytest.mark.django_db
+def test_a_member_that_leaves_its_chassis_after_the_table_read_gets_no_rows_of_the_chassis(
+    client, librenms_server, monkeypatch
+):
+    """The table is built for the chassis, then the database row leaves it, so the response refuses that table."""
+    from dcim.models import Device
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, SyncTabState
+    from netbox_librenms_plugin.tests.conftest import (
+        make_device_with_module_bays,
+        make_module_type,
+        make_superuser,
+        make_virtual_chassis,
+    )
+    from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+    owner = make_device_with_module_bays("module-late-leave-owner", ["Bay 1"], serial="CHASSIS-9")
+    seed_mapping(owner, SERVER_KEY, own=LIBRENMS_ID, save=False)
+    owner.save()
+    page = make_device_with_module_bays("module-late-leave-page", ["Bay 1"])
+    make_virtual_chassis("module-late-leave-vc", owner, page)
+    make_module_type("LC-24")
+    _register_inventory(librenms_server, INVENTORY)
+    client.force_login(make_superuser("module-late-leave-user"))
+    real_context = BaseModuleTableView.get_context_data
+    built = []
+
+    def read_then_leave(view, request, obj, server_key=None, **kwargs):
+        context = real_context(view, request, obj, server_key=server_key, **kwargs)
+        # Another transaction commits the leave after the table is built; no instance is refreshed.
+        built.append(context["table"] is not None)
+        Device.objects.filter(pk=page.pk).update(virtual_chassis=None, vc_position=None)
+        return context
+
+    monkeypatch.setattr(BaseModuleTableView, "get_context_data", read_then_leave)
+
+    response = _refresh_modules(client, page)
+
+    assert built == [True]
+    assert response.status_code == 200
+    body = response.content.decode()
+    assert response.context["module_sync"]["table"] is None
+    assert "MOD-SERIAL-1" not in body
+    assert "data-verify-binding" not in body
+    assert "Inventory data refreshed successfully" not in body
+    standalone = Device.objects.get(pk=page.pk)
+    state = cache.get(SyncCacheConsistency(standalone).state_key(SyncTab.MODULES, SERVER_KEY))
+    assert state["state"] == SyncTabState.REFRESH_FAILED.value
