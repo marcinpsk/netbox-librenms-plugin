@@ -229,36 +229,54 @@ class TestSingleInterfaceVerifyEndpoint:
 
 @pytest.mark.django_db
 class TestVLANVerifyEndpoints:
-    def test_vlan_sync_verify_reports_global_name_match(self, client):
+    def test_vlan_sync_verify_reports_global_name_match(self, client, settings):
+        from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server
+        from netbox_librenms_plugin.tests.vlan_intent_helpers import seed_vlans
+
+        configure_default_librenms_server(settings)
         VLAN.objects.create(vid=3201, name="Application", status="active")
+        device = make_device("verify-vlan-global", librenms_cf={"default": {"id": 42}})
+        seed_vlans(device, [{"vlan_vlan": 3201, "vlan_name": "Application"}])
         _login(client, "verify-vlan-global-user")
 
         response = _json_post(
             client,
             "verify_vlan_sync_group",
-            {"vid": 3201, "name": "Application", "vlan_group_id": ""},
+            {"device_id": device.pk, "server_key": "default", "vid": 3201, "vlan_group_id": ""},
         )
 
         assert response.status_code == 200
-        assert response.json() == {
+        answer = response.json()
+        assert answer.pop("confirmation_intent").startswith("vlan:")
+        assert answer == {
             "status": "success",
+            "vid": 3201,
+            "vlan_group_id": None,
             "exists_in_netbox": True,
             "name_matches": True,
             "css_class": "text-success",
             "netbox_vlan_name": "Application",
+            "name": "Application",
+            "name_html": '<span class="text-success">Application</span>',
             "status_html": '<span class="text-success"><i class="mdi mdi-check-circle"></i> Synced</span>',
         }
 
-    def test_vlan_sync_verify_scopes_lookup_to_selected_group(self, client):
+    def test_vlan_sync_verify_scopes_lookup_to_selected_group(self, client, settings):
+        from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server
+        from netbox_librenms_plugin.tests.vlan_intent_helpers import seed_vlans
+
+        configure_default_librenms_server(settings)
         first = VLANGroup.objects.create(name="First Group", slug="first-group")
         second = VLANGroup.objects.create(name="Second Group", slug="second-group")
         VLAN.objects.create(vid=3202, name="Application", group=first, status="active")
+        device = make_device("verify-vlan-group", librenms_cf={"default": {"id": 42}})
+        seed_vlans(device, [{"vlan_vlan": 3202, "vlan_name": "Application"}])
         _login(client, "verify-vlan-group-user")
 
         response = _json_post(
             client,
             "verify_vlan_sync_group",
-            {"vid": 3202, "name": "Application", "vlan_group_id": second.pk},
+            {"device_id": device.pk, "server_key": "default", "vid": 3202, "vlan_group_id": second.pk},
         )
 
         assert response.status_code == 200

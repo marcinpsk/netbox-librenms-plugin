@@ -176,7 +176,7 @@ class LibreNMSVLANTable(tables.Table):
             record.get("vlan_id"),
             record.get("exists_in_netbox", False),
             record.get("name_matches", True),
-            actions_enabled=not self.migrated_to_marker,
+            actions_enabled=self._actions_enabled(record),
         )
 
     @staticmethod
@@ -188,14 +188,15 @@ class LibreNMSVLANTable(tables.Table):
         """
         Return the VLAN group the row's dropdown selects, or None for no group.
 
-        The dropdown selects the existing NetBox VLAN's group first, then a unique VID match. A group
-        that is not in the dropdown selects no option, so the dropdown shows no group.
+        The dropdown selects the group the row's operation synchronizes into. A group that is not in
+        the dropdown selects no option, so the dropdown shows no group.
         """
-        if record.get("exists_in_netbox") and record.get("netbox_vlan_group_id"):
-            selected_group_id = record["netbox_vlan_group_id"]
-        else:
-            selected_group_id = record.get("auto_selected_group_id")
+        selected_group_id = record.get("group_choice_id")
         return next((group for group in self.vlan_groups if group.pk == selected_group_id), None)
+
+    def _actions_enabled(self, record):
+        """Return whether the row offers an operation that a row control can submit."""
+        return not self.migrated_to_marker and bool(record.get("confirmation_intent"))
 
     @staticmethod
     def _group_label(group):
@@ -243,6 +244,11 @@ class LibreNMSVLANTable(tables.Table):
 
         return format_html('<span class="{}">{}</span>{}', css_class, text, rule_note)
 
+    def name_cell(self, record):
+        """Return the markup of the name cell, as the rendered table shows it."""
+        name = record.get("name")
+        return self.default if name in EMPTY_CELL_VALUES else self.render_name(name, record)
+
     def render_vlan_group_selection(self, value, record):
         """
         Render per-row VLAN group dropdown.
@@ -274,13 +280,12 @@ class LibreNMSVLANTable(tables.Table):
             ],
         )
 
-        # The writer refuses a row whose proposed name is not the name this page shows.
+        # The token travels only with a submitted row, so it stays disabled until the script posts it.
         select_html = format_html(
-            '<input type="hidden" name="expected_vlan_name_{}" value="{}">'
+            '<input type="hidden" name="confirmation_intent" value="{}" disabled>'
             '<select name="vlan_group_{}" class="form-select form-select-sm vlan-sync-group-select"'
             ' data-vlan-id="{}" data-vlan-name="{}">{}</select>',
-            vlan_id,
-            record.get("name") or "",
+            record.get("confirmation_intent") or "",
             vlan_id,
             vlan_id,
             record.get("name", ""),
@@ -311,7 +316,7 @@ class LibreNMSVLANTable(tables.Table):
             record.get("vlan_id"),
             record.get("exists_in_netbox", False),
             record.get("name_matches", True),
-            actions_enabled=not self.migrated_to_marker,
+            actions_enabled=self._actions_enabled(record),
         )
 
     def configure(self, request):

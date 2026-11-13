@@ -504,18 +504,20 @@ class TestVlansGroupedUpdateAndSkip:
         from ipam.models import VLAN, VLANGroup
 
         from netbox_librenms_plugin.acquisition.registry import Resource
+        from netbox_librenms_plugin.confirmation_intent import FIELD
+        from netbox_librenms_plugin.tests.conftest import make_superuser
         from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_source_snapshot
+        from netbox_librenms_plugin.tests.vlan_intent_helpers import assessed_tokens
         from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
 
         group = VLANGroup.objects.create(name=f"grp-{tag}", slug=f"grp-{tag}")
         vlan = VLAN.objects.create(vid=100, group=group, name=existing_name, status="active")
         dev = make_device(f"vlan-{tag}")
-        req = make_request(
-            "post", {"select": ["100"], "vlan_group_100": str(group.pk), "expected_vlan_name_100": cached_name}
-        )
+        seed_source_snapshot(dev, Resource.VLANS, "default", vlans=[{"vlan_vlan": 100, "vlan_name": cached_name}])
+        user = make_superuser()
+        req = make_request("post", {FIELD: [assessed_tokens(dev, user)[100]]}, user=user)
         view = make_view(SyncVLANsView, req)
         view._post_server_key = "default"
-        seed_source_snapshot(dev, Resource.VLANS, "default", vlans=[{"vlan_vlan": 100, "vlan_name": cached_name}])
         cache_key = view.get_cache_key(dev, "vlans", "default")
         return view, req, dev, vlan, cache_key
 

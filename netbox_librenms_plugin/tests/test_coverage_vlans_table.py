@@ -185,31 +185,21 @@ class TestRenderVlanGroupSelection:
         # 'selected' should not appear for the group option
         assert "selected" not in html
 
-    def test_existing_netbox_vlan_group_preselected(self):
-        """Priority 1: existing NetBox VLAN group is pre-selected."""
-        group = self._make_group(tag=7, name="Existing Group")
-        table = _make_table(vlan_groups=[group])
+    def test_the_group_of_the_row_choice_is_preselected(self):
+        """The dropdown selects the group that the row's operation synchronizes into."""
+        group = self._make_group(tag=7, name="Chosen Group")
+        other = self._make_group(tag=3, name="Other Group")
+        table = _make_table(vlan_groups=[group, other])
         record = {
             "vlan_id": 20,
-            "name": "EXISTING",
-            "exists_in_netbox": True,
-            "netbox_vlan_group_id": group.pk,
-        }
-        html = str(table.render_vlan_group_selection(None, record))
-        assert "selected" in html
-
-    def test_auto_selected_group_preselected(self):
-        """Priority 2: auto_selected_group_id is pre-selected when exists_in_netbox is False."""
-        group = self._make_group(tag=3, name="Auto Group")
-        table = _make_table(vlan_groups=[group])
-        record = {
-            "vlan_id": 30,
-            "name": "AUTO",
+            "name": "CHOSEN",
             "exists_in_netbox": False,
-            "auto_selected_group_id": group.pk,
+            "auto_selected_group_id": other.pk,
+            "group_choice_id": group.pk,
         }
         html = str(table.render_vlan_group_selection(None, record))
-        assert "selected" in html
+        assert f'<option value="{group.pk}" data-scope="" selected>' in html
+        assert f'<option value="{other.pk}" data-scope="">' in html
 
     def test_warning_icon_when_ambiguous_and_not_in_netbox(self):
         """is_ambiguous=True and exists_in_netbox=False shows a warning icon."""

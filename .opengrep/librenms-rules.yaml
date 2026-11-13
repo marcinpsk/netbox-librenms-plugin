@@ -2128,3 +2128,56 @@ rules:
       # Only a variable or tag reads the attribute; prose and comments do not.
       - pattern-regex: \{[{%][^}]*\.primary_ip\b
       - pattern-not-inside: "{# ... #}"
+
+  - id: signing-only-in-confirmation-intent
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This module imports django.core.signing. Offer and verify a confirmation through
+      confirmation_intent.py, which owns the salt, the expiry and the strict decoding. The exclude
+      list below names the legacy signing sites of unmigrated actions: each cutover removes its
+      entry, and test_confirmation_intent.py refuses an added one. Only import statements are
+      checked; a dynamic import is outside this check.
+    metadata:
+      category: security
+    paths:
+      include: ["**/netbox_librenms_plugin/**"]
+      exclude:
+        - "**/netbox_librenms_plugin/tests/**"
+        - "**/netbox_librenms_plugin/confirmation_intent.py"
+        - "**/netbox_librenms_plugin/views/sync/ip_addresses.py"
+        - "**/netbox_librenms_plugin/module_grants.py"
+        - "**/netbox_librenms_plugin/identity_replacement.py"
+    pattern-either:
+      - pattern: import django.core.signing
+      - pattern: import django.core.signing as $ALIAS
+      - pattern: from django.core import signing
+      - pattern: from django.core import signing as $ALIAS
+      - pattern: from django.core.signing import $NAME
+      - pattern: from django.core.signing import $NAME as $ALIAS
+
+  - id: offer-only-from-assessment
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This code offers a confirmation intent outside an assessment module. Only the assessment entry
+      point of a resource calls confirmation_intent.offer; views, tables and templates pass its tokens
+      through. Calls through the absolute import forms are checked; a relative import is outside this
+      check.
+    metadata:
+      category: correctness
+    paths:
+      include: ["**/netbox_librenms_plugin/**"]
+      exclude: ["**/netbox_librenms_plugin/assessment/**", "**/netbox_librenms_plugin/tests/**"]
+    pattern-either:
+      - pattern: netbox_librenms_plugin.confirmation_intent.offer(...)
+      - patterns:
+          - pattern-inside: |
+              from netbox_librenms_plugin import confirmation_intent as $MODULE
+              ...
+          - pattern: $MODULE.offer(...)
+      - patterns:
+          - pattern-inside: |
+              from netbox_librenms_plugin.confirmation_intent import offer as $CALL
+              ...
+          - pattern: $CALL(...)

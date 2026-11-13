@@ -248,10 +248,12 @@ class TestVerifyVlanSyncGroupBranches:
 
         client.force_login(make_user_with_perms("vlan-sync-verify-gate-user", []))
 
-        response = _json_post(client, "verify_vlan_sync_group", {"vid": "120", "name": "Users"})
+        response = _json_post(client, "verify_vlan_sync_group", {"vid": "120"})
 
         assert response.status_code == 403
-        assert response.json() == {"error": "Missing permissions: ipam.view_vlan, ipam.view_vlangroup"}
+        assert response.json() == {
+            "error": "Missing permissions: dcim.view_device, ipam.view_vlan, ipam.view_vlangroup"
+        }
 
     def test_non_numeric_vlan_group_id_is_rejected(self, client):
         """A VLAN group id that is not an integer returns a structured 400."""
@@ -262,11 +264,123 @@ class TestVerifyVlanSyncGroupBranches:
         response = _json_post(
             client,
             "verify_vlan_sync_group",
-            {"vid": "120", "name": "Users", "vlan_group_id": "not-an-id"},
+            {"vid": "120", "vlan_group_id": "not-an-id"},
         )
 
         assert response.status_code == 400
         assert response.json() == {"status": "error", "message": "Invalid VLAN group ID"}
+
+
+@pytest.mark.django_db
+class TestVerifyVlanSyncGroupReassessment:
+    """The endpoint reassesses one row of the device's snapshot for the chosen group and answers with its token."""
+
+    @staticmethod
+    def _device(tag, rows):
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.vlan_intent_helpers import seed_vlans
+
+        device = make_device(f"vlan-reassess-{tag}", librenms_cf={SERVER_KEY: {"id": 42}})
+        seed_vlans(device, rows)
+        return device
+
+    @staticmethod
+    def _operation(token):
+        from django.core import signing
+
+        from netbox_librenms_plugin.confirmation_intent import SALT_NAMESPACE
+
+        return signing.loads(token.partition(":")[2], salt=f"{SALT_NAMESPACE}:vlan")["operation"]
+
+    def test_the_row_comes_from_the_snapshot_not_from_a_posted_name(self, client, configure_librenms):
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+        from netbox_librenms_plugin.tests.vlan_intent_helpers import reassess
+
+        configure_librenms({SERVER_KEY: {"librenms_url": "https://librenms.example.com", "api_token": "t"}})
+        group = _vlan_group("Reassess snapshot")
+        _vlan(120, "Users", group=group)
+        device = self._device("snapshot", [{"vlan_vlan": 120, "vlan_name": "Users"}])
+        client.force_login(make_superuser("vlan-reassess-snapshot-user"))
+
+        response = reassess(client, device, "120", group, name="Forged")
+
+        assert response.status_code == 200
+        assert response.json()["name_matches"] is True
+        assert self._operation(response.json()["confirmation_intent"])["effects"]["name"] == "Users"
+
+    def test_the_answer_shows_the_name_that_its_token_proposes(self, client, configure_librenms):
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+        from netbox_librenms_plugin.tests.vlan_intent_helpers import reassess, tab_tokens
+
+        configure_librenms({SERVER_KEY: {"librenms_url": "https://librenms.example.com", "api_token": "t"}})
+        group = _vlan_group("Reassess name")
+        device = self._device("name", [{"vlan_vlan": 124, "vlan_name": "users"}])
+        client.force_login(make_superuser("vlan-reassess-name-user"))
+        tab_tokens(client, device)
+        # The proposal changes between the render and the reassessment.
+        NormalizationRule.objects.create(
+            scope=NormalizationRule.SCOPE_VLAN_NAME, match_pattern=r"^users$", replacement="people"
+        )
+
+        answer = reassess(client, device, "124", group).json()
+
+        assert self._operation(answer["confirmation_intent"])["effects"]["name"] == "people"
+        assert answer["name"] == "people"
+        assert ">people</span>" in answer["name_html"]
+        assert "LibreNMS name: users" in answer["name_html"]
+
+    def test_a_changed_choice_answers_a_new_token_for_that_choice(self, client, configure_librenms):
+        from ipam.models import VLAN
+
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+        from netbox_librenms_plugin.tests.vlan_intent_helpers import message_texts, reassess, sync
+
+        configure_librenms({SERVER_KEY: {"librenms_url": "https://librenms.example.com", "api_token": "t"}})
+        first, second = _vlan_group("Reassess first"), _vlan_group("Reassess second")
+        device = self._device("choice", [{"vlan_vlan": 121, "vlan_name": "Voice"}])
+        client.force_login(make_superuser("vlan-reassess-choice-user"))
+
+        first_token = reassess(client, device, "121", first).json()["confirmation_intent"]
+        answer = reassess(client, device, "121", second).json()
+        global_answer = reassess(client, device, "121", None).json()
+
+        assert answer["vlan_group_id"] == second.pk
+        assert global_answer["vlan_group_id"] is None
+        assert len({first_token, answer["confirmation_intent"], global_answer["confirmation_intent"]}) == 3
+        assert self._operation(first_token)["choices"] == {"group": first.pk}
+        assert self._operation(answer["confirmation_intent"])["choices"] == {"group": second.pk}
+        assert self._operation(global_answer["confirmation_intent"])["choices"] == {"group": None}
+        response = sync(client, device, [answer["confirmation_intent"]], htmx=False)
+        assert "VLANs synced: 1 created." in message_texts(response)
+        assert list(VLAN.objects.filter(vid=121).values_list("group_id", flat=True)) == [second.pk]
+
+    def test_the_endpoint_needs_the_subject_and_its_snapshot(self, client, configure_librenms):
+        from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
+        configure_librenms({SERVER_KEY: {"librenms_url": "https://librenms.example.com", "api_token": "t"}})
+        device = self._device("subject", [{"vlan_vlan": 122, "vlan_name": "Data"}])
+        unseeded = make_device("vlan-reassess-unseeded", librenms_cf={SERVER_KEY: {"id": 43}})
+        client.force_login(make_superuser("vlan-reassess-subject-user"))
+
+        assert _json_post(client, "verify_vlan_sync_group", {"vid": "122"}).status_code == 400
+        missing_row = _json_post(client, "verify_vlan_sync_group", {"vid": "123", "device_id": device.pk})
+        assert missing_row.status_code == 400
+        no_snapshot = _json_post(client, "verify_vlan_sync_group", {"vid": "122", "device_id": unseeded.pk})
+        assert no_snapshot.status_code == 400
+        from dcim.models import Device
+        from ipam.models import VLAN, VLANGroup
+
+        client.force_login(
+            make_user_with_perms(
+                "vlan-reassess-scoped-user",
+                [("view", Device), ("view", VLAN), ("view", VLANGroup)],
+                constraints={"name": "another-device"},
+            )
+        )
+        hidden = _json_post(client, "verify_vlan_sync_group", {"vid": "122", "device_id": device.pk})
+        assert hidden.status_code == 404
 
 
 @pytest.mark.django_db

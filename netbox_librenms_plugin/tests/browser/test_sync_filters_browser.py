@@ -344,9 +344,12 @@ def _verify_vlan_group(page):
             body=json.dumps(
                 {
                     "status": "success",
+                    "vlan_group_id": 1,
                     "css_class": "text-success",
                     "exists_in_netbox": True,
                     "name_matches": True,
+                    "name": "Users",
+                    "name_html": '<span class="text-success">Users</span>',
                     "status_html": '<span id="group-a-status">Synced</span>',
                 }
             ),

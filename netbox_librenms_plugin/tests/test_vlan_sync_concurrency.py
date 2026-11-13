@@ -1,20 +1,26 @@
 """
 Concurrency tests for VLAN synchronization.
 
-Global VIDs are serialized by an advisory lock. Confirmed grouped VLAN changes lock their exact
-row before applying the disclosed rename.
+Global VIDs are serialized by an advisory lock. The rebuild locks the chosen group and the target
+VLAN rows before it reads them, so a change that commits while it waits makes the approval stale.
 """
 
 from functools import partial
-from threading import Barrier, BrokenBarrierError, Event
+from queue import Queue
+from threading import Barrier, BrokenBarrierError
+from time import monotonic, sleep
 
 import pytest
+from dcim.models import Device
 from django.apps import apps
 from django.contrib.auth import get_user_model
 from django.db import close_old_connections, connection
 
+from netbox_librenms_plugin import source_cache
 from netbox_librenms_plugin.acquisition.registry import Resource
+from netbox_librenms_plugin.confirmation_intent import FIELD
 from netbox_librenms_plugin.tests.conftest import bounded_executor, make_device, run_in_threads
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping_row
 from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_source_snapshot
 from netbox_librenms_plugin.tests.view_test_helpers import (
     assert_locked_before_update,
@@ -23,6 +29,7 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
     messages_on,
     post,
 )
+from netbox_librenms_plugin.tests.vlan_intent_helpers import assessed_tokens
 
 
 class _CapturedQueries:
@@ -81,7 +88,7 @@ class _GlobalVLANLookupBarrier:
         return result
 
 
-def _sync_global_vlan(device, user, vid, lookup_wrapper):
+def _sync_global_vlan(device, user, token, lookup_wrapper):
     from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
 
     close_old_connections()
@@ -91,22 +98,13 @@ def _sync_global_vlan(device, user, vid, lookup_wrapper):
             cursor.execute("SET statement_timeout = '5s'")
 
         request = make_request(
-            data={
-                "action": "create_vlans",
-                "select": [str(vid)],
-                f"vlan_group_{vid}": "",
-                f"expected_vlan_name_{vid}": "Concurrent global VLAN",
-                "server_key": "default",
-            },
+            data={"action": "create_vlans", FIELD: [token], "server_key": "default"},
             user=user,
             path="/sync/vlans/",
         )
 
         view = SyncVLANsView()
         view.request = request
-        seed_source_snapshot(
-            device, Resource.VLANS, "default", vlans=[{"vlan_vlan": vid, "vlan_name": "Concurrent global VLAN"}]
-        )
 
         with connection.execute_wrapper(lookup_wrapper):
             view.post(request, object_type="device", object_id=device.pk)
@@ -130,13 +128,18 @@ def test_concurrent_global_vlan_sync_creates_one_vlan():
         is_superuser=True,
     )
     devices = [make_device("global-vlan-device-a"), make_device("global-vlan-device-b")]
+    for device in devices:
+        seed_source_snapshot(
+            device, Resource.VLANS, "default", vlans=[{"vlan_vlan": 321, "vlan_name": "Concurrent global VLAN"}]
+        )
+    tokens = [assessed_tokens(device, user)[321] for device in devices]
     lookup_barrier = Barrier(2, timeout=10)
     lookup_wrappers = [_GlobalVLANLookupBarrier(lookup_barrier) for _device in devices]
 
     run_in_threads(
         *(
-            partial(_sync_global_vlan, device, user, 321, lookup_wrapper)
-            for device, lookup_wrapper in zip(devices, lookup_wrappers, strict=True)
+            partial(_sync_global_vlan, device, user, token, lookup_wrapper)
+            for device, token, lookup_wrapper in zip(devices, tokens, lookup_wrappers, strict=True)
         ),
         barriers=(lookup_barrier,),
         timeout=10,
@@ -146,48 +149,28 @@ def test_concurrent_global_vlan_sync_creates_one_vlan():
     assert VLAN.objects.filter(vid=321, group__isnull=True).count() == 1
 
 
-def _drive_grouped_sync(device, user, group, vid, librenms_name, *, intent=None):
-    """POST one grouped VID into the real view and return the recorded messages."""
+def _grouped_vlan_user(name):
+    from ipam.models import VLAN, VLANGroup
+
+    return make_user_with_perms(
+        name, [("view", Device), ("view", VLAN), ("view", VLANGroup), ("add", VLAN), ("change", VLAN)]
+    )
+
+
+def _drive_grouped_sync(device, user, token, *, confirm=True):
+    """POST one token into the real view and return the recorded messages."""
     from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
 
-    data = {
-        "action": "create_vlans",
-        "select": [str(vid)],
-        f"vlan_group_{vid}": str(group.pk),
-        f"expected_vlan_name_{vid}": librenms_name,
-        "server_key": "default",
-    }
-    if intent is not None:
-        data.update(
-            {
-                "confirm_conflicts": "1",
-                "force_conflict": str(vid),
-                "conflict_intent": intent,
-            }
-        )
-    request = make_request(
-        data=data,
-        user=user,
-        path="/sync/vlans/",
-    )
-    view = SyncVLANsView()
-    seed_source_snapshot(device, Resource.VLANS, "default", vlans=[{"vlan_vlan": vid, "vlan_name": librenms_name}])
-    post(view, request, object_type="device", object_id=device.pk)
+    data = {"action": "create_vlans", FIELD: [token], "server_key": "default"}
+    if confirm:
+        data["confirm_conflicts"] = "1"
+    request = make_request(data=data, user=user, path="/sync/vlans/")
+    post(SyncVLANsView(), request, object_type="device", object_id=device.pk)
     return messages_on(request)
 
 
-def _rename_intent(vlan, device, proposed_name):
-    """Return a signed intent for the current test VLAN state."""
-    from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
-
-    conflict = SyncVLANsView()._build_conflict(
-        vlan=vlan,
-        proposed_name=proposed_name,
-        obj=device,
-        object_type="device",
-        server_key="default",
-    )
-    return conflict["intent"]
+def _seed_grouped_vid(device, vid, librenms_name):
+    seed_source_snapshot(device, Resource.VLANS, "default", vlans=[{"vlan_vlan": vid, "vlan_name": librenms_name}])
 
 
 @pytest.mark.django_db
@@ -200,21 +183,12 @@ def test_grouped_vlan_row_is_locked_before_the_rename():
     device = make_device("vlan-lock-sql")
     group = VLANGroup.objects.create(name="Lock-SQL", slug="lock-sql")
     vlan = VLAN.objects.create(vid=41, group=group, name="old-name", status="active")
-    user = make_user_with_perms(
-        "vlan-lock-sql-user",
-        [("view", type(device)), ("view", VLANGroup), ("add", VLAN), ("change", VLAN)],
-    )
-    intent = _rename_intent(vlan, device, "librenms-name")
+    user = _grouped_vlan_user("vlan-lock-sql-user")
+    _seed_grouped_vid(device, 41, "librenms-name")
+    token = assessed_tokens(device, user)[41]
 
     with transaction.atomic(), CaptureQueriesContext(connection) as captured:
-        _drive_grouped_sync(
-            device,
-            user,
-            group,
-            vid=41,
-            librenms_name="librenms-name",
-            intent=intent,
-        )
+        _drive_grouped_sync(device, user, token)
 
     assert_locked_before_update(captured, "ipam_vlan")
     vlan.refresh_from_db()
@@ -230,46 +204,31 @@ def test_grouped_vlan_name_collision_is_rejected_without_a_database_error():
     group = VLANGroup.objects.create(name="Rename-Collision", slug="rename-collision")
     vlan = VLAN.objects.create(vid=51, group=group, name="old-name", status="active")
     VLAN.objects.create(vid=52, group=group, name="claimed-name", status="active")
-    user = make_user_with_perms(
-        "vlan-rename-collision-user",
-        [("view", type(device)), ("view", VLANGroup), ("add", VLAN), ("change", VLAN)],
-    )
-    intent = _rename_intent(vlan, device, "claimed-name")
+    user = _grouped_vlan_user("vlan-rename-collision-user")
+    _seed_grouped_vid(device, 51, "claimed-name")
+    token = assessed_tokens(device, user)[51]
 
-    recorded_messages = _drive_grouped_sync(
-        device,
-        user,
-        group,
-        vid=51,
-        librenms_name="claimed-name",
-        intent=intent,
-    )
+    recorded_messages = _drive_grouped_sync(device, user, token)
 
     vlan.refresh_from_db()
     assert vlan.name == "old-name"
-    assert any(level == "error" and "name already exists" in message for level, message in recorded_messages)
+    assert any(level == "error" and "claimed-name" in message for level, message in recorded_messages)
 
 
-class _ScopedVLANReadGate:
-    """Pause sync after the scoped VLAN read so locked and unlocked paths race from the same point."""
-
-    def __init__(self, read_done, resume):
-        self.read_done = read_done
-        self.resume = resume
-        self.seen = False
-
-    def __call__(self, execute, sql, params, many, context):
-        result = execute(sql, params, many, context)
-        if (
-            not self.seen
-            and sql.lstrip().upper().startswith("SELECT")
-            and 'FROM "ipam_vlan"' in sql
-            and '"ipam_vlan"."id" =' in sql
-        ):
-            self.seen = True
-            self.read_done.set()
-            assert self.resume.wait(10), "test never released the VLAN sync"
-        return result
+def _wait_until_blocked(pid, future, seconds=5):
+    """Block until the worker backend waits on a database lock."""
+    deadline = monotonic() + seconds
+    last_state = None
+    while monotonic() < deadline:
+        if future.done():
+            raise AssertionError(f"the VLAN sync finished before it waited for a lock: {future.result()}")
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT wait_event_type FROM pg_stat_activity WHERE pid = %s", [pid])
+            last_state = cursor.fetchone()
+        if last_state and last_state[0] == "Lock":
+            return
+        sleep(0.01)
+    raise AssertionError(f"the VLAN sync never waited for a lock: {last_state!r}")
 
 
 @pytest.mark.django_db(
@@ -278,67 +237,148 @@ class _ScopedVLANReadGate:
     # This is required when another installed plugin has M2M tables outside the default flush list.
     available_apps=[app.name for app in apps.get_app_configs()],
 )
-def test_grouped_vlan_deleted_after_the_scope_check_is_skipped_not_crashed(request):
-    """Verify deleting a grouped VLAN after the scope check skips it instead of raising a failed-update error."""
+@pytest.mark.parametrize(
+    ("change", "path"),
+    [
+        ("rename", "assumptions.target.name"),
+        ("delete", "assumptions.target"),
+        ("create", "assumptions.target"),
+        ("rule", "effects.name"),
+        ("source", "effects.name"),
+        ("expire", "source.available"),
+        ("device_type", "effects.name"),
+        ("remap", "source.available"),
+        ("unmap", "source.available"),
+    ],
+)
+def test_a_target_change_committed_while_the_writer_waits_for_its_lock_is_stale(change, path):
+    """
+    The rebuild reads the target, the name rules and the snapshot after its locks.
+
+    So a change that commits while the writer waits refuses the write: a target change, a VLAN name
+    rule that changes the proposed name, or a refreshed snapshot with another LibreNMS name.
+    """
+    from django.db import transaction
     from ipam.models import VLAN, VLANGroup
 
-    device = make_device("vlan-relock-delete")
-    group = VLANGroup.objects.create(name="Relock-Delete", slug="relock-delete")
-    vlan = VLAN.objects.create(vid=42, group=group, name="old-name", status="active")
-    user = make_user_with_perms(
-        "vlan-relock-delete-user",
-        [("view", type(device)), ("view", VLANGroup), ("add", VLAN), ("change", VLAN)],
-    )
+    device = make_device(f"vlan-lock-race-{change}", librenms_cf={"default": {"id": 42}})
+    group = VLANGroup.objects.create(name=f"Lock-Race-{change}", slug=f"lock-race-{change}")
+    vlan = VLAN.objects.create(vid=61, group=group, name="old-name", status="active") if change != "create" else None
+    from netbox_librenms_plugin.models import NormalizationRule
 
-    with connection.cursor() as cursor:
-        cursor.execute("SHOW lock_timeout")
-        original_lock_timeout = cursor.fetchone()[0]
-        cursor.execute("SELECT set_config('lock_timeout', %s, false)", ["137ms"])
-        cursor.execute("SHOW lock_timeout")
-        initial_lock_timeout = cursor.fetchone()[0]
+    user = _grouped_vlan_user(f"vlan-lock-race-{change}-user")
+    _seed_grouped_vid(device, 61, "librenms-name")
+    if change == "device_type":
+        # Another manufacturer's rule renames the source name; the device moves to that manufacturer's type.
+        from dcim.models import DeviceType, Manufacturer
 
-    def restore_original_lock_timeout():
-        with connection.cursor() as cursor:
-            cursor.execute("SELECT set_config('lock_timeout', %s, false)", [original_lock_timeout])
-
-    request.addfinalizer(restore_original_lock_timeout)
-
-    read_done, resume = Event(), Event()
+        ruled = Manufacturer.objects.create(name="Lock-Race-Ruled", slug="lock-race-ruled")
+        ruled_type = DeviceType.objects.create(manufacturer=ruled, model="Lock-Race-Ruled", slug="lock-race-ruled")
+        NormalizationRule.objects.create(
+            scope=NormalizationRule.SCOPE_VLAN_NAME,
+            manufacturer=ruled,
+            match_pattern=r"^librenms-name$",
+            replacement="ruled-by-type",
+        )
+    token = assessed_tokens(device, user, choices={61: group.pk})[61]
+    backend_pids = Queue()
 
     def sync_as_caller():
         close_old_connections()
         try:
-            # Bound both racing connections, as the sibling concurrency tests do. The test assumes
-            # the gate fires on the scope-check read, before the re-lock; if that order changes the
-            # main-thread delete blocks on the row lock and resume.set() can never run.
-            with connection.cursor() as cursor:
-                cursor.execute("SET lock_timeout = '5s'")
-                cursor.execute("SET statement_timeout = '10s'")
-            thread_user = get_user_model().objects.get(pk=user.pk)
-            with connection.execute_wrapper(_ScopedVLANReadGate(read_done, resume)):
-                return _drive_grouped_sync(device, thread_user, group, vid=42, librenms_name="librenms-name")
+            connection.ensure_connection()
+            backend_pids.put(connection.connection.info.backend_pid)
+            return _drive_grouped_sync(device, get_user_model().objects.get(pk=user.pk), token)
         finally:
             close_old_connections()
 
     with bounded_executor(max_workers=1) as executor:
-        syncing = executor.submit(sync_as_caller)
-        try:
-            assert read_done.wait(10), "the VLAN sync never reached its scoped read"
-            with connection.cursor() as cursor:
-                cursor.execute("SET lock_timeout = '5s'")
-            VLAN.objects.filter(pk=vlan.pk).delete()
-        finally:
-            resume.set()
-            with connection.cursor() as cursor:
-                cursor.execute("SELECT set_config('lock_timeout', %s, false)", [initial_lock_timeout])
+        with transaction.atomic():
+            # The competitor holds the lock the writer takes for this target: the VLAN row, or the group row for a create.
+            if vlan is not None:
+                VLAN.objects.select_for_update().filter(pk=vlan.pk).order_by().first()
+            else:
+                VLANGroup.objects.select_for_update().filter(pk=group.pk).first()
+            syncing = executor.submit(sync_as_caller)
+            _wait_until_blocked(backend_pids.get(timeout=5), syncing)
+            if change == "rename":
+                VLAN.objects.filter(pk=vlan.pk).update(name="renamed")
+            elif change == "delete":
+                VLAN.objects.filter(pk=vlan.pk).delete()
+            elif change == "create":
+                VLAN.objects.create(vid=61, group=group, name="competitor", status="active")
+            elif change == "rule":
+                NormalizationRule.objects.create(
+                    scope=NormalizationRule.SCOPE_VLAN_NAME, match_pattern=r"^librenms-name$", replacement="ruled-name"
+                )
+            elif change == "source":
+                _seed_grouped_vid(device, 61, "refreshed-name")
+            elif change == "expire":
+                source_cache.delete(device, Resource.VLANS, "default")
+            elif change == "device_type":
+                type(device).objects.filter(pk=device.pk).update(device_type=ruled_type)
+            else:
+                # Another writer maps the device to another LibreNMS host, or removes its mapping.
+                seed_stored_mapping_row(device, {"default": {"id": 43}} if change == "remap" else None)
         recorded = syncing.result(timeout=20)
 
-    with connection.cursor() as cursor:
-        cursor.execute("SHOW lock_timeout")
-        final_lock_timeout = cursor.fetchone()[0]
-
-    assert final_lock_timeout == initial_lock_timeout
     joined = " || ".join(text for _level, text in recorded)
-    assert "concurrent VLAN change" in joined, joined
+    assert "VLAN 61: " in joined and f"({path}" in joined, joined
     assert not any(level == "success" for level, _text in recorded), joined
-    assert not VLAN.objects.filter(pk=vlan.pk).exists()
+    assert (
+        list(VLAN.objects.filter(vid=61).values_list("name", flat=True))
+        == {
+            "rename": ["renamed"],
+            "delete": [],
+            "create": ["competitor"],
+            "rule": ["old-name"],
+            "source": ["old-name"],
+            "expire": ["old-name"],
+            "device_type": ["old-name"],
+            "remap": ["old-name"],
+            "unmap": ["old-name"],
+        }[change]
+    )
+
+
+@pytest.mark.django_db(
+    transaction=True,
+    # Explicit available apps make Django use cascade-aware transaction cleanup.
+    # This is required when another installed plugin has M2M tables outside the default flush list.
+    available_apps=[app.name for app in apps.get_app_configs()],
+)
+def test_a_vid_moved_into_the_group_while_the_create_waits_is_refused_without_a_write():
+    """The group row lock does not keep a VID absent; the unique group VID constraint refuses the create."""
+    from django.db import transaction
+    from ipam.models import VLAN, VLANGroup
+
+    device = make_device("vlan-vid-move-race")
+    group = VLANGroup.objects.create(name="Vid-Move-Race", slug="vid-move-race")
+    moving = VLAN.objects.create(vid=99, group=group, name="moving", status="active")
+    user = _grouped_vlan_user("vlan-vid-move-race-user")
+    _seed_grouped_vid(device, 61, "librenms-name")
+    token = assessed_tokens(device, user, choices={61: group.pk})[61]
+    backend_pids = Queue()
+
+    def sync_as_caller():
+        close_old_connections()
+        try:
+            connection.ensure_connection()
+            backend_pids.put(connection.connection.info.backend_pid)
+            return _drive_grouped_sync(device, get_user_model().objects.get(pk=user.pk), token)
+        finally:
+            close_old_connections()
+
+    with bounded_executor(max_workers=1) as executor:
+        with transaction.atomic():
+            # Another writer gives an existing VLAN of the group the VID, without touching the group row.
+            VLAN.objects.filter(pk=moving.pk).update(vid=61)
+            syncing = executor.submit(sync_as_caller)
+            # The create passes the rebuild and waits on the unique group VID index for this transaction.
+            _wait_until_blocked(backend_pids.get(timeout=5), syncing)
+        recorded = syncing.result(timeout=20)
+
+    joined = " || ".join(text for _level, text in recorded)
+    assert any(level == "error" and text.startswith("VLAN 61: ") for level, text in recorded), joined
+    assert not any(level == "success" for level, _text in recorded), joined
+    assert list(VLAN.objects.filter(group=group).values_list("vid", "name")) == [(61, "moving")]
