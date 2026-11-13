@@ -11,6 +11,7 @@ from uuid import uuid4
 
 import pytest
 
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import sensor_row, seed_cables_snapshot
 from django.contrib.auth import get_user_model
 from django.contrib.messages import get_messages
@@ -25,7 +26,6 @@ from netbox_librenms_plugin.tests.conftest import (
     make_serial_device,
     make_superuser,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.test_background_jobs import librenms_server  # noqa: F401
 from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms, queued_request
 
@@ -124,7 +124,7 @@ def test_the_ip_address_sync(client, settings, live_librenms, superuser):
 
     _configure_test_server(settings)
     tag = f"vetext-ipsync-{int(superuser)}"
-    device, hidden = make_device(tag, librenms_cf={"default": {"id": 42}}), make_device(f"{tag}-hidden")
+    device, hidden = seed_mapping(make_device(tag), "default", own=42), make_device(f"{tag}-hidden")
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
     seed_mapping(interface, own=7001)
     client.force_login(make_superuser(f"{tag}-refresher"))

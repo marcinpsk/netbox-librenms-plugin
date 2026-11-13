@@ -12,6 +12,7 @@ import uuid
 import pytest
 
 from netbox_librenms_plugin.data_shapes.envelope import unwrap_response
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.recordings import load_recording
 
 pytestmark = pytest.mark.django_db
@@ -242,7 +243,7 @@ def test_capture_download_replays_the_same_normalized_virtual_chassis(client, re
     unwrap_response(recording["responses"][f"GET /api/v0/devices/{device_id}"])[1]["devices"][0]["serial"] = (
         "S/N CAPTURE-A"
     )
-    device = make_device("normalized-capture", librenms_cf={"test": {"id": device_id}})
+    device = seed_mapping(make_device("normalized-capture"), "test", own=device_id)
     NormalizationRule.objects.filter(scope="serial").delete()
     # Detection accepts a stack that the rules of any manufacturer explain, not only the device's.
     owners = {

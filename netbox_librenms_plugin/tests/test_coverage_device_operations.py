@@ -766,7 +766,7 @@ class TestValidateDeviceForImport:
 
     @pytest.mark.parametrize("legacy_value", [5406, " 5406 "])
     def test_legacy_id_matches_and_requests_migration(self, legacy_value):
-        device = make_device("validation-legacy", librenms_cf=legacy_value)
+        device = seed_stored_mapping(make_device("validation-legacy"), legacy_value, save=True)
 
         result = self._validate(_device_payload(5406, hostname=device.name, sysName=device.name, serial="-"))
 

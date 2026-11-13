@@ -18,7 +18,7 @@ HTMX = {"HTTP_HX_REQUEST": "true"}
 
 
 def _mapped_device(live_librenms, name):
-    device = make_device(name, librenms_cf={SERVER: {"id": 42}})
+    device = seed_mapping(make_device(name), SERVER, own=42)
     live_librenms.server.register(
         "/api/v0/devices/42",
         {"status": "ok", "devices": [{"device_id": 42, "sysName": name, "hostname": name}]},

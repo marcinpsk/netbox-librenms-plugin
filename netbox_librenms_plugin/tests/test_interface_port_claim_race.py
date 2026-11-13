@@ -1,5 +1,6 @@
 """Two writers on one device that bind the same LibreNMS port at the same time leave one holder."""
 
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_mapped_modules
 
 import time
@@ -65,7 +66,7 @@ def _seed():
     """Return a device with a module interface ``Gi0/1`` and a plain ``GigabitEthernet0/1``, both unbound."""
     from dcim.models import Interface, Module, ModuleBay, ModuleType
 
-    device = make_device("port-claim", librenms_cf={SERVER_KEY: {"id": LIBRENMS_DEVICE_ID}})
+    device = seed_mapping(make_device("port-claim"), SERVER_KEY, own=LIBRENMS_DEVICE_ID)
     module_type = ModuleType.objects.create(manufacturer=device.device_type.manufacturer, model="port-claim-mt")
     bay = ModuleBay.objects.create(device=device, name="port-claim-bay")
     module = Module.objects.create(device=device, module_bay=bay, module_type=module_type)

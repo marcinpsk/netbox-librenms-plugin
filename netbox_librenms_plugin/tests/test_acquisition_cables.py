@@ -16,9 +16,10 @@ SENSORS_PATH = "/api/v0/resources/sensors"
 
 
 def _device(name, *, own=HOST_ID, oob=None):
-    from netbox_librenms_plugin.tests.conftest import make_device, map_device_to_librenms
+    from netbox_librenms_plugin.tests.conftest import make_device
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
-    return map_device_to_librenms(make_device(name), own, server_key="default", oob=oob)
+    return seed_mapping(make_device(name), own=own, oob=oob, oob_type="idrac")
 
 
 def _serve(server, device_id=HOST_ID, *, links=()):
@@ -98,7 +99,7 @@ def test_an_oob_failure_does_not_block_host_rows(live_librenms):
     _serve(live_librenms.server, OOB_ID)
     live_librenms.server.register(f"/api/v0/devices/{OOB_ID}/ports", {"status": "error"}, status=500)
 
-    snapshot = _acquire(_device("acq-cable-oob-fail", oob={"id": OOB_ID, "type": "idrac"}))
+    snapshot = _acquire(_device("acq-cable-oob-fail", oob=OOB_ID))
 
     assert set(blocked_scopes(snapshot, Resource.CABLES)) == {"oob"}
     assert is_ready(snapshot, Resource.CABLES)
@@ -110,7 +111,7 @@ def test_oob_rows_stay_ready_when_host_ports_fail(live_librenms):
     _serve(live_librenms.server, OOB_ID)
     live_librenms.server.register(f"/api/v0/devices/{HOST_ID}/ports", {"status": "error"}, status=500)
 
-    snapshot = _acquire(_device("acq-cable-host-fail", oob={"id": OOB_ID, "type": "idrac"}))
+    snapshot = _acquire(_device("acq-cable-host-fail", oob=OOB_ID))
 
     assert set(blocked_scopes(snapshot, Resource.CABLES)) == {"host"}
     assert is_ready(snapshot, Resource.CABLES)
@@ -120,7 +121,7 @@ def test_oob_rows_stay_ready_when_host_ports_fail(live_librenms):
 def test_an_oob_only_mapping_has_no_host_scope(live_librenms):
     _serve(live_librenms.server, OOB_ID)
 
-    snapshot = _acquire(_device("acq-cable-oob-only", own=None, oob={"id": OOB_ID, "type": "idrac"}))
+    snapshot = _acquire(_device("acq-cable-oob-only", own=None, oob=OOB_ID))
 
     assert snapshot.resources[Resource.CABLES].host is None
     assert snapshot.value(Resource.CABLES, "ports", MappingRole.OOB) == PORTS
@@ -235,7 +236,7 @@ def test_an_oob_only_owner_with_failed_oob_rows_has_no_ready_scope(live_librenms
     _serve(live_librenms.server, OOB_ID)
     live_librenms.server.register(f"/api/v0/devices/{OOB_ID}/ports", {"status": "error"}, status=500)
 
-    snapshot = _acquire(_device("acq-cable-oob-only-fails", own=None, oob={"id": OOB_ID, "type": "idrac"}))
+    snapshot = _acquire(_device("acq-cable-oob-only-fails", own=None, oob=OOB_ID))
 
     assert not is_ready(snapshot, Resource.CABLES)
 
@@ -246,7 +247,7 @@ def test_a_neighbour_shared_by_host_and_oob_is_requested_once(live_librenms):
     _serve(live_librenms.server, OOB_ID, links=LINKS)
     _serve(live_librenms.server, NEIGHBOUR_ID)
 
-    snapshot = _acquire(_device("acq-cable-shared-neighbour", oob={"id": OOB_ID, "type": "idrac"}))
+    snapshot = _acquire(_device("acq-cable-shared-neighbour", oob=OOB_ID))
 
     assert snapshot.value(Resource.CABLES, f"neighbour_ports:{NEIGHBOUR_ID}", MappingRole.OOB) == PORTS
     paths = [r["path"] for r in live_librenms.server.requests]
@@ -269,7 +270,7 @@ def test_host_and_oob_neighbours_share_one_budget(live_librenms, monkeypatch):
     live_librenms.server.register(f"/api/v0/devices/{NEIGHBOUR_ID}/ports", spend_the_budget)
     monkeypatch.setattr(resources, "monotonic", lambda: clock[0])
 
-    snapshot = _acquire(_device("acq-cable-shared-budget", oob={"id": OOB_ID, "type": "idrac"}))
+    snapshot = _acquire(_device("acq-cable-shared-budget", oob=OOB_ID))
 
     assert snapshot.record(Resource.CABLES, f"neighbour_ports:{NEIGHBOUR_ID}").obtained
     omitted = snapshot.record(Resource.CABLES, f"neighbour_ports:{NEIGHBOUR_ID + 1}", MappingRole.OOB)
@@ -301,7 +302,7 @@ def test_neighbour_budget_cannot_skip_the_oob_mappings_own_ports(live_librenms, 
     _serve(live_librenms.server, OOB_ID)
     monkeypatch.setattr(resources, "REMOTE_ALIAS_FETCH_BUDGET_SECONDS", 0.0)
 
-    snapshot = _acquire(_device("acq-cable-oob-neighbour", oob={"id": OOB_ID, "type": "idrac"}))
+    snapshot = _acquire(_device("acq-cable-oob-neighbour", oob=OOB_ID))
 
     assert snapshot.value(Resource.CABLES, "ports", MappingRole.OOB) == PORTS
     assert "oob" not in blocked_scopes(snapshot, Resource.CABLES)
@@ -371,7 +372,11 @@ def test_an_attempted_failed_neighbour_is_not_requested_again_for_another_resour
 def test_an_absent_host_and_invalid_oob_mapping_keep_distinct_response_outcomes(live_librenms):
     from netbox_librenms_plugin.acquisition.snapshot import SourceSnapshot
 
-    snapshot = _acquire(_device("acq-cable-absent-invalid", own=None, oob={"id": "bad-id", "type": "idrac"}))
+    from netbox_librenms_plugin.tests.conftest import make_device
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
+
+    device = make_device("acq-cable-absent-invalid")
+    snapshot = _acquire(seed_stored_mapping(device, {"default": {"oob": {"id": "bad-id", "type": "idrac"}}}, save=True))
 
     assert snapshot.resources[Resource.CABLES].host is None
     assert snapshot.to_payload()["schema"] == 2

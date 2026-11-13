@@ -12,6 +12,7 @@ from django.urls import reverse
 from netbox_librenms_plugin.models import LibreNMSSettings
 from netbox_librenms_plugin.tests.conftest import make_superuser
 from netbox_librenms_plugin.tests.import_server_helpers import librenms_device, selector_html
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 from netbox_librenms_plugin.tests.view_test_helpers import queued_request
 
@@ -147,7 +148,7 @@ def test_configure_servers_removes_legacy_default_server(settings):
     plugin_settings["api_token"] = "legacy-test-token"
     settings.PLUGINS_CONFIG = plugin_config
     configure_servers(settings)
-    device = make_device("legacy-default-server", librenms_cf={"default": 7})
+    device = seed_mapping(make_device("legacy-default-server"), "default", own=7)
 
     configured_plugin_settings = settings.PLUGINS_CONFIG["netbox_librenms_plugin"]
     default_mapping = next(mapping for mapping in build_server_mappings(device) if mapping.server_key == "default")

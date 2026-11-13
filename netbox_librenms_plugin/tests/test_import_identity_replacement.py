@@ -17,6 +17,7 @@ from netbox_librenms_plugin.tests.mapping_fixtures import (
     mapping_summary,
     seed_mapping,
     seed_mapping_row,
+    seed_stored_mapping,
     stored_mapping_for_test,
 )
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
@@ -183,13 +184,14 @@ def test_a_confirmed_replacement_changes_only_the_active_server_identity(client,
     from django.db import connection
     from django.test.utils import CaptureQueriesContext
 
-    device = make_device(
-        "replace-confirmed-device",
-        librenms_cf={
+    device = seed_stored_mapping(
+        make_device("replace-confirmed-device"),
+        {
             "primary": {"id": 51701, "oob": {"id": 51702, "type": "bmc", "version": "1.0"}},
             "secondary": {"id": 51703, "oob": {"id": 51704, "type": "ipmi"}},
             "_preferred_server": "primary",
         },
+        save=True,
     )
     client.force_login(make_superuser("identity-replacement-confirm"))
     server = _serve_secondary(secondary_server, 51801, device.name)

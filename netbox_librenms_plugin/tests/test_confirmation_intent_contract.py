@@ -18,6 +18,7 @@ from ipam.models import VLAN, VLANGroup
 
 from netbox_librenms_plugin import confirmation_intent as intent
 from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, make_device
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.view_test_helpers import domain_state, make_user_with_perms
 from netbox_librenms_plugin.tests.vlan_intent_helpers import message_texts, reassess, seed_vlans, sync, tab_tokens
 
@@ -49,7 +50,8 @@ class _VLANScenario:
     def __init__(self, tag, client):
         self.tag = tag
         self.client = client
-        self.device = make_device(f"contract-{tag}", librenms_cf={"default": {"id": 42}, "other": {"id": 42}})
+        self.device = seed_mapping(make_device(f"contract-{tag}"), "default", own=42)
+        seed_mapping(self.device, "other", own=42)
         self.group = VLANGroup.objects.create(name=f"contract-{tag}", slug=f"contract-{tag}")
         self.group_pk = self.group.pk
         self.user = make_user_with_perms(f"contract-{tag}", VLAN_PERMISSIONS)
@@ -336,7 +338,7 @@ class TestContract:
     def test_another_subject_refuses(self, scenario_for, key):
         scenario = scenario_for(key)
         token = scenario.mint()
-        other = make_device(f"other-subject-{scenario.tag}", librenms_cf={"default": {"id": 43}})
+        other = seed_mapping(make_device(f"other-subject-{scenario.tag}"), "default", own=43)
         scenario.seed(device=other)
 
         _assert_refused(scenario, [token], device=other)
@@ -424,7 +426,7 @@ def test_a_token_carries_only_what_the_viewer_may_see(client, settings):
     from netbox_librenms_plugin.tests.view_test_helpers import grant
 
     configure_librenms_servers(settings, SERVERS)
-    device = make_device("contract-disclosure", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("contract-disclosure"), "default", own=42)
     hidden_group = VLANGroup.objects.create(name="contract-hidden", slug="contract-hidden")
     hidden = VLAN.objects.create(vid=100, group=hidden_group, name="secret-name", status="active")
     user = make_user_with_perms(
@@ -465,7 +467,7 @@ class _SingleTokenRoute:
 def test_a_repeated_token_cannot_clear_the_way_for_another_token_of_its_vid(client, settings):
     """[T1, T1, T2] for one VID refuses both choices; an unrelated VID still applies."""
     configure_librenms_servers(settings, SERVERS)
-    device = make_device("contract-repeat", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("contract-repeat"), "default", own=42)
     first = VLANGroup.objects.create(name="contract-repeat-a", slug="contract-repeat-a")
     second = VLANGroup.objects.create(name="contract-repeat-b", slug="contract-repeat-b")
     seed_vlans(device, [{"vlan_vlan": 100, "vlan_name": "users"}, {"vlan_vlan": 200, "vlan_name": "printers"}])
@@ -486,7 +488,7 @@ class _DependentRename:
     def __init__(self, client, settings, tag, permissions=VLAN_PERMISSIONS):
         configure_librenms_servers(settings, SERVERS)
         self.client = client
-        self.device = make_device(f"dependent-{tag}", librenms_cf={"default": {"id": 42}})
+        self.device = seed_mapping(make_device(f"dependent-{tag}"), "default", own=42)
         self.group = VLANGroup.objects.create(name=f"dependent-{tag}", slug=f"dependent-{tag}")
         self.vlan = VLAN.objects.create(vid=100, group=self.group, name="users", status="active")
         self.seed("users")
@@ -574,7 +576,7 @@ class _RenameChain:
 
     def __init__(self, client, settings, tag, proposed):
         configure_librenms_servers(settings, SERVERS)
-        self.device = make_device(f"chain-{tag}", librenms_cf={"default": {"id": 42}})
+        self.device = seed_mapping(make_device(f"chain-{tag}"), "default", own=42)
         self.group = VLANGroup.objects.create(name=f"chain-{tag}", slug=f"chain-{tag}")
         VLAN.objects.create(vid=100, group=self.group, name="alpha", status="active")
         VLAN.objects.create(vid=200, group=self.group, name="beta", status="active")

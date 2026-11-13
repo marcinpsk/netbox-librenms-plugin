@@ -907,12 +907,13 @@ def test_concurrent_cross_model_port_claim_refuses_without_partial_writes(settin
     from netbox_librenms_plugin.interface_rules import InterfaceRuleMatcher
     from netbox_librenms_plugin.interface_sync import resolve_or_create_interface_from_port
     from netbox_librenms_plugin.tests.conftest import make_cluster, make_device, make_interface, make_superuser, make_vm
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
     from netbox_librenms_plugin.tests.test_interface_port_binding_cross_model import _port, _sync
     from netbox_librenms_plugin.server_mappings import LibreNMSPortBindingBusy
     from netbox_librenms_plugin.views.sync.modules import _bind_interface_librenms_id
 
     server_key = configure_default_librenms_server(settings)
-    device = make_device("claim-device", librenms_cf={server_key: {"id": 71}})
+    device = seed_mapping(make_device("claim-device"), server_key, own=71)
     vm = make_vm("claim-vm", make_cluster("claim-cluster"))
     winner, loser = (device, vm) if winner_kind == "device" else (vm, device)
     winner_model = Interface if winner_kind == "device" else VMInterface

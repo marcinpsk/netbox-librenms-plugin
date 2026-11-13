@@ -1553,8 +1553,6 @@ def test_create_missing_interfaces_does_not_adopt_a_hidden_existing_interface(cl
 )
 def test_direct_ip_sync_post_does_not_mutate_a_migrated_donor(client, settings, migrated, refusal):
     """The writer must enforce the migrated read-only state behind the hidden form."""
-    from netbox_librenms_plugin.server_mappings import mark_migrated
-    from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
 
     _configure_test_server(settings)
     _chassis, (page, member) = make_virtual_chassis_members(f"ip-migrated-{migrated}")
@@ -1564,8 +1562,7 @@ def test_direct_ip_sync_post_does_not_mutate_a_migrated_donor(client, settings, 
     interface = make_interface(donor, "Ethernet1", iface_type="1000base-t")
     seed_mapping(interface, "default", own=7019)
     _seed_ip_rows(page, [_ip_row("198.18.19.10", 7019, "Ethernet1")])
-    apply_mapping_change(donor, mark_migrated(donor, winner.pk, "default"))
-    donor.save(update_fields=["custom_field_data"])
+    seed_mapping(donor, "default", migrated_to=winner.pk)
     client.force_login(make_superuser(f"ip-migrated-{migrated}-user"))
     sync_url = reverse(
         "plugins:netbox_librenms_plugin:sync_device_ip_addresses",

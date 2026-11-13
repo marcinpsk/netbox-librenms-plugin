@@ -3175,14 +3175,10 @@ def test_integrated_module_badge_tracks_the_active_theme():
 def test_refresh_drops_out_of_spec_oob_inventory(live_librenms, oob_index, oob_parent):
     """Negative OOB index fields prevent the refresh from caching an inventory snapshot."""
 
-    from netbox_librenms_plugin.server_mappings import attach_oob
-
-    from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
     from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
     device = seed_mapping(make_device("signed-inventory"), "default", own=777)
-    apply_mapping_change(device, attach_oob(device, "default", 999, oob_type="idrac9"))
-    device.save(update_fields=["custom_field_data"])
+    seed_mapping(device, "default", oob=999, oob_type="idrac9")
     # RFC 2737 defines entPhysicalIndex as 1..2147483647.
     # The old offset would shift the negative OOB index onto main index 1500.
     for device_id, index, parent, name in ((777, 1500, 0, "Main card"), (999, oob_index, oob_parent, "OOB card")):

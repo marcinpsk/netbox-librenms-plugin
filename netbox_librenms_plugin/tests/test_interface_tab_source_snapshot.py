@@ -26,10 +26,19 @@ def _serve(server, ports, mappings=(), *, os_name="linux", device_id=HOST_ID):
     )
 
 
-def _device(name, **mapping):
-    from netbox_librenms_plugin.tests.conftest import make_device, map_device_to_librenms
+def _device(name, *, oob=None):
+    from netbox_librenms_plugin.tests.conftest import make_device
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
-    return map_device_to_librenms(make_device(name), HOST_ID, server_key=SERVER_KEY, **mapping)
+    return seed_mapping(make_device(name), SERVER_KEY, own=HOST_ID, oob=oob, oob_type="idrac")
+
+
+def _corrupt_oob_device(name):
+    from netbox_librenms_plugin.tests.conftest import make_device
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
+
+    stored = {SERVER_KEY: {"id": HOST_ID, "oob": {"id": "not-an-id", "type": "idrac"}}}
+    return seed_stored_mapping(make_device(name), stored, save=True)
 
 
 def _refresh(client, device):
@@ -163,12 +172,8 @@ def test_a_refresh_without_the_host_relationship_data_fails_and_drops_the_older_
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize(
-    "oob",
-    [{"id": OOB_ID, "type": "idrac"}, {"id": "not-an-id", "type": "idrac"}],
-    ids=["oob-ports-fail", "oob-id-corrupt"],
-)
-def test_an_oob_failure_keeps_the_host_rows_and_shows_the_oob_notice(client, live_librenms, oob):
+@pytest.mark.parametrize("oob_corrupt", [False, True], ids=["oob-ports-fail", "oob-id-corrupt"])
+def test_an_oob_failure_keeps_the_host_rows_and_shows_the_oob_notice(client, live_librenms, oob_corrupt):
     from django.contrib import messages
 
     from netbox_librenms_plugin import source_cache
@@ -176,7 +181,8 @@ def test_an_oob_failure_keeps_the_host_rows_and_shows_the_oob_notice(client, liv
     from netbox_librenms_plugin.acquisition.resources import blocked_scopes
     from netbox_librenms_plugin.tests.conftest import make_superuser
 
-    device = _device("iface-snap-oob-blocked", oob=oob)
+    name = "iface-snap-oob-blocked"
+    device = _corrupt_oob_device(name) if oob_corrupt else _device(name, oob=OOB_ID)
     client.force_login(make_superuser("iface-snap-oob-blocked-user"))
     _serve(live_librenms.server, [_port(1, "eth1")])
     live_librenms.server.register(f"/api/v0/devices/{OOB_ID}/ports", {"status": "error"}, status=500)
@@ -188,7 +194,7 @@ def test_an_oob_failure_keeps_the_host_rows_and_shows_the_oob_notice(client, liv
     # Each notice names the source that blocks the OOB rows.
     snapshot = source_cache.read(device, Resource.INTERFACES, SERVER_KEY)
     (blocker,) = blocked_scopes(snapshot, Resource.INTERFACES)["oob"]
-    if oob["id"] == "not-an-id":
+    if oob_corrupt:
         assert blocker.path == "oob"
         assert f"/api/v0/devices/{OOB_ID}/ports" not in [entry["path"] for entry in live_librenms.server.requests]
     assert _messages(response, messages.WARNING) == []
@@ -225,11 +231,10 @@ def test_an_oob_only_device_fails_the_refresh_because_interfaces_need_a_host_map
 
     from netbox_librenms_plugin import source_cache
     from netbox_librenms_plugin.acquisition.registry import Resource
-    from netbox_librenms_plugin.tests.conftest import make_device, make_superuser, map_device_to_librenms
+    from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
-    device = map_device_to_librenms(
-        make_device("iface-snap-oob-only"), server_key=SERVER_KEY, oob={"id": OOB_ID, "type": "idrac"}
-    )
+    device = seed_mapping(make_device("iface-snap-oob-only"), SERVER_KEY, oob=OOB_ID, oob_type="idrac")
     client.force_login(make_superuser("iface-snap-oob-only-user"))
     live_librenms.server.register(f"/api/v0/devices/{OOB_ID}/ports", {"status": "ok", "ports": [_port(91, "idrac0")]})
 
@@ -248,7 +253,7 @@ def test_oob_rows_join_the_host_rows_and_a_shared_mac_is_flagged(client, live_li
     from netbox_librenms_plugin.tests.conftest import make_superuser
     from netbox_librenms_plugin.tests.source_snapshot_helpers import interface_rows
 
-    device = _device("iface-snap-oob", oob={"id": OOB_ID, "type": "idrac"})
+    device = _device("iface-snap-oob", oob=OOB_ID)
     client.force_login(make_superuser("iface-snap-oob-user"))
     _serve(live_librenms.server, [_port(1, "eth0", ifPhysAddress="AA-BB-CC-DD-EE-01"), _port(2, "eth1")])
     live_librenms.server.register(

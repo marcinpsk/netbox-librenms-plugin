@@ -24,6 +24,7 @@ from netbox_librenms_plugin.tests.mapping_fixtures import (
     mapping_summary,
     seed_mapping,
     seed_mapping_row,
+    seed_stored_mapping,
     stored_mapping_for_test,
 )
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
@@ -135,14 +136,15 @@ def _link_payload(target, *, action="link"):
 
 @pytest.mark.django_db
 def test_device_link_adds_secondary_mapping_and_prefers_the_previous_sole_mapping(client, servers):
-    device = make_device(
-        "edge-link-device",
-        librenms_cf={
+    device = seed_stored_mapping(
+        make_device("edge-link-device"),
+        {
             "primary": {
                 "id": 48101,
                 "oob": {"id": 48102, "type": "bmc", "version": "1.0"},
             }
         },
+        save=True,
     )
     _register_import_device(servers.secondary, librenms_device(48201, device.name))
     client.force_login(make_superuser("second-server-device-linker"))
@@ -168,10 +170,7 @@ def test_device_link_adds_secondary_mapping_and_prefers_the_previous_sole_mappin
 @pytest.mark.django_db
 def test_device_link_replacing_unusable_entry_prefers_the_previous_sole_mapping(client, servers):
     """Replacing an unusable entry must preserve the previous usable server choice."""
-    device = make_device(
-        "edge-link-unusable-entry",
-        librenms_cf={"primary": 42, "secondary": None},
-    )
+    device = seed_stored_mapping(make_device("edge-link-unusable-entry"), {"primary": 42, "secondary": None}, save=True)
     _register_import_device(servers.secondary, librenms_device(48202, device.name))
     client.force_login(make_superuser("unusable-entry-device-linker"))
 
@@ -246,7 +245,7 @@ def test_primary_ip_match_changes_only_after_explicit_update_and_link(client, se
         from virtualization.models import VMInterface
 
         target = make_vm("existing-primary-ip-vm")
-        seed_mapping(target, "primary", own=48901, save=False)
+        seed_mapping(target, "primary", own=48901)
         interface = VMInterface.objects.create(virtual_machine=target, name="eth0")
         device_id = 49001
         address = "198.18.1.20/32"
@@ -254,7 +253,7 @@ def test_primary_ip_match_changes_only_after_explicit_update_and_link(client, se
 
     primary_ip = make_ip(address, assigned_object=interface)
     target.primary_ip4 = primary_ip
-    target.save(update_fields=["custom_field_data", "primary_ip4"])
+    target.save(update_fields=["primary_ip4"])
     libre_device = librenms_device(device_id, renamed)
     libre_device["ip"] = address.removesuffix("/32")
     _register_import_device(servers.secondary, libre_device)

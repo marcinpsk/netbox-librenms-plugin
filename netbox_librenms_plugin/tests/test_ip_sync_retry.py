@@ -21,6 +21,7 @@ from netbox_librenms_plugin.tests.conftest import (
 )
 from netbox_librenms_plugin.tests.interface_sync_post_helpers import SERVER_KEY
 from netbox_librenms_plugin.tests.lock_conflict_helpers import lock_row, lock_timeout, second_connection
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.test_interface_late_write import post_ip_sync, seed_ip_rows
 from netbox_librenms_plugin.tests.view_test_helpers import messages_on
 from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE
@@ -54,7 +55,7 @@ def attempts(monkeypatch):
 
 def _two_rows(name):
     """A device with two interfaces and one cached IP row for each; the second row's interface is returned too."""
-    device = make_device(name, librenms_cf={SERVER_KEY: {"id": 44}})
+    device = seed_mapping(make_device(name), SERVER_KEY, own=44)
     first = make_interface(device, "Ethernet1", iface_type="1000base-t")
     second = make_interface(device, "Ethernet2", iface_type="1000base-t")
     seed_ip_rows(device, ROWS)

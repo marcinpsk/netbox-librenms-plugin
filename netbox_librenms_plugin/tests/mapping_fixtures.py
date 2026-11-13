@@ -16,6 +16,7 @@ from netbox_librenms_plugin.server_mappings import (
     PreferenceStatus,
     assign_own,
     attach_oob,
+    mark_migrated,
     read_mapping,
     release_server,
     set_preference,
@@ -54,20 +55,27 @@ def apply_mapping_change(obj, change):
     return obj
 
 
-def seed_mapping(obj, server="default", *, own=None, oob=None, oob_type="oob", preferred=False, save=True):
+def seed_mapping(
+    obj, server="default", *, own=None, oob=None, oob_type="oob", migrated_to=None, preferred=False, save=True
+):
     """
     Seed the mapping of *obj* on *server* through the real builders; return *obj*.
 
-    *own* is the own LibreNMS ID, *oob* the OOB controller ID with *oob_type*, and *preferred* stores
-    *server* as the preferred server. The other servers of *obj* stay. A builder that skips the write
-    fails the setup. With *save*, save *obj*.
+    *own* is the own LibreNMS ID, *oob* the OOB controller ID with *oob_type*, *migrated_to* the winner
+    pk of a migration marker that replaces the links on *server*, and *preferred* stores *server* as the
+    preferred server. The other servers of *obj* stay. A builder that skips the write fails the setup.
+    With *save*, save *obj*.
     """
-    if own is None and oob is None and not preferred:
-        raise ValueError("seed_mapping() needs own, oob or preferred.")
+    if own is None and oob is None and migrated_to is None and not preferred:
+        raise ValueError("seed_mapping() needs own, oob, migrated_to or preferred.")
+    if migrated_to is not None and (own is not None or oob is not None):
+        raise ValueError("A migration marker replaces the own and OOB IDs on its server.")
     if own is not None:
         _seed(obj, assign_own(obj, server, own))
     if oob is not None:
         _seed(obj, attach_oob(obj, server, oob, oob_type=oob_type))
+    if migrated_to is not None:
+        _seed(obj, mark_migrated(obj, migrated_to, server))
     if preferred:
         # A preference with no server mapping is a state of its own.
         if _stored_value(obj) is None:

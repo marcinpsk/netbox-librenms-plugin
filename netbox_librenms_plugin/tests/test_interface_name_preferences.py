@@ -13,9 +13,8 @@ from django.urls import reverse
 from netbox_librenms_plugin.models import LibreNMSSettings
 from netbox_librenms_plugin.sync_cache import TAB_SPECS, SyncTab
 from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
-from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.utils import get_interface_name_field
-from netbox_librenms_plugin.server_mappings import mark_migrated
 
 
 GLOBAL_PREFERENCE = "plugins.netbox_librenms_plugin.interface_name_field"
@@ -50,8 +49,7 @@ def test_interface_name_selector_visibility_follows_the_active_sync_tab(client, 
     device.platform = platform
     device.save(update_fields=["platform"])
     winner = make_device("selector-winner")
-    apply_mapping_change(device, mark_migrated(device, winner.pk, "default"))
-    device.save(update_fields=["custom_field_data"])
+    seed_mapping(device, "default", migrated_to=winner.pk)
     user = make_superuser("selector-visibility-user")
     client.force_login(user)
 
@@ -78,8 +76,7 @@ def _sync_page(settings, name):
     settings.PLUGINS_CONFIG = plugin_config
     device = make_device(name)
     winner = make_device(f"{name}-winner")
-    apply_mapping_change(device, mark_migrated(device, winner.pk, "default"))
-    device.save(update_fields=["custom_field_data"])
+    seed_mapping(device, "default", migrated_to=winner.pk)
     return device, reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
 
 

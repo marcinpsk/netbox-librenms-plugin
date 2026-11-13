@@ -11,7 +11,12 @@ from django.contrib.auth import get_user_model
 from django.test import RequestFactory, override_settings
 
 from netbox_librenms_plugin.tests.conftest import make_device
-from netbox_librenms_plugin.tests.mapping_fixtures import custom_fields_without_mapping, mapping_summary, seed_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import (
+    custom_fields_without_mapping,
+    mapping_summary,
+    seed_mapping,
+    seed_stored_mapping,
+)
 from netbox_librenms_plugin.tests.recordings import load_recording
 from netbox_librenms_plugin.views.data_shapes import CaptureDataShapeView
 
@@ -643,8 +648,10 @@ def test_capture_view_rejects_an_invalid_linked_controller(client, recording_ser
     from netbox_librenms_plugin.tests.conftest import make_superuser
 
     server, _api = recording_server(load_recording("cisco-stackwise-3member"))
-    device = make_device(
-        "invalid-oob", librenms_cf={"test": {"id": _STACK_RECORDING_ID, "oob": {"id": oob_id, "type": "drac"}}}
+    device = seed_stored_mapping(
+        make_device("invalid-oob"),
+        {"test": {"id": _STACK_RECORDING_ID, "oob": {"id": oob_id, "type": "drac"}}},
+        save=True,
     )
     client.force_login(make_superuser("invalid-oob-capture-user"))
     with _override_servers(server):

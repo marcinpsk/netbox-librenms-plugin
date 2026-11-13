@@ -7,8 +7,8 @@ from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.acquisition.resources import blocked_scopes, is_ready
 from netbox_librenms_plugin.acquisition.snapshot import IncompleteSource, MappingState, ObjectRef, Outcome
 from netbox_librenms_plugin.server_mappings import MappingRole
-from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis_members, map_device_to_librenms
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis_members
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import module_serial_context
 
 HOST_ID = 5301
@@ -18,8 +18,13 @@ PORTS = [{"port_id": 7, "ifIndex": 3, "ifName": "eth3"}]
 TRANSCEIVERS = [{"entity_physical_index": 9001, "port_id": 7, "model": "optic", "serial": "OPTIC"}]
 
 
-def device(name, **mapping):
-    return map_device_to_librenms(make_device(name), HOST_ID, server_key="default", **mapping)
+def device(name, *, oob=None):
+    return seed_mapping(make_device(name), own=HOST_ID, oob=oob, oob_type="idrac")
+
+
+def corrupt_oob_device(name, oob_id="corrupt"):
+    stored = {"default": {"id": HOST_ID, "oob": {"id": oob_id, "type": "idrac"}}}
+    return seed_stored_mapping(make_device(name), stored, save=True)
 
 
 def serve(server, *, inventory=INVENTORY, ports=PORTS, transceivers=TRANSCEIVERS):
@@ -94,7 +99,8 @@ def test_failed_host_parts_block_modules(live_librenms, part, path, field, failu
 @pytest.mark.django_db
 @pytest.mark.parametrize("oob_id", [OOB_ID, "corrupt"])
 def test_oob_inventory_is_a_separate_mapping_and_its_failure_leaves_host_ready(live_librenms, oob_id):
-    subject = device("modules-oob-failed", oob={"id": oob_id, "type": "idrac"})
+    name = "modules-oob-failed"
+    subject = corrupt_oob_device(name) if oob_id == "corrupt" else device(name, oob=OOB_ID)
     serve(live_librenms.server)
     live_librenms.server.register(f"/api/v0/inventory/{OOB_ID}/all", {"status": "error"}, status=500)
     snapshot = acquire_modules(subject)
@@ -108,7 +114,7 @@ def test_oob_inventory_is_a_separate_mapping_and_its_failure_leaves_host_ready(l
 
 @pytest.mark.django_db
 def test_corrupt_oob_mapping_blocks_modules_without_a_fake_endpoint(live_librenms):
-    subject = device("modules-corrupt-oob", oob={"id": "corrupt", "type": "idrac"})
+    subject = corrupt_oob_device("modules-corrupt-oob")
     serve(live_librenms.server)
 
     snapshot = acquire_modules(subject)
@@ -124,7 +130,7 @@ def test_corrupt_oob_mapping_blocks_modules_without_a_fake_endpoint(live_librenm
 
 @pytest.mark.django_db
 def test_host_failure_blocks_obtained_oob_inventory(live_librenms):
-    subject = device("modules-host-failed", oob={"id": OOB_ID, "type": "idrac"})
+    subject = device("modules-host-failed", oob=OOB_ID)
     serve(live_librenms.server)
     live_librenms.server.register(f"/api/v0/devices/{HOST_ID}/ports", {"status": "error"}, status=500)
     live_librenms.server.register(f"/api/v0/inventory/{OOB_ID}/all", {"status": "ok", "inventory": INVENTORY})
@@ -136,9 +142,7 @@ def test_host_failure_blocks_obtained_oob_inventory(live_librenms):
 
 @pytest.mark.django_db
 def test_modules_need_a_host_mapping(live_librenms):
-    subject = map_device_to_librenms(
-        make_device("modules-oob-only"), server_key="default", oob={"id": OOB_ID, "type": "idrac"}
-    )
+    subject = seed_mapping(make_device("modules-oob-only"), oob=OOB_ID, oob_type="idrac")
     with pytest.raises(SubjectNotMapped):
         acquire_modules(subject)
     assert live_librenms.server.requests == []
@@ -199,7 +203,7 @@ def test_string_inventory_indices_assess_host_and_oob_without_changing_source(li
 
     host = source_rows()
     oob = source_rows()
-    subject = device("modules-string-indices", oob={"id": OOB_ID, "type": "idrac"})
+    subject = device("modules-string-indices", oob=OOB_ID)
     serve(
         live_librenms.server,
         inventory=host,

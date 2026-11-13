@@ -1,5 +1,6 @@
 """Real-HTTP contract tests for the development LibreNMS stub."""
 
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import acquire_ports_record
 
 import copy
@@ -264,7 +265,7 @@ def test_vlan_acquisition_keeps_only_the_devices_rows_of_the_instance_wide_stub_
             settings, {"stub": {"librenms_url": server.url, "api_token": TOKEN, "verify_ssl": False}}
         )
         device_id = _recording_device_id("arcos-lag-transceivers")
-        device = make_device("stub-vlan-device", librenms_cf={"stub": {"id": device_id}})
+        device = seed_mapping(make_device("stub-vlan-device"), "stub", own=device_id)
 
         snapshot = acquire(device, server_key="stub", resources=[Resource.VLANS])
 

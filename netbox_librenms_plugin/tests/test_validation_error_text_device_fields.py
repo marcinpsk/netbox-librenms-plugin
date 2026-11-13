@@ -15,6 +15,7 @@ from django.urls import reverse
 from extras.validators import CustomValidator
 
 from netbox_librenms_plugin.tests.conftest import make_device, make_superuser, make_virtual_chassis
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms, message_texts
 
@@ -68,7 +69,7 @@ def _viewer(tag, superuser, *devices):
 
 def _reporting_device(name, server, device_id, os=""):
     """A linked device whose LibreNMS device reports *os*: Create & Sync reads its facts there."""
-    device = make_device(name, librenms_cf={SERVER_KEY: device_id})
+    device = seed_mapping(make_device(name), SERVER_KEY, own=device_id)
     server.device_info_response(device_id=device_id, hostname=name, os=os)
     return device
 
@@ -87,7 +88,7 @@ def _assert_shown(response, hidden, superuser, restricted_text):
 class TestADeviceFieldSyncShowsNetBoxsMessageOnlyToASuperuser:
     def test_the_name_sync(self, client, settings, librenms_server, superuser):
         tag = f"vetext-name-{int(superuser)}"
-        device, hidden = make_device(tag, librenms_cf={SERVER_KEY: 7101}), make_device(f"{tag}-hidden")
+        device, hidden = seed_mapping(make_device(tag), SERVER_KEY, own=7101), make_device(f"{tag}-hidden")
         librenms_server.device_info_response(device_id=7101, hostname=f"{tag}-renamed")
         settings.CUSTOM_VALIDATORS = {"dcim.device": [_Refuses(f"Conflicts with {hidden.name}.", "serial")]}
         client.force_login(_viewer(tag, superuser, device))
@@ -98,7 +99,7 @@ class TestADeviceFieldSyncShowsNetBoxsMessageOnlyToASuperuser:
 
     def test_the_serial_sync(self, client, settings, librenms_server, superuser):
         tag = f"vetext-serial-{int(superuser)}"
-        device, hidden = make_device(tag, librenms_cf={SERVER_KEY: 7102}), make_device(f"{tag}-hidden")
+        device, hidden = seed_mapping(make_device(tag), SERVER_KEY, own=7102), make_device(f"{tag}-hidden")
         librenms_server.device_info_response(device_id=7102, hostname=device.name, serial="NEW-SERIAL")
         settings.CUSTOM_VALIDATORS = {"dcim.device": [_Refuses(f"Conflicts with {hidden.name}.", hidden.name)]}
         client.force_login(_viewer(tag, superuser, device))
@@ -111,7 +112,7 @@ class TestADeviceFieldSyncShowsNetBoxsMessageOnlyToASuperuser:
         from dcim.models import DeviceType
 
         tag = f"vetext-type-{int(superuser)}"
-        device, hidden = make_device(tag, librenms_cf={SERVER_KEY: 7103}), make_device(f"{tag}-hidden")
+        device, hidden = seed_mapping(make_device(tag), SERVER_KEY, own=7103), make_device(f"{tag}-hidden")
         replacement = DeviceType.objects.create(
             manufacturer=device.device_type.manufacturer, model=f"Model {tag}", slug=f"model-{tag}"
         )
@@ -127,7 +128,7 @@ class TestADeviceFieldSyncShowsNetBoxsMessageOnlyToASuperuser:
         from dcim.models import Platform
 
         tag = f"vetext-platform-{int(superuser)}"
-        device, hidden = make_device(tag, librenms_cf={SERVER_KEY: 7104}), make_device(f"{tag}-hidden")
+        device, hidden = seed_mapping(make_device(tag), SERVER_KEY, own=7104), make_device(f"{tag}-hidden")
         platform = Platform.objects.create(name=f"Platform {tag}", slug=f"platform-{tag}")
         librenms_server.device_info_response(device_id=7104, hostname=device.name, os=platform.name)
         settings.CUSTOM_VALIDATORS = {"dcim.device": [_Refuses(f"Conflicts with {hidden.name}.")]}
@@ -207,7 +208,8 @@ class TestADeviceFieldSyncShowsNetBoxsMessageOnlyToASuperuser:
 
     def test_the_legacy_id_conversion(self, client, settings, librenms_server, superuser):
         tag = f"vetext-legacy-{int(superuser)}"
-        device, hidden = make_device(tag, serial="LEGACY", librenms_cf="7105"), make_device(f"{tag}-hidden")
+        device = seed_stored_mapping(make_device(tag, serial="LEGACY"), "7105", save=True)
+        hidden = make_device(f"{tag}-hidden")
         librenms_server.device_info_response(device_id=7105, hostname=device.name, serial="LEGACY")
         settings.CUSTOM_VALIDATORS = {"dcim.device": [_Refuses(f"Conflicts with {hidden.name}.", "custom_field_data")]}
         client.force_login(_viewer(tag, superuser, device))
@@ -229,8 +231,9 @@ class TestADeviceFieldSyncShowsNetBoxsMessageOnlyToASuperuser:
         from django.core.exceptions import ValidationError
 
         tag = f"vetext-{view_name}-{int(superuser)}"
-        mapping = {SERVER_KEY: 7106, SECONDARY_KEY: 7107, "retired": 7108}
-        device, hidden = make_device(tag, librenms_cf=mapping), make_device(f"{tag}-hidden")
+        device, hidden = make_device(tag), make_device(f"{tag}-hidden")
+        for server, own in ((SERVER_KEY, 7106), (SECONDARY_KEY, 7107), ("retired", 7108)):
+            seed_mapping(device, server, own=own)
         client.force_login(_viewer(tag, superuser, device))
 
         def refuse(sender, instance, **kwargs):
@@ -273,7 +276,7 @@ class TestADeviceFieldSyncHidesADatabaseError:
         view_name, data, statement = _DATABASE_ERROR_CASES[case]
         tag = f"dbtext-{case.replace('_', '-')}"
         if case == "legacy_conversion":
-            device = make_device(tag, serial="LEGACY-DB", librenms_cf="7109")
+            device = seed_stored_mapping(make_device(tag, serial="LEGACY-DB"), "7109", save=True)
             librenms_server.device_info_response(device_id=7109, hostname=device.name, serial="LEGACY-DB")
         else:
             device = _reporting_device(tag, librenms_server, 7114, f"os-{tag}")

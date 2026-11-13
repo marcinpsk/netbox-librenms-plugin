@@ -16,6 +16,7 @@ from netbox_librenms_plugin import source_cache
 from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_superuser
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.test_ip_address_sync_safety import _serve_librenms_ip_rows
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
 
@@ -67,7 +68,7 @@ def _snapshot_available(device):
 
 
 def _device(name, *interfaces):
-    device = make_device(name, librenms_cf={SERVER_KEY: {"id": LIBRENMS_ID}})
+    device = seed_mapping(make_device(name), SERVER_KEY, own=LIBRENMS_ID)
     return device, [make_interface(device, interface, iface_type="1000base-t") for interface in interfaces]
 
 

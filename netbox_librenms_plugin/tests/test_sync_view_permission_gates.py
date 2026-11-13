@@ -2,6 +2,8 @@
 
 import pytest
 
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+
 # Views that apply no assessed change carry no confirmation intent (section 4 of the #177 design).
 EXEMPT_VIEWS = {
     "SetPreferredServerView": "the operator names the server",
@@ -325,7 +327,7 @@ class TestSyncPostPermissionGates:
         }
         configure_librenms_servers(settings, servers)
         server_key = next(iter(servers))
-        device = make_device("platform-permission-device", librenms_cf={server_key: 7501})
+        device = seed_mapping(make_device("platform-permission-device"), server_key, own=7501)
         librenms_server.device_info_response(device_id=7501, hostname=device.name, os="permission-os")
         perms = [("change", Device)] + ([("add", Platform)] if allow_create else [])
         user = make_user_with_perms("platform-creator", perms)

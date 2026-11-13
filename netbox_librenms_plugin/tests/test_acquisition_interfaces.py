@@ -17,10 +17,19 @@ HOST_PORTS = [
 OOB_PORTS = [{"port_id": 91, "ifName": "idrac0"}]
 
 
-def _device(name, **mapping):
-    from netbox_librenms_plugin.tests.conftest import make_device, map_device_to_librenms
+def _device(name, *, oob=None):
+    from netbox_librenms_plugin.tests.conftest import make_device
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
-    return map_device_to_librenms(make_device(name), HOST_ID, server_key=SERVER_KEY, **mapping)
+    return seed_mapping(make_device(name), SERVER_KEY, own=HOST_ID, oob=oob, oob_type="idrac")
+
+
+def _corrupt_oob_device(name):
+    from netbox_librenms_plugin.tests.conftest import make_device
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
+
+    stored = {SERVER_KEY: {"id": HOST_ID, "oob": {"id": "not-an-id", "type": "idrac"}}}
+    return seed_stored_mapping(make_device(name), stored, save=True)
 
 
 def _serve(server, *, ports=HOST_PORTS, mappings=(), os_name="linux"):
@@ -241,7 +250,7 @@ def test_a_linked_oob_controller_is_acquired_as_its_own_mapping(live_librenms):
     from netbox_librenms_plugin.acquisition.snapshot import MappingState
     from netbox_librenms_plugin.server_mappings import MappingRole
 
-    device = _device("acq-iface-oob", oob={"id": OOB_ID, "type": "idrac"})
+    device = _device("acq-iface-oob", oob=OOB_ID)
     _serve(live_librenms.server)
     live_librenms.server.register(OOB_PORTS_PATH, {"status": "ok", "ports": OOB_PORTS})
 
@@ -257,7 +266,7 @@ def test_a_linked_oob_controller_is_acquired_as_its_own_mapping(live_librenms):
 
 @pytest.mark.django_db
 def test_an_oob_failure_blocks_the_oob_rows_only(live_librenms):
-    device = _device("acq-iface-oob-fails", oob={"id": OOB_ID, "type": "idrac"})
+    device = _device("acq-iface-oob-fails", oob=OOB_ID)
     _serve(live_librenms.server)
     live_librenms.server.register(OOB_PORTS_PATH, {"status": "error", "message": "boom"}, status=500)
 
@@ -271,7 +280,7 @@ def test_an_oob_failure_blocks_the_oob_rows_only(live_librenms):
 
 @pytest.mark.django_db
 def test_a_blocked_host_scope_blocks_the_oob_rows_too(live_librenms):
-    device = _device("acq-iface-host-fails", oob={"id": OOB_ID, "type": "idrac"})
+    device = _device("acq-iface-host-fails", oob=OOB_ID)
     _serve(live_librenms.server)
     live_librenms.server.register(PORTS_PATH, {"status": "error"}, status=500)
     live_librenms.server.register(OOB_PORTS_PATH, {"status": "ok", "ports": OOB_PORTS})
@@ -288,7 +297,7 @@ def test_a_corrupt_oob_id_is_an_invalid_mapping_that_makes_no_request(live_libre
     from netbox_librenms_plugin.acquisition.snapshot import MappingState, Outcome
     from netbox_librenms_plugin.server_mappings import MappingRole
 
-    device = _device("acq-iface-oob-corrupt", oob={"id": "not-an-id", "type": "idrac"})
+    device = _corrupt_oob_device("acq-iface-oob-corrupt")
     _serve(live_librenms.server)
 
     snapshot = _acquire(device)
@@ -311,7 +320,7 @@ def test_a_change_of_the_oob_link_alone_makes_the_snapshot_unreadable(live_libre
     from netbox_librenms_plugin.server_mappings import clear_oob
     from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change, seed_mapping
 
-    device = _device("acq-iface-oob-binding", oob={"id": "not-an-id", "type": "idrac"})
+    device = _corrupt_oob_device("acq-iface-oob-binding")
     _serve(live_librenms.server)
     live_librenms.server.register(OOB_PORTS_PATH, {"status": "ok", "ports": OOB_PORTS})
     snapshot = _acquire(device)
@@ -371,11 +380,10 @@ def test_a_virtual_machine_acquires_its_interfaces(live_librenms):
 @pytest.mark.django_db
 def test_an_oob_only_owner_has_no_interfaces_to_acquire(live_librenms):
     from netbox_librenms_plugin.acquisition.coordinator import SubjectNotMapped
-    from netbox_librenms_plugin.tests.conftest import make_device, map_device_to_librenms
+    from netbox_librenms_plugin.tests.conftest import make_device
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
-    device = map_device_to_librenms(
-        make_device("acq-iface-oob-only"), server_key=SERVER_KEY, oob={"id": OOB_ID, "type": "idrac"}
-    )
+    device = seed_mapping(make_device("acq-iface-oob-only"), SERVER_KEY, oob=OOB_ID, oob_type="idrac")
     live_librenms.server.register(OOB_PORTS_PATH, {"status": "ok", "ports": OOB_PORTS})
 
     # Interfaces need a host mapping; the OOB controller alone is not one.

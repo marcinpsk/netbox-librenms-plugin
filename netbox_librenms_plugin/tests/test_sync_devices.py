@@ -12,6 +12,7 @@ from netbox_librenms_plugin.tests.conftest import make_device, make_superuser, m
 from netbox_librenms_plugin.tests.mapping_fixtures import (
     mapping_summary,
     seed_mapping,
+    seed_stored_mapping,
     seed_stored_mapping_row,
     stored_mapping_for_test,
 )
@@ -348,7 +349,7 @@ class TestRemoveServerMappingView:
     @pytest.mark.parametrize("stored", ["²", 0, -1, True])
     def test_a_legacy_value_the_reader_cannot_resolve_has_no_mapping_to_remove(self, client, settings, stored):
         _configure_only_other_server(settings)
-        device = make_device(f"remove-unreadable-legacy-{stored}", librenms_cf=stored)
+        device = seed_stored_mapping(make_device(f"remove-unreadable-legacy-{stored}"), stored, save=True)
         client.force_login(make_superuser(f"remove-unreadable-legacy-{stored}-writer"))
 
         response = _post_remove(client, device, "default")
@@ -361,7 +362,7 @@ class TestRemoveServerMappingView:
     @pytest.mark.parametrize("stored", ["42", "+42", "4_2", " 42 ", 42])
     def test_a_legacy_value_the_reader_resolves_is_removable_under_default(self, client, settings, stored):
         _configure_only_other_server(settings)
-        device = make_device(f"remove-readable-legacy-{stored}", librenms_cf=stored)
+        device = seed_stored_mapping(make_device(f"remove-readable-legacy-{stored}"), stored, save=True)
         client.force_login(make_superuser(f"remove-readable-legacy-{stored}-writer"))
 
         response = _post_remove(client, device, "default")
@@ -373,7 +374,7 @@ class TestRemoveServerMappingView:
 
     def test_a_legacy_value_is_removable_only_under_default(self, client, settings):
         _configure_only_other_server(settings)
-        device = make_device("remove-legacy-other-server", librenms_cf="+42")
+        device = seed_stored_mapping(make_device("remove-legacy-other-server"), "+42", save=True)
         client.force_login(make_superuser("remove-legacy-other-server-writer"))
 
         response = _post_remove(client, device, "retired")
@@ -384,7 +385,7 @@ class TestRemoveServerMappingView:
 
     def test_a_readable_legacy_value_stays_when_default_is_configured(self, client, settings):
         _configure_only_server(settings, "default")
-        device = make_device("remove-legacy-protected-default", librenms_cf="+42")
+        device = seed_stored_mapping(make_device("remove-legacy-protected-default"), "+42", save=True)
         client.force_login(make_superuser("remove-legacy-protected-default-writer"))
 
         response = _post_remove(client, device, "default")
@@ -400,7 +401,7 @@ class TestRemoveServerMappingView:
         from django.db import connection
 
         _configure_only_other_server(settings)
-        device = make_device("remove-legacy-locked-recheck", librenms_cf="+42")
+        device = seed_stored_mapping(make_device("remove-legacy-locked-recheck"), "+42", save=True)
         client.force_login(make_superuser("remove-legacy-locked-recheck-writer"))
 
         class CorruptBeforeLock:
@@ -425,7 +426,7 @@ class TestRemoveServerMappingView:
         from dcim.models import Device
 
         _configure_only_other_server(settings)
-        device = make_device("remove-legacy-view-only", librenms_cf="+42")
+        device = seed_stored_mapping(make_device("remove-legacy-view-only"), "+42", save=True)
         client.force_login(make_user_with_perms("remove-legacy-view-only-user", [("view", Device)]))
 
         response = _post_remove(client, device, "default")
