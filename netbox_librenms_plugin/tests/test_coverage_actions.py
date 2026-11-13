@@ -3179,7 +3179,7 @@ class TestDeviceConflictActionMigrateLibreNMSId:
             scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
         )
         view = self._make_view()
-        device = make_device("migrate-twin-target", serial="TWIN-MIGRATE", librenms_cf=42)
+        device = seed_stored_mapping(make_device("migrate-twin-target", serial="TWIN-MIGRATE"), 42, save=True)
         make_device("migrate-twin-hidden", serial="S/N TWIN-MIGRATE")
         self._register_device(42, "migrate-twin-target", serial="TWIN-MIGRATE")
         request = make_view_request(

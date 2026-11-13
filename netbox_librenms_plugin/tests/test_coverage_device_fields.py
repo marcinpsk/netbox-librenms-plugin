@@ -1336,7 +1336,7 @@ class TestConvertLegacyLibreNMSIdView:
         NormalizationRule.objects.get_or_create(
             scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
         )
-        device = make_device("legacy-twin-target", serial="TWIN-LEGACY", librenms_cf=6567)
+        device = seed_stored_mapping(make_device("legacy-twin-target", serial="TWIN-LEGACY"), 6567, save=True)
         make_device("legacy-twin-hidden", serial="S/N TWIN-LEGACY")
         librenms_server.device_info_response(device_id=6567, hostname=device.name, serial="TWIN-LEGACY")
         client.force_login(
