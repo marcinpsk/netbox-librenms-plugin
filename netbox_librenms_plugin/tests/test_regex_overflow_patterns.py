@@ -126,3 +126,36 @@ def test_a_stored_pattern_with_a_too_large_repeat_count_names_the_rule(build, fi
         evaluate(rule)
 
     assert (excinfo.value.rule_pk, excinfo.value.field) == (rule.pk, field)
+
+
+# re.compile raises neither re.error nor OverflowError for these: RecursionError for groups nested this deep (it fits
+# a 500-character field), ValueError for two inline flag groups that conflict.
+OTHER_COMPILE_ERROR_PATTERNS = pytest.mark.parametrize(
+    "pattern", ["(" * 500, r"(?a)(?u)(.*)"], ids=["nested-too-deep", "conflicting-inline-flags"]
+)
+
+
+@pytest.mark.django_db
+@OTHER_COMPILE_ERROR_PATTERNS
+def test_a_pattern_that_re_cannot_compile_is_an_invalid_regular_expression(pattern):
+    from django.core.exceptions import ValidationError
+
+    from netbox_librenms_plugin.utils import validate_regex_field
+
+    with pytest.raises(ValidationError) as excinfo:
+        validate_regex_field(pattern, "match_pattern")
+
+    assert "match_pattern" in excinfo.value.message_dict
+
+
+@pytest.mark.django_db
+@OTHER_COMPILE_ERROR_PATTERNS
+def test_a_stored_serial_rule_that_re_cannot_compile_names_the_rule(pattern):
+    from netbox_librenms_plugin.models import compile_rule_regex
+
+    rule = _stored(NormalizationRule(scope=NormalizationRule.SCOPE_SERIAL, match_pattern=pattern, replacement=r"\1"))
+
+    with pytest.raises(RuleConfigurationError) as excinfo:
+        compile_rule_regex(rule, "match_pattern")
+
+    assert (excinfo.value.rule_pk, excinfo.value.field) == (rule.pk, "match_pattern")

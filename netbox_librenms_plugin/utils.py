@@ -414,8 +414,9 @@ def get_interface_port_identity_sets(ports, interface_name_field) -> tuple[set[i
     return unique_port_ids, unambiguous_name_port_ids
 
 
-# re.compile raises OverflowError, not re.error, for a repeat count such as a{4294967295}.
-REGEX_COMPILE_ERRORS = (re.error, OverflowError)
+# re.compile also raises OverflowError (a repeat count such as a{4294967295}), RecursionError (deeply nested groups)
+# and ValueError (two inline flag groups that conflict, such as (?a)(?u)).
+REGEX_COMPILE_ERRORS = (re.error, OverflowError, RecursionError, ValueError)
 
 
 def validate_regex_field(value, field_name):
