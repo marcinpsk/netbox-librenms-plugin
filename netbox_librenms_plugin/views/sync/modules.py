@@ -357,18 +357,21 @@ def _authorize_module_grant(page_device, server_key, action, token):
 
     from netbox_librenms_plugin import source_cache
     from netbox_librenms_plugin.acquisition.registry import Resource
+    from netbox_librenms_plugin.acquisition.resources import blocked_scopes
 
     sync_device = _get_sync_device_for_inventory(page_device, server_key)
     snapshot = source_cache.read(sync_device, Resource.MODULES, server_key)
     if snapshot is None:
         raise GrantRefused(GrantRefusal.CACHE_MISSING)
+    # An unusable source refuses before the policy: no ready host, or a deleted source owner.
+    owner_pk = snapshot.resources[Resource.MODULES].owner.pk
+    if "host" in blocked_scopes(snapshot, Resource.MODULES) or not Device.objects.filter(pk=owner_pk).exists():
+        raise GrantRefused(GrantRefusal.SNAPSHOT)
     # One policy read: the assessment merges under its chassis serial context, and the grant checks against it.
     try:
         policy = load_inventory_policy(page_device.pk)
     except Device.DoesNotExist as exc:
-        # A deleted source owner makes the source unusable, whatever else changed.
-        owner_gone = not Device.objects.filter(pk=snapshot.resources[Resource.MODULES].owner.pk).exists()
-        raise GrantRefused(GrantRefusal.SNAPSHOT if owner_gone else GrantRefusal.DESTINATION) from exc
+        raise GrantRefused(GrantRefusal.DESTINATION) from exc
     except RuleConfigurationError as exc:
         logger.error("Module action %s on %s refused: %s", action, page_device, exc)
         raise GrantRefused(GrantRefusal.RULE_ERROR) from exc
@@ -378,8 +381,6 @@ def _authorize_module_grant(page_device, server_key, action, token):
         )
     except Device.DoesNotExist as exc:
         raise GrantRefused(GrantRefusal.SNAPSHOT) from exc
-    if "host" in assessed["blocked"]:
-        raise GrantRefused(GrantRefusal.SNAPSHOT)
     inventory = assessed["inventory"]
     grant = read_module_grant(token, action=action, page_device_id=page_device.pk, server_key=server_key)
     grant.check_state(inventory, policy)
