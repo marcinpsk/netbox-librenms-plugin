@@ -364,3 +364,55 @@ def test_an_optional_mapping_field_can_use_a_real_ip_refresh(client, live_libren
     subject.refresh_from_db()
     assert read_mapping(subject).own_id(SERVER_KEY) is None
     assert source_cache.read(subject, Resource.IP_ADDRESSES, SERVER_KEY) is not None
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "resource_name,route,context_name,table_name",
+    [
+        ("ipaddresses", "device_ipaddress_sync", "ip_sync", "table"),
+        ("vlans", "device_vlan_sync", "vlan_sync", "vlan_table"),
+    ],
+)
+def test_a_refresh_response_refuses_an_identity_change_after_storage(
+    client, live_librenms, monkeypatch, resource_name, route, context_name, table_name
+):
+    from django.core.cache import cache
+    from django.urls import reverse
+
+    from netbox_librenms_plugin import source_cache
+    from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, SyncTabState
+    from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping_row
+
+    subject = make_device("receipt-identity-change", librenms_cf={SERVER_KEY: {"id": 5501}})
+    _serve_ip_and_vlans(live_librenms.server, 5501)
+    live_librenms.server.register(
+        "/api/v0/devices/5501/ip", {"status": "ok", "addresses": [ip_address_row("198.18.0.1", 7)]}
+    )
+    live_librenms.server.register(
+        "/api/v0/resources/vlans", {"status": "ok", "vlans": [{"device_id": 5501, "vlan_vlan": 5}]}
+    )
+    real_outcome = SyncCacheConsistency.mark_refresh_outcome
+
+    def publish_then_replace_identity(coordinator, *args, **kwargs):
+        stored = real_outcome(coordinator, *args, **kwargs)
+        assert stored
+        seed_stored_mapping_row(subject, {SERVER_KEY: {"id": 5502}})
+        return stored
+
+    monkeypatch.setattr(SyncCacheConsistency, "mark_refresh_outcome", publish_then_replace_identity)
+    client.force_login(make_superuser("receipt-identity-change"))
+    response = client.post(
+        reverse(f"plugins:netbox_librenms_plugin:{route}", args=[subject.pk]),
+        {"server_key": SERVER_KEY},
+        HTTP_HX_REQUEST="true",
+    )
+    assert response.status_code == 200
+    assert response.context[context_name][table_name] is None
+    assert source_cache.IDENTITY_CHANGED in response.content.decode()
+    tab = SyncTab(resource_name)
+    state = cache.get(SyncCacheConsistency(subject).state_key(tab, SERVER_KEY))
+    assert state["state"] == SyncTabState.REFRESH_FAILED.value
+    assert live_librenms.server.requests
+    assert all("5502" not in request["path"] for request in live_librenms.server.requests)

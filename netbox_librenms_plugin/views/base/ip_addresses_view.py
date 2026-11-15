@@ -676,12 +676,16 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         snapshot = source_cache.read(obj, Resource.IP_ADDRESSES, server_key)
         if snapshot is None:
             return None
-        return self._snapshot_context(request, obj, snapshot, server_key)
+        try:
+            return self._snapshot_context(request, obj, snapshot, server_key)
+        except source_cache.SourceChanged:
+            return None
 
     def _snapshot_context(self, request, obj, snapshot, server_key):
         """Return the tab context of one snapshot, assessed for the request user."""
+        source_cache.require_current(obj, Resource.IP_ADDRESSES, server_key, snapshot, user=request.user)
         ip_data = self.assess_snapshot(obj, snapshot, server_key).rows
-        cache_ttl = source_cache.remaining_ttl(obj, Resource.IP_ADDRESSES, server_key)
+        cache_ttl = source_cache.remaining_ttl(obj, Resource.IP_ADDRESSES, server_key, snapshot=snapshot)
         cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl) if cache_ttl else None
 
         # The management rows and the row identities describe the whole snapshot, so they come before the filter.
@@ -818,11 +822,20 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
                 request, obj, server_key, {"ip_sync": self._empty_context(request, obj, server_key, server_key)}
             )
 
-        if coordinator.mark_refresh_outcome(
+        snapshot_cached = coordinator.mark_refresh_outcome(
             SyncTab.IP_ADDRESSES,
             server_key,
             actor_id=request_actor_id(request),
-        ):
+        )
+        try:
+            context = self._snapshot_context(request, obj, snapshot, server_key)
+        except source_cache.SourceChanged:
+            coordinator.mark_refresh_failure(SyncTab.IP_ADDRESSES, server_key, actor_id=request_actor_id(request))
+            messages.error(request, source_cache.IDENTITY_CHANGED)
+            return self.render_sync_partial(
+                request, obj, server_key, {"ip_sync": self._empty_context(request, obj, server_key, server_key)}
+            )
+        if snapshot_cached:
             messages.success(request, "IP address data refreshed successfully.")
         else:
             # The rows below come from this refresh and are rendered, so the message must not
@@ -833,9 +846,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
                 "IP address data could not be cached. The rows shown come from this refresh only "
                 "and will not survive a reload. Refresh again before syncing; see server logs for details.",
             )
-        return self.render_sync_partial(
-            request, obj, server_key, {"ip_sync": self._snapshot_context(request, obj, snapshot, server_key)}
-        )
+        return self.render_sync_partial(request, obj, server_key, {"ip_sync": context})
 
 
 class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionMixin, CacheMixin, View):

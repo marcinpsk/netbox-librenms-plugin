@@ -757,14 +757,14 @@ def test_committed_interface_sync_invalidates_only_mapped_page_and_shared_snapsh
         _seed_snapshot(data_type, page_device, "secondary")
     for subject in (page_device, sibling):
         _seed_snapshot("vlans", subject, "secondary")
-        seed_ip_snapshot(subject, [], server_key="secondary")
+        seed_ip_snapshot(subject, [], server_key="secondary", source_id=42)
     cache.set(_last_fetched_key("ports", secondary_owner, "secondary"), "secondary-time", timeout=300)
     cache.set(_vlan_overrides_key(secondary_owner, "secondary"), {"200": "2"}, timeout=300)
     cache.set(_last_fetched_key("vlans", page_device, "secondary"), "secondary-vlan-time", timeout=300)
 
     for data_type in ("ports", "links", "inventory", "vlans"):
         _seed_snapshot(data_type, page_device, "unmapped")
-    seed_ip_snapshot(page_device, [], server_key="unmapped")
+    seed_ip_snapshot(page_device, [], server_key="unmapped", source_id=41)
 
     client.force_login(make_superuser("cache-scope-user"))
     sync_url = reverse(

@@ -9,11 +9,25 @@ from django.http import Http404
 from netbox_librenms_plugin.acquisition.coordinator import SubjectNotMapped, acquire, plan_acquisition, resource_owner
 from netbox_librenms_plugin.acquisition.registry import RESOURCE_SPECS
 from netbox_librenms_plugin.acquisition.resources import blocked_scopes, is_ready
-from netbox_librenms_plugin.acquisition.snapshot import ObjectRef, SourceSnapshot
+from netbox_librenms_plugin.acquisition.snapshot import (
+    MappingLink,
+    MappingState,
+    ObjectRef,
+    SourceBinding,
+    SourceSnapshot,
+)
 from netbox_librenms_plugin.librenms_api import configured_cache_timeout, stored_librenms_id
 from netbox_librenms_plugin.sync_cache import sync_snapshot_key
 
 IDENTITY_CHANGED = "LibreNMS source identity changed or expired. Refresh this tab and try again."
+
+
+class SourceChanged(Exception):
+    """The acquired snapshot no longer names the page's current source."""
+
+
+class SnapshotUnavailable(Exception):
+    """The acquired receipt has no matching snapshot in the shared cache."""
 
 
 @dataclass(frozen=True)
@@ -125,17 +139,62 @@ def read(subject, resource, server_key, *, user=None):
 
 
 def _binding_holds(snapshot, resource, owner):
-    """Return whether the snapshot was acquired for the owner's current effective identity."""
-    source = snapshot.resources[resource]
-    return source.owner == ObjectRef.of(owner) and stored_librenms_id(owner, snapshot.server_key) == (
-        source.host.librenms_id
+    """Compare the acquired binding with the owner's current effective identity and source."""
+    host_id = stored_librenms_id(owner, snapshot.server_key)
+    current = SourceBinding(
+        snapshot.server_key,
+        ObjectRef.of(owner),
+        MappingLink(MappingState.RESOLVED, host_id) if host_id is not None else None,
+        None,
     )
+    return snapshot.binding(resource) == current
 
 
-def remaining_ttl(subject, resource, server_key):
+def receipt_owner(subject, resource, server_key, snapshot, *, user=None):
+    """Return the current owner only when this exact snapshot still names the page's selected source."""
+    if snapshot.server_key != server_key or resource not in snapshot.resources:
+        return None
+    current = type(subject).objects.filter(pk=subject.pk).first()
+    if current is None:
+        return None
+    owner = resource_owner(current, resource, server_key)
+    if not _binding_holds(snapshot, resource, owner):
+        return None
+    if user is not None and not snapshot_visible(user, snapshot, resource):
+        return None
+    return owner
+
+
+def require_current(subject, resource, server_key, snapshot, *, user=None):
+    """Require the acquired receipt to remain current before assessment, without loading another snapshot."""
+    owner = receipt_owner(subject, resource, server_key, snapshot, user=user)
+    if owner is None:
+        raise SourceChanged(IDENTITY_CHANGED)
+    return owner
+
+
+def require_cached(subject, resource, server_key, snapshot, *, user=None):
+    """Require a current receipt and an available cache entry for that same source."""
+    owner = require_current(subject, resource, server_key, snapshot, user=user)
+    cached = SourceSnapshot.from_payload(cache.get(receipt_key(snapshot, resource)))
+    if cached is None or resource not in cached.resources or cached.binding(resource) != snapshot.binding(resource):
+        raise SnapshotUnavailable("The acquired source snapshot is not cached.")
+    return owner
+
+
+def receipt_key(snapshot, resource):
+    """Return the acquired owner's cache key without selecting a different source owner."""
+    ref = snapshot.resources[resource].owner
+    owner = apps.get_model(ref.label)(pk=ref.pk)
+    return _key(owner, resource, snapshot.server_key)
+
+
+def remaining_ttl(subject, resource, server_key, *, snapshot=None):
     """Return the seconds the resource's snapshot has left, or None without a snapshot."""
     # An entry that read() refuses, e.g. after a mapping change, still has its TTL.
-    if read(subject, resource, server_key) is None:
+    if snapshot is None:
+        snapshot = read(subject, resource, server_key)
+    if snapshot is None or receipt_owner(subject, resource, server_key, snapshot) is None:
         return None
-    ttl = cache.ttl(snapshot_key(subject, resource, server_key))
+    ttl = cache.ttl(receipt_key(snapshot, resource))
     return ttl if ttl and ttl > 0 else None
