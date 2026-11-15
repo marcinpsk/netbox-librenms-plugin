@@ -11,6 +11,8 @@ from collections import Counter
 
 import pytest
 
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+
 from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.tests.conftest import (
     configure_default_librenms_server,
@@ -67,6 +69,7 @@ def _reader(username, *, ipam=False):
 
 def _seed_port(device, server_key):
     """Store an interfaces snapshot of one host port that carries an untagged VLAN."""
+    seed_mapping(device, server_key, own=63001)
     seed_interfaces_snapshot(
         device,
         [
@@ -100,10 +103,9 @@ class TestInterfacesTabIpamScoping:
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
         request = make_request("get", user=user)
-        # A real client: the device carries no LibreNMS id, so the stored-id read answers None
-        # without issuing a request.
+        # The snapshot holds the source facts, so rendering makes no LibreNMS request.
         view = make_view(DeviceInterfaceTableView, request, librenms_api=LibreNMSAPI(server_key=server_key))
-        return view.get_context_data(request, device, "ifName", server_key, sync_device=device)
+        return view.get_context_data(request, device, "ifName", server_key)
 
     def test_a_user_without_ipam_view_rights_gets_no_vlan_groups(self, settings):
         """The tab gate never asks for IPAM rights, so the VLAN reads must be restricted."""

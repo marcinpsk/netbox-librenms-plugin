@@ -33,7 +33,6 @@ from netbox_librenms_plugin.interface_relationships import (
 )
 from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 from netbox_librenms_plugin.server_mappings import read_mapping, read_mappings
-from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.sync_filters import filter_sync_table, parse_table_filters, show_ignored_interfaces
 from netbox_librenms_plugin.utils import (
@@ -108,30 +107,7 @@ class BaseInterfaceTableView(
         """
         raise NotImplementedError
 
-    def _render_tab(self, request, obj, interface_name_field, server_key, sync_device):
-        """
-        Render the interfaces tab partial from the current cache, which is the answer to every refresh POST.
-
-        Args:
-            request (HttpRequest): Current request.
-            obj (Device | VirtualMachine): Object of the sync page.
-            interface_name_field (str): Name field of the LibreNMS ports.
-            server_key (str): POST-scoped server key; the tab stays on this server.
-            sync_device (Device | VirtualMachine): Object that owns the cache, the VC sync device for a member.
-
-        Returns:
-            HttpResponse: The rendered partial.
-
-        """
-        context = {
-            "interface_sync": self.get_context_data(
-                request, obj, interface_name_field, server_key, sync_device=sync_device
-            ),
-            "interface_name_field": interface_name_field,
-        }
-        return self.render_sync_partial(request, obj, server_key, context)
-
-    def _failure_response(self, request, obj, interface_name_field, server_key, sync_device, coordinator):
+    def _failure_response(self, request, obj, interface_name_field, server_key, coordinator):
         """
         Record a failed refresh and render the tab, which has no snapshot now.
 
@@ -142,7 +118,6 @@ class BaseInterfaceTableView(
             obj (Device | VirtualMachine): Object of the sync page.
             interface_name_field (str): Name field of the LibreNMS ports.
             server_key (str): POST-scoped server key; the tab stays on this server.
-            sync_device (Device | VirtualMachine): Object that owns the cache, the VC sync device for a member.
             coordinator (SyncCacheConsistency): The state coordinator bound to the refresh plan.
 
         Returns:
@@ -154,7 +129,15 @@ class BaseInterfaceTableView(
             server_key,
             actor_id=request_actor_id(request),
         )
-        return self._render_tab(request, obj, interface_name_field, server_key, sync_device)
+        return self.render_sync_partial(
+            request,
+            obj,
+            server_key,
+            {
+                "interface_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": server_key},
+                "interface_name_field": interface_name_field,
+            },
+        )
 
     def get_select_related_field(self, obj):
         """Determine the appropriate select_related field based on object type."""
@@ -301,23 +284,32 @@ class BaseInterfaceTableView(
                 request,
                 self.scoped_lookup_message(lookup_error) if lookup_error else "Device not found in LibreNMS.",
             )
-            return self._failure_response(request, obj, interface_name_field, server_key, sync_device, coordinator)
+            return self._failure_response(request, obj, interface_name_field, server_key, coordinator)
 
         result = source_cache.refresh(request, plan)
         if result.error is not None:
             messages.error(request, f"Failed to fetch interfaces from LibreNMS: {result.error}")
-            return self._failure_response(request, obj, interface_name_field, server_key, sync_device, coordinator)
+            return self._failure_response(request, obj, interface_name_field, server_key, coordinator)
 
         # The host rows stay usable when only the OOB controller's ports are missing.
         oob_blocked = "oob" in result.blocked
         if oob_blocked:
             notice = source_cache.blocker_notice(result.blocked["oob"])
             logger.warning("Interfaces of %s refreshed without OOB rows: %s", sync_device, notice)
-        if coordinator.mark_refresh_outcome(
+        snapshot_cached = coordinator.mark_refresh_outcome(
             SyncTab.INTERFACES,
             server_key,
             actor_id=request_actor_id(request),
-        ):
+        )
+        try:
+            context = self.get_context_data(request, obj, interface_name_field, server_key, snapshot=result.snapshot)
+        except source_cache.SnapshotUnavailable:
+            messages.error(request, "Interface data could not be cached. Refresh again before syncing.")
+            return self._failure_response(request, obj, interface_name_field, server_key, coordinator)
+        except source_cache.SourceChanged:
+            messages.error(request, source_cache.IDENTITY_CHANGED)
+            return self._failure_response(request, obj, interface_name_field, server_key, coordinator)
+        if snapshot_cached:
             scope = "Host interface" if oob_blocked else "Interface"
             messages.success(request, f"{scope} data refreshed successfully.")
         else:
@@ -327,7 +319,15 @@ class BaseInterfaceTableView(
                 "Refresh again; see server logs for details.",
             )
 
-        return self._render_tab(request, obj, interface_name_field, server_key, sync_device)
+        return self.render_sync_partial(
+            request,
+            obj,
+            server_key,
+            {
+                "interface_sync": context,
+                "interface_name_field": interface_name_field,
+            },
+        )
 
     @staticmethod
     def enrich_interface_name_metadata(
@@ -790,7 +790,7 @@ class BaseInterfaceTableView(
             "relationship_diagnostics": relationship_diagnostics,
         }
 
-    def get_context_data(self, request, obj, interface_name_field, server_key=None, sync_device=None):
+    def get_context_data(self, request, obj, interface_name_field, server_key=None, *, snapshot=None):
         """
         Build the context data for the interface sync view, from the stored interfaces snapshot.
 
@@ -801,7 +801,7 @@ class BaseInterfaceTableView(
                 the request when None.
             server_key: The LibreNMS server key; resolved from the API client when
                 None.
-            sync_device: Device that owns the LibreNMS identity and the snapshot.
+            snapshot: The acquired source receipt. None reads the bound cache on navigation.
 
         Returns:
             dict: The template context (object, table, vlan_groups, server_key,
@@ -825,14 +825,27 @@ class BaseInterfaceTableView(
             # snapshot, not the default's. An unresolved non-blank key scopes to that key (miss).
             server_key, unresolved = self.resolve_get_render_server_key(request)
 
-        # Every VC member shares the snapshot of the VC sync device. Reuse the device post()
-        # already resolved (passed as sync_device); the GET path passes None.
-        cache_device = sync_device or get_librenms_sync_device(obj, server_key=server_key) or obj
-
         # A key that no longer resolves left self.librenms_api bound to the DEFAULT server, so the
         # per-interface librenms_id index (_get_object_librenms_ids) would be keyed on another server
         # than the snapshot. Render empty, scoped to the requested key, instead.
-        snapshot = None if unresolved or server_key is None else source_cache.read(obj, Resource.INTERFACES, server_key)
+        if snapshot is not None:
+            cache_device = source_cache.require_cached(
+                obj, Resource.INTERFACES, server_key, snapshot, user=request.user
+            )
+        else:
+            snapshot = (
+                None
+                if unresolved or server_key is None
+                else source_cache.read(obj, Resource.INTERFACES, server_key, user=request.user)
+            )
+            cache_device = (
+                source_cache.receipt_owner(obj, Resource.INTERFACES, server_key, snapshot, user=request.user)
+                if snapshot is not None
+                else None
+            )
+            if cache_device is None:
+                snapshot = None
+                cache_device = obj
 
         virtual_chassis_members = []
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
@@ -872,7 +885,11 @@ class BaseInterfaceTableView(
             table, filters, filtered_from = filter_sync_table(request, table_rows, build_table)
             table.configure(request)
 
-        cache_ttl = source_cache.remaining_ttl(obj, Resource.INTERFACES, server_key) if snapshot is not None else None
+        cache_ttl = (
+            source_cache.remaining_ttl(obj, Resource.INTERFACES, server_key, snapshot=snapshot)
+            if snapshot is not None
+            else None
+        )
         cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl) if cache_ttl else None
 
         return {

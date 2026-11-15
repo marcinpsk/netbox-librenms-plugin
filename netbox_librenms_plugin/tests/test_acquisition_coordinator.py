@@ -397,6 +397,7 @@ def test_an_optional_mapping_field_can_use_a_real_ip_refresh(client, live_libren
 @pytest.mark.parametrize(
     "resource_name,route,context_name,table_name",
     [
+        ("interfaces", "device_interface_sync", "interface_sync", "table"),
         ("ipaddresses", "device_ipaddress_sync", "ip_sync", "table"),
         ("vlans", "device_vlan_sync", "vlan_sync", "vlan_table"),
     ],
@@ -414,6 +415,7 @@ def test_a_refresh_response_refuses_an_identity_change_after_storage(
 
     subject = make_device("receipt-identity-change", librenms_cf={SERVER_KEY: {"id": 5501}})
     _serve_ip_and_vlans(live_librenms.server, 5501)
+    live_librenms.server.register("/api/v0/devices/5501/port_stack", {"status": "ok", "mappings": []})
     live_librenms.server.register(
         "/api/v0/devices/5501/ip", {"status": "ok", "addresses": [ip_address_row("198.18.0.1", 7)]}
     )

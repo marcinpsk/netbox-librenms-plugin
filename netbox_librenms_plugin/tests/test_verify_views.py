@@ -173,6 +173,7 @@ def _snapshot_port(port_id, name, **fields):
 
 def _seed_parent_and_child(subject, child, parent, *, server_key="default", child_type="l2vlan", pair=(10, 20)):
     """Store the raw ports 10 (*child*) and 20 (*parent*) and one port_stack pair; assert the derived parent edge."""
+    seed_mapping(subject, server_key, own=63001)
     seed_interfaces_snapshot(
         subject,
         [_snapshot_port(10, child.name, ifType=child_type), _snapshot_port(20, parent.name)],
@@ -213,7 +214,7 @@ def _table_context(user, device, server_key="default"):
     view = DeviceInterfaceTableView()
     view._librenms_api = LibreNMSAPI(server_key=server_key)
     view.request = request
-    return view.get_context_data(request, device, "ifName", server_key, sync_device=device)
+    return view.get_context_data(request, device, "ifName", server_key)
 
 
 def _table_row(context, port_id):
@@ -264,8 +265,10 @@ class TestSingleInterfaceVerifyView:
         port = _snapshot_port(41, "Ethernet1", **port_vlans("access", 100))
         if source == "oob":
             seed_mapping(device, "default", oob=4141)
+            seed_mapping(device, "default", own=63001)
             seed_interfaces_snapshot(device, [], oob_ports=[port])
         else:
+            seed_mapping(device, "default", own=63001)
             seed_interfaces_snapshot(device, [port])
 
         def vlans_cell_for(user):
@@ -302,6 +305,7 @@ class TestSingleInterfaceVerifyView:
         wrong_interface = make_interface(device, "Ethernet1")
         seed_mapping(wrong_interface, own=30, save=False)
         wrong_interface.save()
+        seed_mapping(device, "default", own=63001)
         seed_interfaces_snapshot(device, [_snapshot_port(20, "Ethernet1")])
 
         response = _verify(
@@ -343,6 +347,7 @@ class TestSingleInterfaceVerifyView:
         )
         VLAN.objects.create(vid=100, name="Verify Rack 1 VLAN", group=group1, status="active")
         VLAN.objects.create(vid=100, name="Verify Rack 2 VLAN", group=group2, status="active")
+        seed_mapping(member1, "default", own=63001)
         seed_interfaces_snapshot(member1, [_snapshot_port(10, "Ethernet2", **port_vlans("access", 100))])
 
         response = _verify(
@@ -391,6 +396,7 @@ class TestSingleInterfaceVerifyView:
 
         device = make_device("verify-authoritative-pid")
         user = _verify_superuser("authoritative-pid")
+        seed_mapping(device, "default", own=63001)
         seed_interfaces_snapshot(device, [_snapshot_port(99, "Et1")])
         view = _interface_verify_view()
         matching_request = _verify_request(
@@ -415,6 +421,7 @@ class TestSingleInterfaceVerifyView:
 
         device = make_device("verify-namehint")
         make_interface(device, "Et1")
+        seed_mapping(device, "default", own=63001)
         seed_interfaces_snapshot(device, [_snapshot_port(10, "Et1")])
 
         response = _verify(
@@ -448,6 +455,7 @@ class TestSingleInterfaceVerifyView:
         stable_match.save()
         name_candidate.mtu = 1500
         name_candidate.save()
+        seed_mapping(device, server_key, own=63001)
         seed_interfaces_snapshot(device, [_snapshot_port(10, "Ethernet1", ifMtu=9000)], server_key=server_key)
         user = _verify_superuser("table-resolution")
 
@@ -552,10 +560,10 @@ class TestSingleInterfaceVerifyView:
         seed_mapping(parent, own=20, save=False)
         child.save()
         parent.save()
+        _seed_parent_and_child(selected_device, child, parent)
         if migrated:
             apply_mapping_change(page_device, mark_migrated(page_device, winner.pk, "default"))
             page_device.save()
-        _seed_parent_and_child(page_device, child, parent)
 
         response = _verify(
             {
@@ -589,6 +597,7 @@ class TestSingleInterfaceVerifyView:
         user = make_user_with_perms("verify-member-scope", [])
         user = grant(user, "view", Device, constraints={"pk": page_device.pk})
         user = grant(user, "view", Device, constraints={"pk": selected_device.pk})
+        seed_mapping(page_device, "default", own=63001)
         seed_interfaces_snapshot(page_device, [_snapshot_port(10, "Ethernet2")])
 
         response = _verify(
@@ -706,6 +715,7 @@ class TestSingleInterfaceVerifyView:
         user = make_user_with_perms("verify-view-only-lag-target", [("view", Device)])
         user = grant(user, "change", Interface, constraints={"pk": member.pk})
         user = grant(user, "view", Interface, constraints={"pk": aggregate.pk})
+        seed_mapping(device, server_key, own=63001)
         seed_interfaces_snapshot(
             device,
             [_snapshot_port(10, member.name), _snapshot_port(20, aggregate.name, ifType="ieee8023adLag")],
@@ -744,6 +754,7 @@ class TestSingleInterfaceVerifyView:
         from netbox_librenms_plugin.tests.conftest import make_device
 
         device = make_device("verify-malformed-name-field")
+        seed_mapping(device, "default", own=63001)
         seed_interfaces_snapshot(device, [_snapshot_port(10, "Ethernet1")])
 
         response = _verify(
@@ -1231,6 +1242,7 @@ class TestVerifyViewObjectScope:
 
         # Store the OUT-OF-SCOPE device's snapshot: with a raw get_object_or_404 the device
         # resolves and the endpoint returns its row (the leak). restrict() drops it first.
+        seed_mapping(out_of_scope, self.SERVER_KEY, own=63001)
         seed_interfaces_snapshot(out_of_scope, [_snapshot_port(1, "Gi0/0")], server_key=self.SERVER_KEY)
         request = RequestFactory().post(
             "/plugins/librenms_plugin/verify-interface/",
@@ -1322,6 +1334,7 @@ class TestSaveVlanGroupOverridesObjectScope:
         real_cache.delete(overrides_key)
         # Even with the snapshot stored (so the write path would otherwise proceed), the device
         # must 404 at the restricted lookup before anything is persisted.
+        seed_mapping(out_of_scope, self.SERVER_KEY, own=63001)
         seed_interfaces_snapshot(out_of_scope, [], server_key=self.SERVER_KEY)
         try:
             with pytest.raises(Http404):
