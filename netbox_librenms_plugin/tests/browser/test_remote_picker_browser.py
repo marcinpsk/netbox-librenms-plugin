@@ -123,6 +123,27 @@ def test_device_search_sends_the_form_csrf_token(page):
     assert search.value.headers.get("x-csrftoken") == "test-csrf"
 
 
+def test_an_expired_snapshot_is_reported_inside_the_picker(page):
+    device = _device(1, "Device A")
+    page.route(
+        f"{PORTS_URL}*",
+        lambda route: route.fulfill(body=_render_ports(device, 101), content_type="text/html"),
+    )
+    error = "Cable data expired. Refresh Cables before selecting a remote port."
+    page.route(PICKER_URL, lambda route: route.fulfill(status=409, body=error, content_type="text/plain"))
+    _load_picker(page, [device])
+    page.evaluate(
+        "document.body.insertAdjacentHTML('beforeend', '<div id=\"cable-sync-content\">Original table</div>')"
+    )
+    page.get_by_role("button", name="Device A").click()
+    page.locator("#remote-picker-port-select").select_option("101")
+
+    page.get_by_role("button", name="Use selected port").click()
+
+    page.get_by_text(error, exact=True).wait_for(state="visible")
+    assert page.locator("#cable-sync-content").inner_text() == "Original table"
+
+
 def test_new_search_rejects_a_late_port_response(page):
     """A late port response must not restore the old device selection."""
     device_a = _device(1, "Device A")

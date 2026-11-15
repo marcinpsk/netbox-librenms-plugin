@@ -33,6 +33,7 @@ from netbox_librenms_plugin.constants import (
     OOB_INVENTORY_SOURCE,
     SERIAL_INVENTORY_SOURCE,
     UNCLASSIFIED,
+    is_supported_interface_name_field,
 )
 from netbox_librenms_plugin.interface_rules import interface_rules_for_request, row_rule_block
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
@@ -2368,9 +2369,10 @@ class SingleCableVerifyView(BaseCableTableView):
             )
 
             links_cache_key = source_cache.snapshot_key(origin_device, Resource.CABLES, server_key)
-            assessed = read_cable_assessment(
-                request, origin_device, server_key, get_interface_name_field(request, origin_device)
-            )
+            interface_name_field = data.get("interface_name_field")
+            if not is_supported_interface_name_field(interface_name_field):
+                interface_name_field = get_interface_name_field(request, origin_device)
+            assessed = read_cable_assessment(request, origin_device, server_key, interface_name_field)
             valid_links = assessed["links"] if assessed is not None else None
             if valid_links and request.user.pk is not None:
                 valid_links, _has_manual_picks = apply_cable_manual_picks(

@@ -24,7 +24,7 @@ from netbox_librenms_plugin.acquisition.snapshot import (
     ResponseRecord,
     SourceSnapshot,
 )
-from netbox_librenms_plugin.librenms_api import EXTENDED_API_TIMEOUT, build_librenms_api, stored_librenms_id
+from netbox_librenms_plugin.librenms_api import DEFAULT_API_TIMEOUT, EXTENDED_API_TIMEOUT, build_librenms_api, stored_librenms_id
 from netbox_librenms_plugin.server_mappings import MappingRole, read_mapping, require_server_key
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
@@ -50,11 +50,13 @@ class _Fetch:
         self.responses = {}
         self.neighbour_deadline = None
 
-    def __call__(self, endpoint):
+    def __call__(self, endpoint, *, timeout=None):
         key = endpoint.request.key
         if key not in self.responses or self.responses[key].received_at is None:
             # A budget omission is still available to a resource that requires this request.
             options = {"timeout": EXTENDED_API_TIMEOUT} if endpoint.extended_timeout else {}
+            if timeout is not None:
+                options["timeout"] = min(options.get("timeout", DEFAULT_API_TIMEOUT), timeout)
             status, body = self._api.get_response(endpoint.request.path, dict(endpoint.request.params), **options)
             decoded = endpoint.decode(status, body)
             self.responses[key] = ResponseRecord(

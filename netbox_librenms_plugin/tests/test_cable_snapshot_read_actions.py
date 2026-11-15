@@ -90,6 +90,38 @@ def _pair(*, remote_interface=False, host_ports=True, neighbour_ports=True):
     return subject, neighbour, local, remote, snapshot, local_port, remote_port
 
 
+@pytest.mark.django_db
+def test_verify_keeps_the_interface_name_option_from_the_page(client):
+    subject, _neighbour, _local, _remote, _snapshot, local_port, remote_port = _pair(remote_interface=True)
+    local_port["ifDescr"] = "Page port description"
+    seed_cables_snapshot(
+        subject,
+        [
+            link_row(
+                LOCAL_PORT_ID, "eth2", local_port="eth1", remote_device_id=NEIGHBOUR_ID, remote_port_id=REMOTE_PORT_ID
+            )
+        ],
+        [local_port],
+        neighbour_ports={NEIGHBOUR_ID: [remote_port]},
+        server_key=SERVER_KEY,
+    )
+    client.force_login(make_superuser("cable-verify-page-option"))
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:verify_cable"),
+        {
+            "device_id": subject.pk,
+            "row_id": str(LOCAL_PORT_ID),
+            "server_key": SERVER_KEY,
+            "interface_name_field": "ifDescr",
+        },
+        content_type="application/json",
+    )
+
+    assert response.status_code == 200
+    assert "Page port description" in response.json()["formatted_row"]["local_port"]
+
+
 def _sync(client, subject, local, remote):
     return client.post(
         reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[subject.pk]),
@@ -187,6 +219,7 @@ def test_cached_unmodelled_serial_rows_are_hidden_without_owner_visibility(clien
     assert response.status_code == 200
     if reader == "verify":
         assert response.json()["formatted_row"]["expected_local_id"] is None
+        assert response.json()["formatted_row"]["local_port"] == ""
     else:
         assert _rows(response) == []
     assert source_cache.read(subject, Resource.CABLES, SERVER_KEY).snapshot_id == snapshot.snapshot_id

@@ -562,10 +562,10 @@ class TestRemotePortAliasesAreFetched:
 
         rows = _acquire_rows(device, server_key)
 
-        # The first neighbour spent the budget, so the second is not read at all.
+        # The first request times out within the budget. The second request is not made.
         assert _requested_paths(librenms_server).count("/api/v0/devices/10/ports") == 0
-        assert rows[0]["remote_port_aliases"] == ["GigabitEthernet0/1"]
-        assert len(rows) == 1
+        assert _requested_paths(librenms_server).count("/api/v0/devices/9/ports") == 1
+        assert rows == []
 
     def test_a_second_refresh_reads_the_neighbour_again(self, librenms_server, settings):
         """Each explicit refresh reads current names even when the previous read succeeded."""
@@ -654,9 +654,14 @@ class TestRemotePortAliasesAreFetched:
         librenms_server.register("/api/v0/devices/15/ports", _ports_payload(_port(100, "eth0", "eth0")))
         librenms_server.register("/api/v0/devices/9/ports", {"status": "error"}, status=404)
 
-        rows = _acquire_rows(device, server_key)
+        from netbox_librenms_plugin.acquisition.coordinator import acquire
+        from netbox_librenms_plugin.acquisition.registry import Resource
 
-        assert rows == []
+        snapshot = acquire(device, server_key=server_key, resources=[Resource.CABLES])
+        assessed = assess_cables(snapshot, subject=device)
+
+        assert assessed["links"] == []
+        assert {blocker.path for blocker in assessed["blockers"]} == {"devices/9/ports"}
 
 
 # ---------------------------------------------------------------------------

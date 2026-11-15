@@ -329,7 +329,8 @@ def test_a_manual_pick_preserves_the_assessed_identity_of_one_selected_row():
         [port_row(10, "Ethernet1", device_id=8)],
         server_key=SERVER_KEY,
     )
-    selected = assess(snapshot, subject=subject)["links"][1]
+    rows = assess(snapshot, subject=subject)["links"]
+    selected = rows[1]
     picked = make_interface(make_device("picker-selected-target"), "Ethernet9")
     snapshot_key = source_cache.snapshot_key(subject, Resource.CABLES, SERVER_KEY)
     user_id = 123
@@ -339,11 +340,12 @@ def test_a_manual_pick_preserves_the_assessed_identity_of_one_selected_row():
         timeout=300,
     )
 
-    overlaid, applied = apply_cable_manual_picks(cache, snapshot_key, snapshot.snapshot_id, user_id, [selected])
+    overlaid, applied = apply_cable_manual_picks(cache, snapshot_key, snapshot.snapshot_id, user_id, rows)
 
     assert applied
-    assert overlaid[0]["row_id"] == selected["row_id"]
-    assert overlaid[0]["manual_remote_id"] == picked.pk
+    assert "manual_remote_id" not in overlaid[0]
+    assert overlaid[1]["row_id"] == selected["row_id"]
+    assert overlaid[1]["manual_remote_id"] == picked.pk
     assert "manual_remote_id" not in selected
 
 

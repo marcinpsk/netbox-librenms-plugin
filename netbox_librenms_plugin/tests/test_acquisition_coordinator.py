@@ -187,7 +187,13 @@ def test_resource_tabs_share_status_fragment_mutation_and_cleanup(client, settin
         server_key=SERVER_KEY,
     )
     inventory_key = sync_snapshot_key(device, "inventory", SERVER_KEY)
-    cache.set(inventory_key, module_inventory_cache_payload([], 506, None), timeout=300)
+    from netbox_librenms_plugin.serial_identity import SerialRules
+
+    cache.set(
+        inventory_key,
+        module_inventory_cache_payload([], 506, None, serial_context=SerialRules.load().for_device(device)),
+        timeout=300,
+    )
     coordinator = SyncCacheConsistency(device)
 
     status = coordinator.status(SERVER_KEY)
