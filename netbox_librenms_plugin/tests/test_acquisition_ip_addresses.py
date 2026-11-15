@@ -219,7 +219,9 @@ def test_a_port_vlan_field_the_ip_tab_does_not_read_never_blocks_it(live_librenm
     _serve(live_librenms.server, addresses=[_address("198.18.65.1")], ports=ports, device={"ip": ""})
 
     snapshot = acquire(
-        _device("acq-ip-bad-vlan"), server_key=SERVER_KEY, resources=[Resource.IP_ADDRESSES, Resource.INTERFACES]
+        plan_acquisition(
+            _device("acq-ip-bad-vlan"), server_key=SERVER_KEY, resources=[Resource.IP_ADDRESSES, Resource.INTERFACES]
+        )
     )
 
     assert snapshot.value(Resource.IP_ADDRESSES, "ports") == ports
