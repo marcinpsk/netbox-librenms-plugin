@@ -71,7 +71,7 @@ def test_web_acquisition_uses_the_authorized_plan_adapter():
         "netbox_librenms_plugin.acquisition.coordinator.acquire",
         "netbox_librenms_plugin.acquisition.coordinator.plan_acquisition",
     }
-    for path in (ACQUISITION.parent / "views").rglob("*.py"):
+    for path in (PACKAGE / "views").rglob("*.py"):
         imports = set(_imported_modules(path.read_text()))
         assert not imports & forbidden, str(path)
         tree = ast.parse(path.read_text())

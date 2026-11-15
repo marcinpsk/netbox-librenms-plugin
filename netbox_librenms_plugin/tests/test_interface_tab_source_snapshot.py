@@ -344,3 +344,31 @@ def test_a_cables_refresh_leaves_the_interfaces_snapshot_as_it_was(client, live_
     assert len(port_requests) == 2
     assert source_cache.read(device, Resource.INTERFACES, SERVER_KEY) == snapshot
     assert _status(device)["snapshot_available"]
+
+
+@pytest.mark.django_db
+def test_a_hidden_chassis_source_owner_refuses_before_interface_discovery(client, live_librenms):
+    from dcim.models import Device
+
+    from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+    from core.models import ObjectChange
+
+    from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
+    _chassis, (owner, member) = make_virtual_chassis_members("iface-hidden-source")
+    seed_mapping(owner, SERVER_KEY, own=HOST_ID)
+    user = make_user_with_perms("iface-hidden-source", [("view", Device)], constraints={"pk": member.pk})
+    client.force_login(user)
+
+    def persisted_state():
+        rows = list(Device.objects.order_by("pk").values("pk", "last_updated", "custom_field_data"))
+        return rows, ObjectChange.objects.count()
+
+    before = persisted_state()
+
+    response = _refresh(client, member)
+
+    assert response.status_code == 404
+    assert live_librenms.server.requests == []
+    assert persisted_state() == before

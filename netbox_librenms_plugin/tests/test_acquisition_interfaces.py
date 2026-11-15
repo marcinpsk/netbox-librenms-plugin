@@ -30,10 +30,10 @@ def _serve(server, *, ports=HOST_PORTS, mappings=(), os_name="linux"):
 
 
 def _acquire(subject):
-    from netbox_librenms_plugin.acquisition.coordinator import acquire
+    from netbox_librenms_plugin.acquisition.coordinator import acquire, plan_acquisition
     from netbox_librenms_plugin.acquisition.registry import Resource
 
-    return acquire(subject, server_key=SERVER_KEY, resources=[Resource.INTERFACES])
+    return acquire(plan_acquisition(subject, server_key=SERVER_KEY, resources=[Resource.INTERFACES]))
 
 
 def _blocked(snapshot):
@@ -306,7 +306,7 @@ def test_a_corrupt_oob_id_is_an_invalid_mapping_that_makes_no_request(live_libre
 def test_a_change_of_the_oob_link_alone_makes_the_snapshot_unreadable(live_librenms):
     from netbox_librenms_plugin import source_cache
     from netbox_librenms_plugin.acquisition.registry import Resource
-    from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping_row
 
     device = _device("acq-iface-oob-binding", oob={"id": "not-an-id", "type": "idrac"})
     _serve(live_librenms.server)
@@ -317,9 +317,9 @@ def test_a_change_of_the_oob_link_alone_makes_the_snapshot_unreadable(live_libre
     # A host-only snapshot stays readable while the corrupt link stays as it was.
     assert source_cache.read(device, Resource.INTERFACES, SERVER_KEY) == snapshot
 
-    # The mapping changes without a save, so no write signal clears the snapshot; the binding check does.
+    # A concurrent database update sends no signal. The binding check must reject the old snapshot.
     # The host id is the same; only the OOB link becomes valid.
-    seed_stored_mapping(device, {SERVER_KEY: {"id": HOST_ID, "oob": {"id": OOB_ID, "type": "idrac"}}})
+    seed_stored_mapping_row(device, {SERVER_KEY: {"id": HOST_ID, "oob": {"id": OOB_ID, "type": "idrac"}}})
     assert source_cache.read(device, Resource.INTERFACES, SERVER_KEY) is None
 
     snapshot = _acquire(device)
@@ -327,7 +327,7 @@ def test_a_change_of_the_oob_link_alone_makes_the_snapshot_unreadable(live_libre
     assert source_cache.read(device, Resource.INTERFACES, SERVER_KEY) == snapshot
 
     # An unlink is a change of the link too.
-    seed_stored_mapping(device, {SERVER_KEY: {"id": HOST_ID}})
+    seed_stored_mapping_row(device, {SERVER_KEY: {"id": HOST_ID}})
     assert source_cache.read(device, Resource.INTERFACES, SERVER_KEY) is None
 
 
@@ -385,7 +385,7 @@ def test_an_oob_only_owner_has_no_interfaces_to_acquire(live_librenms):
 def test_an_oob_link_change_drops_only_the_interfaces_snapshot():
     from netbox_librenms_plugin import source_cache
     from netbox_librenms_plugin.acquisition.registry import Resource
-    from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping_row
     from netbox_librenms_plugin.tests.source_snapshot_helpers import (
         seed_interfaces_snapshot,
         seed_ip_snapshot,
@@ -397,9 +397,36 @@ def test_an_oob_link_change_drops_only_the_interfaces_snapshot():
     seed_ip_snapshot(device, [])
     seed_source_snapshot(device, Resource.VLANS, SERVER_KEY, vlans=[])
 
-    # The mapping changes without a save, so no write signal clears a snapshot; only the bindings decide.
-    seed_stored_mapping(device, {SERVER_KEY: {"id": HOST_ID, "oob": {"id": OOB_ID, "type": "idrac"}}})
+    # A concurrent database update sends no signal. Only the source bindings decide.
+    seed_stored_mapping_row(device, {SERVER_KEY: {"id": HOST_ID, "oob": {"id": OOB_ID, "type": "idrac"}}})
 
     assert source_cache.read(device, Resource.INTERFACES, SERVER_KEY) is None
     assert source_cache.read(device, Resource.IP_ADDRESSES, SERVER_KEY) is not None
     assert source_cache.read(device, Resource.VLANS, SERVER_KEY) is not None
+
+
+@pytest.mark.django_db
+def test_an_interface_snapshot_keeps_the_cached_host_identity_binding(live_librenms):
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin import source_cache
+    from netbox_librenms_plugin.acquisition.registry import Resource
+    from netbox_librenms_plugin.librenms_api import librenms_id_cache_key
+    from netbox_librenms_plugin.server_mappings import read_mapping
+    from netbox_librenms_plugin.tests.conftest import make_device
+
+    device = make_device("iface-cached-source")
+    identity_key = librenms_id_cache_key(device, SERVER_KEY)
+    cache.set(identity_key, HOST_ID, 60)
+    _serve(live_librenms.server)
+
+    snapshot = _acquire(device)
+
+    assert snapshot.resources[Resource.INTERFACES].host.librenms_id == HOST_ID
+    assert source_cache.store(device, Resource.INTERFACES, snapshot)
+    assert source_cache.read(device, Resource.INTERFACES, SERVER_KEY) == snapshot
+    device.refresh_from_db()
+    assert read_mapping(device).own_id(SERVER_KEY) is None
+    assert cache.get(identity_key) == HOST_ID
+    cache.delete(identity_key)
+    assert source_cache.read(device, Resource.INTERFACES, SERVER_KEY) is None
