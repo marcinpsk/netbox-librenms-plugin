@@ -112,7 +112,6 @@ def offered_token(response):
     return response.context["token"]
 
 
-
 def message_texts(response):
     """Return the texts of the messages that a test client response queued."""
     return [str(message) for message in response.wsgi_request._messages]

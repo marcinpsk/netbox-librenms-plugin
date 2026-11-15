@@ -807,9 +807,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         if self.librenms_id is None:
             source_cache.delete_planned(plan)
             coordinator.mark_refresh_failure(SyncTab.MODULES, server_key, actor_id=request_actor_id(request))
-            messages.error(
-                request, self.not_linked_message(server_key)
-            )
+            messages.error(request, self.not_linked_message(server_key))
             return self.render_sync_partial(request, obj, server_key, {"module_sync": empty})
         result = source_cache.refresh(request, plan)
         if result.error is not None:

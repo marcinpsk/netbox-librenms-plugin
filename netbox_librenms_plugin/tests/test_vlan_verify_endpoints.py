@@ -427,14 +427,13 @@ class TestSaveVlanGroupOverridesBranches:
         from django.core.cache import cache
         from netbox_librenms_plugin.mapping_owner import NO_MASTER_MESSAGE
         from netbox_librenms_plugin.tests.conftest import make_superuser, make_virtual_chassis_members
-        from netbox_librenms_plugin.librenms_api import librenms_id_cache_key
         from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_interfaces_snapshot
         from netbox_librenms_plugin.views.object_sync.devices import SaveVlanGroupOverridesView
 
         chassis, (device, _sibling) = make_virtual_chassis_members("vlan-overrides-vc")
-        cache.set(librenms_id_cache_key(device, SERVER_KEY), 501, 300)
+        cache.set(f"librenms_device_id_{device._meta.model_name}_{device.pk}_{SERVER_KEY}", 501, 300)
         view = SaveVlanGroupOverridesView()
-        seed_interfaces_snapshot(device, [], server_key=SERVER_KEY)
+        seed_interfaces_snapshot(device, [], server_key=SERVER_KEY, source_id=501)
         chassis.master = None
         chassis.save()
         client.force_login(make_superuser("vlan-overrides-vc-user"))

@@ -1191,29 +1191,19 @@ def test_hidden_source_owner_refuses_cached_render_verify_and_write(client, ui, 
     assert "No cached inventory data. Please refresh modules first." in messages_of(response)
 
 
-def test_cache_only_source_can_authorize_a_permitted_module_write(ui, c8300):
-    from django.core.cache import cache
-    from extras.models import CustomField
+def test_an_unmapped_source_cannot_authorize_a_permitted_module_write(ui, c8300):
 
-    from netbox_librenms_plugin.librenms_api import librenms_id_cache_key
-    from netbox_librenms_plugin.server_mappings import read_mapping, release_server
-    from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
+    from netbox_librenms_plugin.server_mappings import read_mapping
 
     device, entities = c8300
-    source_id = read_mapping(device).own_id(SERVER_KEY)
-    assert source_id is not None
-    apply_mapping_change(device, release_server(device, SERVER_KEY, clear_preference=True))
-    device.save()
-    CustomField.objects.filter(name="librenms_id").delete()
-    device.refresh_from_db()
-    assert not CustomField.objects.filter(name="librenms_id").exists()
-    assert read_mapping(device).own_id(SERVER_KEY) is None
-    cache.set(librenms_id_cache_key(device, SERVER_KEY), source_id, timeout=60)
     action, fields = _install_form(ui, device, entities)
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping_row
+
+    seed_mapping_row(device, type(device)())
     post(ui, action, fields)
     from dcim.models import Module
 
-    assert Module.objects.filter(device=device).count() == 1
+    assert Module.objects.filter(device=device).count() == 0
     device.refresh_from_db()
     assert read_mapping(device).own_id(SERVER_KEY) is None
 

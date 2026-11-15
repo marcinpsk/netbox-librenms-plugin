@@ -420,17 +420,18 @@ def test_an_oob_link_change_drops_only_the_interfaces_snapshot():
 
 
 @pytest.mark.django_db
-def test_an_interface_snapshot_keeps_the_cached_host_identity_binding(live_librenms):
+def test_an_interface_snapshot_keeps_the_stored_host_identity_binding(live_librenms):
     from django.core.cache import cache
 
     from netbox_librenms_plugin import source_cache
     from netbox_librenms_plugin.acquisition.registry import Resource
-    from netbox_librenms_plugin.librenms_api import librenms_id_cache_key
     from netbox_librenms_plugin.server_mappings import read_mapping
     from netbox_librenms_plugin.tests.conftest import make_device
 
-    device = make_device("iface-cached-source")
-    identity_key = librenms_id_cache_key(device, SERVER_KEY)
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_mapping_row
+
+    device = seed_mapping(make_device("iface-stored-source"), SERVER_KEY, own=HOST_ID)
+    identity_key = f"librenms_device_id_{device._meta.model_name}_{device.pk}_{SERVER_KEY}"
     cache.set(identity_key, HOST_ID, 60)
     _serve(live_librenms.server)
 
@@ -440,7 +441,7 @@ def test_an_interface_snapshot_keeps_the_cached_host_identity_binding(live_libre
     assert source_cache.store(device, Resource.INTERFACES, snapshot)
     assert source_cache.read(device, Resource.INTERFACES, SERVER_KEY) == snapshot
     device.refresh_from_db()
-    assert read_mapping(device).own_id(SERVER_KEY) is None
+    assert read_mapping(device).own_id(SERVER_KEY) == HOST_ID
     assert cache.get(identity_key) == HOST_ID
-    cache.delete(identity_key)
+    seed_mapping_row(device, type(device)())
     assert source_cache.read(device, Resource.INTERFACES, SERVER_KEY) is None
