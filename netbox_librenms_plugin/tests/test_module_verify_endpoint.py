@@ -463,10 +463,11 @@ def test_a_refresh_whose_page_leaves_its_chassis_for_a_refused_snapshot_reports_
     assert response.status_code == 200
     assert response.context["module_sync"]["table"] is None
     assert "Inventory data refreshed successfully" not in response.content.decode()
-    # The refresh records the failure for the page's final scope; the chassis scope keeps its new snapshot.
+    # The failure belongs to the planned owner. The page's new scope stays unchanged.
     page.refresh_from_db()
-    state = cache.get(SyncCacheConsistency(page).state_key(SyncTab.MODULES, SERVER_KEY))
+    state = cache.get(SyncCacheConsistency(owner).state_key(SyncTab.MODULES, SERVER_KEY))
     assert state["state"] == SyncTabState.REFRESH_FAILED.value
+    assert cache.get(SyncCacheConsistency(page).state_key(SyncTab.MODULES, SERVER_KEY)) is None
 
 
 @pytest.mark.django_db
@@ -512,8 +513,9 @@ def test_a_member_that_leaves_its_chassis_in_the_database_during_the_refresh_get
     assert response.context["module_sync"]["table"] is None
     assert "Inventory data refreshed successfully" not in response.content.decode()
     standalone = Device.objects.get(pk=page.pk)
-    state = cache.get(SyncCacheConsistency(standalone).state_key(SyncTab.MODULES, SERVER_KEY))
+    state = cache.get(SyncCacheConsistency(owner).state_key(SyncTab.MODULES, SERVER_KEY))
     assert state["state"] == SyncTabState.REFRESH_FAILED.value
+    assert cache.get(SyncCacheConsistency(standalone).state_key(SyncTab.MODULES, SERVER_KEY)) is None
 
 
 @pytest.mark.django_db
@@ -563,5 +565,6 @@ def test_a_member_that_leaves_its_chassis_after_the_table_read_gets_no_rows_of_t
     assert "data-verify-binding" not in body
     assert "Inventory data refreshed successfully" not in body
     standalone = Device.objects.get(pk=page.pk)
-    state = cache.get(SyncCacheConsistency(standalone).state_key(SyncTab.MODULES, SERVER_KEY))
+    state = cache.get(SyncCacheConsistency(owner).state_key(SyncTab.MODULES, SERVER_KEY))
     assert state["state"] == SyncTabState.REFRESH_FAILED.value
+    assert cache.get(SyncCacheConsistency(standalone).state_key(SyncTab.MODULES, SERVER_KEY)) is None

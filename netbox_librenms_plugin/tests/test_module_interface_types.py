@@ -63,7 +63,7 @@ def _render_module_tab(device, user):
     view.setup(request, pk=device.pk)
     view.cache_only = True
     context = view.get_context_data(request, device)
-    return context["table"].as_html(request)
+    return context["table"].as_html(request) if context["table"] is not None else ""
 
 
 class TestModuleTemplateInterfaceSpecs:

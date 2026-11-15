@@ -322,6 +322,7 @@ class _GrantedInventory:
     inventory: list
     index_map: dict
     policy: object
+    source: object
 
     def row(self, index):
         """Return the cached main-inventory row of a granted index."""
@@ -333,7 +334,7 @@ class _GrantedInventory:
         return item
 
 
-def _authorize_module_grant(page_device, server_key, action, token):
+def _authorize_module_grant(page_device, server_key, action, token, *, user):
     """Read the granted source and policy before a module write."""
     from dcim.models import Device
     from netbox_librenms_plugin.models import RuleConfigurationError
@@ -347,7 +348,9 @@ def _authorize_module_grant(page_device, server_key, action, token):
     except Device.DoesNotExist as exc:
         raise GrantRefused(GrantRefusal.DESTINATION) from exc
     sync_device = _get_sync_device_for_inventory(page_device, server_key)
-    snapshot = source_cache.read(sync_device, Resource.MODULES, server_key)
+    if not Device.objects.filter(pk=sync_device.pk).exists():
+        raise GrantRefused(GrantRefusal.SNAPSHOT)
+    snapshot = source_cache.read(sync_device, Resource.MODULES, server_key, user=user)
     if snapshot is None:
         raise GrantRefused(GrantRefusal.CACHE_MISSING)
     # An unusable source refuses before the policy: no ready host, or a deleted source owner.
@@ -370,8 +373,8 @@ def _authorize_module_grant(page_device, server_key, action, token):
         raise GrantRefused(GrantRefusal.SNAPSHOT) from exc
     inventory = assessed["inventory"]
     grant = read_module_grant(token, action=action, page_device_id=page_device.pk, server_key=server_key)
-    grant.check_state(inventory, policy)
-    return _GrantedInventory(grant, inventory, _inventory_index_map(inventory), policy)
+    grant.check_state(inventory, policy, source=snapshot)
+    return _GrantedInventory(grant, inventory, _inventory_index_map(inventory), policy, snapshot)
 
 
 class _SerialConflictAmbiguous(Exception):
@@ -1087,7 +1090,11 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                 serial_rules = None
                 if indexed:
                     granted = _authorize_module_grant(
-                        page_device, server_key, ACTION_INSTALL_MODULE, request.POST.get("inventory_binding")
+                        page_device,
+                        server_key,
+                        ACTION_INSTALL_MODULE,
+                        request.POST.get("inventory_binding"),
+                        user=self.request.user,
                     )
                     granted.grant.require(
                         device_id=target_device.pk,
@@ -1280,7 +1287,11 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         page_device = self.restrict_object_or_404(Device, pk=page_device.pk)
         try:
             granted = _authorize_module_grant(
-                page_device, server_key, ACTION_INSTALL_BRANCH, request.POST.get("inventory_binding")
+                page_device,
+                server_key,
+                ACTION_INSTALL_BRANCH,
+                request.POST.get("inventory_binding"),
+                user=self.request.user,
             )
             grant = granted.grant.require(
                 device_id=request.POST.get("selected_device_id", ""),
@@ -2037,7 +2048,11 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         try:
             with atomic_with_events():
                 granted = _authorize_module_grant(
-                    page_device, server_key, ACTION_INSTALL_SELECTED, request.POST.get("inventory_binding")
+                    page_device,
+                    server_key,
+                    ACTION_INSTALL_SELECTED,
+                    request.POST.get("inventory_binding"),
+                    user=self.request.user,
                 )
                 granted.grant.require(device_id=page_device.pk)
                 plan = self._granted_selection(request, granted, selected_list, page_device, server_key)
@@ -2162,7 +2177,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                     override.require(device_id=target_id, ent_index=index)
                     if override.render_mode != RENDER_PINNED:
                         raise GrantRefused(GrantRefusal.STALE)
-                    override.check_state(granted.inventory, granted.policy)
+                    override.check_state(granted.inventory, granted.policy, source=granted.source)
                 except GrantRefused:
                     refused.append(index)
                     continue
@@ -2237,7 +2252,11 @@ class UpdateModuleSerialView(
         try:
             with atomic_with_events():
                 granted = _authorize_module_grant(
-                    page_device, server_key, ACTION_UPDATE_SERIAL, request.POST.get("inventory_binding")
+                    page_device,
+                    server_key,
+                    ACTION_UPDATE_SERIAL,
+                    request.POST.get("inventory_binding"),
+                    user=self.request.user,
                 )
                 granted.grant.require(device_id=target_device.pk, ent_index=request.POST.get("ent_index", ""))
                 librenms_item = granted.row(granted.grant.ent_index)
@@ -2338,7 +2357,11 @@ class UpdateModuleInterfaceView(
             # One transaction: a lock conflict in the bind or the adoption rolls back both.
             with transaction.atomic():
                 granted = _authorize_module_grant(
-                    page_device, server_key, ACTION_UPDATE_INTERFACE, request.POST.get("inventory_binding")
+                    page_device,
+                    server_key,
+                    ACTION_UPDATE_INTERFACE,
+                    request.POST.get("inventory_binding"),
+                    user=self.request.user,
                 )
                 granted.grant.require(device_id=target_device.pk, ent_index=request.POST.get("ent_index", ""))
                 scope = lock_module_write(
@@ -2801,7 +2824,11 @@ class ModuleMismatchPreviewView(
         action_target = installed_module_target(installed_module.pk, installed_module.module_bay_id)
         try:
             granted = _authorize_module_grant(
-                page_device, server_key, ACTION_MISMATCH_PREVIEW, request.GET.get("inventory_binding")
+                page_device,
+                server_key,
+                ACTION_MISMATCH_PREVIEW,
+                request.GET.get("inventory_binding"),
+                user=self.request.user,
             )
             grant = granted.grant.require(
                 device_id=target_device.pk, ent_index=ent_index_int, action_target=action_target
@@ -3024,7 +3051,11 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
             vc_adjustments = {"renamed": 0, "adopted": 0, "removed": 0, "skipped": 0}
             with atomic_with_events():
                 granted = _authorize_module_grant(
-                    page_device, server_key, ACTION_REPLACE_MODULE, request.POST.get("inventory_binding")
+                    page_device,
+                    server_key,
+                    ACTION_REPLACE_MODULE,
+                    request.POST.get("inventory_binding"),
+                    user=self.request.user,
                 )
                 granted.grant.require(device_id=target_device.pk, ent_index=request.POST.get("ent_index", ""))
                 librenms_item = granted.row(granted.grant.ent_index)
@@ -4047,7 +4078,9 @@ class MarkBuiltInView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libr
             acquire_advisory_transaction_lock(
                 f"netbox-librenms-plugin:built-in-rule:{target.device_type.manufacturer_id}"
             )
-        granted = _authorize_module_grant(page_device, server_key, ACTION_MARK_BUILT_IN, data.get("inventory_binding"))
+        granted = _authorize_module_grant(
+            page_device, server_key, ACTION_MARK_BUILT_IN, data.get("inventory_binding"), user=self.request.user
+        )
         grant = granted.grant.require(device_id=target.pk, ent_index=data.get("ent_index", ""))
         member = granted.policy.member(target.pk)
         device_type = member.device_type

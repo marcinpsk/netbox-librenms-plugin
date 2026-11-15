@@ -466,9 +466,7 @@ def test_module_cache_fragment_does_not_discover_a_missing_host_id(client, setti
         "cache-only-module",
         librenms_cf={"primary": {"oob": {"id": 6405}}},
     )
-    seed_mapping(device, "primary", own=9999, save=False)
-    seed_modules_snapshot(device, [], oob_inventory=[], server_key="primary")
-    seed_stored_mapping(device, {"primary": {"oob": {"id": 6405}}})
+    seed_modules_snapshot(device, [], oob_inventory=[], server_key="primary", source_id=9999)
     client.force_login(make_superuser("cache-only-module-user"))
     url = reverse(
         "plugins:netbox_librenms_plugin:sync_cache_fragment",

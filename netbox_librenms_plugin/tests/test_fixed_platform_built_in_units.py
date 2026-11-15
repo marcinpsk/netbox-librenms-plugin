@@ -5,6 +5,9 @@ The system board reports itself as "Slot 1" (ioModule), "MDA 1/1" (mdaModule, be
 (cpmModule), all with the chassis part number and serial. The transceiver in port 1/1/c1 sits below MDA 1/1.
 """
 
+from netbox_librenms_plugin import source_cache
+from netbox_librenms_plugin.acquisition.registry import Resource
+
 from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_mapped_modules
 
 from html.parser import HTMLParser
@@ -679,7 +682,9 @@ def signed_mark_query(device, index):
         action=ACTION_MARK_BUILT_IN,
         ent_index=index,
         action_target={"device_type_id": device.device_type_id},
-        inventory_digest=module_inventory_snapshot_digest(module_inventory(device, SERVER_KEY)),
+        inventory_digest=module_inventory_snapshot_digest(
+            module_inventory(device, SERVER_KEY), source=source_cache.read(device, Resource.MODULES, SERVER_KEY)
+        ),
         policy_fingerprint=load_inventory_policy(device.pk).fingerprint,
         render_mode=RENDER_ATTRIBUTED,
     )

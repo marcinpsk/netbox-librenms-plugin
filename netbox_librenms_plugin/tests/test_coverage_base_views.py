@@ -1,5 +1,7 @@
 """Integration tests for the base cable, interface, and IP address views."""
 
+from netbox_librenms_plugin.acquisition.coordinator import plan_acquisition
+
 import pytest
 
 from netbox_librenms_plugin.acquisition.coordinator import plan_acquisition

@@ -1,5 +1,7 @@
 """Cable acquisition keeps each mapping and neighbour failure separate."""
 
+from netbox_librenms_plugin.acquisition.coordinator import plan_acquisition
+
 import pytest
 
 from netbox_librenms_plugin.acquisition.coordinator import plan_acquisition

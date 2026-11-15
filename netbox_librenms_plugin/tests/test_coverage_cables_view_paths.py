@@ -9,6 +9,8 @@ permission grants and the in-repo loopback LibreNMS, so the real ``LibreNMSAPI``
 HTTP calls.
 """
 
+from netbox_librenms_plugin.acquisition.coordinator import plan_acquisition
+
 import json
 from functools import partial
 

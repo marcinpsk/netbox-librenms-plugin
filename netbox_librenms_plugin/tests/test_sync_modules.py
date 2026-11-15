@@ -1,5 +1,9 @@
 """Real ORM, cache, and view tests for module synchronization."""
 
+from netbox_librenms_plugin import source_cache
+from netbox_librenms_plugin.acquisition.registry import Resource
+from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_modules_snapshot
+
 from netbox_librenms_plugin.tests.source_snapshot_helpers import transceiver_row
 
 from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_mapped_modules
@@ -224,14 +228,21 @@ def _rendered_fields(device, path_part, ent_index=None, *, user=None, server_key
     return rendered_module_form(content, path_part, ent_index)[1]
 
 
+@pytest.mark.django_db
 def test_module_inventory_snapshot_digest_is_canonical_and_content_sensitive():
     """Equivalent snapshots share a digest, while changed inventory content does not."""
+    device = make_device("canonical-digest", librenms_cf={"default": 41})
+    source = seed_modules_snapshot(device, [])
     first = [{"entPhysicalIndex": 17, "nested": {"b": 2, "a": 1}}]
     reordered = [{"nested": {"a": 1, "b": 2}, "entPhysicalIndex": 17}]
     replacement = [{"entPhysicalIndex": 18, "nested": {"b": 2, "a": 1}}]
 
-    assert module_inventory_snapshot_digest(first) == module_inventory_snapshot_digest(reordered)
-    assert module_inventory_snapshot_digest(first) != module_inventory_snapshot_digest(replacement)
+    assert module_inventory_snapshot_digest(first, source=source) == module_inventory_snapshot_digest(
+        reordered, source=source
+    )
+    assert module_inventory_snapshot_digest(first, source=source) != module_inventory_snapshot_digest(
+        replacement, source=source
+    )
 
 
 def _inventory_item(index, model, name, *, parent=0, serial="", phys_class="module", **extra):
@@ -318,7 +329,7 @@ class TestInventoryCacheContract:
         )
         token = _rendered_fields(device, "update-module-serial", 77)["inventory_binding"]
 
-        granted = _authorize_module_grant(device, "default", ACTION_UPDATE_SERIAL, token)
+        granted = _authorize_module_grant(device, "default", ACTION_UPDATE_SERIAL, token, user=make_request().user)
         row = granted.grant.require(
             device_id=device.pk, ent_index="77", action_target=installed_module_target(module.pk, module.module_bay_id)
         )
@@ -346,7 +357,7 @@ class TestInventoryCacheContract:
         item = _inventory_item(77, "CARD", "Slot 1", serial="NEW")
         seed_inventory(device, [item], librenms_id=772)
         token = _rendered_fields(device, "update-module-serial", 77)["inventory_binding"]
-        granted = _authorize_module_grant(device, "default", ACTION_UPDATE_SERIAL, token)
+        granted = _authorize_module_grant(device, "default", ACTION_UPDATE_SERIAL, token, user=make_request().user)
 
         with pytest.raises(GrantRefused) as excinfo:
             granted.grant.require(
@@ -367,7 +378,7 @@ class TestInventoryCacheContract:
         seed_inventory(device, [_inventory_item(77, "CARD", "Te1/1/1")], librenms_id=555)
 
         with pytest.raises(GrantRefused) as excinfo:
-            _authorize_module_grant(device, "default", ACTION_UPDATE_SERIAL, "any-token")
+            _authorize_module_grant(device, "default", ACTION_UPDATE_SERIAL, "any-token", user=make_request().user)
 
         assert excinfo.value.refusal is GrantRefusal.CACHE_MISSING
 
@@ -895,7 +906,9 @@ class TestInstallAndUpdateViews:
             device_id=device.pk,
             server_key="default",
             action=ACTION_INSTALL_MODULE,
-            inventory_digest=module_inventory_snapshot_digest(inventory),
+            inventory_digest=module_inventory_snapshot_digest(
+                inventory, source=source_cache.read(device, Resource.MODULES, "default")
+            ),
             policy_fingerprint=load_inventory_policy(device.pk).fingerprint,
             render_mode=RENDER_ATTRIBUTED,
             ent_index=520,

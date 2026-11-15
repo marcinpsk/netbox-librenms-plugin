@@ -5,6 +5,8 @@ These tests never touch the database or network; they only inspect class
 hierarchies and attribute presence.
 """
 
+from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_modules_snapshot
+
 from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_mapped_modules
 
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
@@ -2044,9 +2046,10 @@ class TestIdentityIsNotGatedOnBayMapping:
 
         request = make_request("get", {}, user=make_superuser(f"{prefix}-user"), path="/x/")
         view = make_view(DeviceModuleTableView, request, librenms_api=LibreNMSAPI(server_key="default"))
-        context = view._build_context(request, device, inventory, server_key="default")
+        source = seed_modules_snapshot(device, inventory)
+        context = view._build_context(request, device, inventory, server_key="default", source=source)
         assert context["table"].server_key == "default"
-        digest = module_inventory_snapshot_digest(inventory)
+        digest = module_inventory_snapshot_digest(inventory, source=source)
         fingerprint = load_inventory_policy(device.pk).fingerprint
         assert context["table"].attrs["data-selection-snapshot"] == f"{digest}:{fingerprint}"
         manifest = read_module_grant(

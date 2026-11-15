@@ -92,6 +92,7 @@ def read_module_assessment(subject, server_key, snapshot=None, *, serial_context
     return {
         **assess(snapshot, subject=subject, serial_context=serial_context),
         "snapshot_id": snapshot.snapshot_id,
+        "source_snapshot": snapshot,
         "last_fetched": snapshot.finished_at,
     }
 
@@ -820,26 +821,24 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         if server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
             return self.render_sync_partial(request, obj, self.active_server_key, {"module_sync": empty})
-        owner = self._get_sync_device(obj, server_key=server_key)
+        plan = source_cache.authorized_plan(request, obj, server_key=server_key, resources=[Resource.MODULES])
+        coordinator = SyncCacheConsistency.for_refresh(plan)
+        owner = plan.owner(Resource.MODULES)
         self.librenms_id, lookup_error = self.resolve_librenms_id(owner)
         if self.librenms_id is None:
-            source_cache.delete(obj, Resource.MODULES, server_key)
-            SyncCacheConsistency(obj).mark_refresh_failure(
-                SyncTab.MODULES, server_key, actor_id=request_actor_id(request)
-            )
+            source_cache.delete_planned(plan)
+            coordinator.mark_refresh_failure(SyncTab.MODULES, server_key, actor_id=request_actor_id(request))
             messages.error(
                 request, self.scoped_lookup_message(lookup_error) if lookup_error else "Device not found in LibreNMS."
             )
             return self.render_sync_partial(request, obj, server_key, {"module_sync": empty})
-        result = source_cache.refresh(request, obj, Resource.MODULES, server_key)
+        result = source_cache.refresh(request, plan)
         if result.error is not None:
-            SyncCacheConsistency(obj).mark_refresh_failure(
-                SyncTab.MODULES, server_key, actor_id=request_actor_id(request)
-            )
+            coordinator.mark_refresh_failure(SyncTab.MODULES, server_key, actor_id=request_actor_id(request))
             messages.error(request, result.error)
             return self.render_sync_partial(request, obj, server_key, {"module_sync": empty})
         # Publish with the write: a later failure, such as the TTL read, must not leave the old state.
-        snapshot_cached = SyncCacheConsistency(obj).mark_refresh_outcome(
+        snapshot_cached = coordinator.mark_refresh_outcome(
             SyncTab.MODULES, server_key, actor_id=request_actor_id(request)
         )
         # The response reads the page and its chassis once (the policy) and the snapshot once; the table and
@@ -858,9 +857,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         ):
             # No snapshot of the page's scope, or the chassis changed after the read: show nothing of it.
             if snapshot_cached:
-                SyncCacheConsistency(final).mark_refresh_failure(
-                    SyncTab.MODULES, server_key, actor_id=request_actor_id(request)
-                )
+                coordinator.mark_refresh_failure(SyncTab.MODULES, server_key, actor_id=request_actor_id(request))
                 snapshot_cached = False
             page, context = final, {"object": final, "table": None, "cache_expiry": None, "server_key": server_key}
         # A rule or numbering refusal comes after a complete read: the snapshot and the ready state stay.
@@ -916,6 +913,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         try:
             if policy is None:
                 policy = load_inventory_policy(obj.pk)
+            if snapshot is None:
+                snapshot = source_cache.read(obj, Resource.MODULES, scoped_server, user=request.user)
+            if snapshot is None or not source_cache.snapshot_visible(request.user, snapshot, Resource.MODULES):
+                return None, None, None, None, empty
             assessed = read_module_assessment(
                 obj, scoped_server, snapshot, serial_context=policy.chassis_serial_context()
             )
@@ -932,7 +933,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         if "host" in assessed["blocked"]:
             return None, None, None, None, empty
         owner = self._get_sync_device(obj, server_key=scoped_server)
-        return scoped_server, owner, assessed["inventory"], policy, None
+        return scoped_server, owner, assessed, policy, None
 
     def get_context_data(self, request, obj, server_key=None, *, snapshot=None, policy=None):
         """
@@ -948,7 +949,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # Pass the resolved server explicitly (like post() does) so _active_server_key keys on it
         # rather than falling back to self.librenms_api.server_key.
         return self._build_context(
-            request, obj, inventory, server_key=scoped_server, sync_device=sync_device, policy=policy
+            request,
+            obj,
+            inventory["inventory"],
+            server_key=scoped_server,
+            sync_device=sync_device,
+            policy=policy,
+            source=inventory["source_snapshot"],
         )
 
     def get_verify_context_data(self, request, page_device, member, server_key=None):
@@ -968,7 +975,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         return self._build_context(
             request,
             page_device,
-            inventory,
+            inventory["inventory"],
+            source=inventory["source_snapshot"],
             server_key=scoped_server,
             sync_device=sync_device,
             policy=policy,
@@ -983,6 +991,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         server_key=None,
         sync_device=None,
         *,
+        source,
         policy=None,
         pin_to=None,
     ):
@@ -993,6 +1002,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             request: The current request.
             obj (Device): The device whose Modules page shows the table.
             inventory_data (list[dict]): The inventory snapshot.
+            source (SourceSnapshot): The source that produced this assessment.
             server_key (str | None): The LibreNMS server of the snapshot.
             sync_device (Device | None): The device that owns the cached snapshot.
             policy (InventoryPolicy | None): The policy inputs of *obj*, loaded here when None.
@@ -1013,7 +1023,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         from netbox_librenms_plugin.models import RuleConfigurationError
 
         try:
-            return self._build_table_context(request, obj, inventory_data, sync_device, policy=policy, pin_to=pin_to)
+            return self._build_table_context(
+                request, obj, inventory_data, sync_device, source=source, policy=policy, pin_to=pin_to
+            )
         except Device.DoesNotExist:
             return {
                 "table": None,
@@ -1042,7 +1054,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 "vc_numbering_error": str(exc),
             }
 
-    def _build_table_context(self, request, obj, inventory_data, sync_device, *, policy, pin_to):
+    def _build_table_context(self, request, obj, inventory_data, sync_device, *, source, policy, pin_to):
         """Build the module table context of ``_build_context``; raise RuleConfigurationError for a broken rule."""
         if policy is None:
             policy = load_inventory_policy(obj.pk)
@@ -1053,7 +1065,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # The collector reads devices from the policy load, so the fingerprint covers what it read.
         self._inventory_policy = policy
         owner = policy.page_device if pin_to is None else policy.member(pin_to.pk)
-        inventory_snapshot_digest = module_inventory_snapshot_digest(inventory_data)
+        inventory_snapshot_digest = module_inventory_snapshot_digest(inventory_data, source=source)
         # One index on two rows makes every indexed action ambiguous, so the table issues no grant.
         index_ambiguous = bool(duplicate_inventory_indices(inventory_data))
         # Build a lookup of all inventory items by index for parent resolution

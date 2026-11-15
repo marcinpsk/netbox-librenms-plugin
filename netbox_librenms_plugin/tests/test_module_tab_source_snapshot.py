@@ -1,5 +1,7 @@
 """The modules tab and its actions assess one bound source snapshot on each read."""
 
+from netbox_librenms_plugin.acquisition.coordinator import plan_acquisition
+
 import pytest
 from django.contrib import messages
 from django.urls import reverse
@@ -10,8 +12,9 @@ from netbox_librenms_plugin.acquisition.resources import blocked_scopes
 from netbox_librenms_plugin.acquisition.snapshot import SourceSnapshot
 from netbox_librenms_plugin.constants import MAIN_INVENTORY_SOURCE, OOB_INVENTORY_SOURCE
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency
+from netbox_librenms_plugin.tests.view_test_helpers import make_request
 from netbox_librenms_plugin.tests.conftest import make_superuser
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping_row
 from netbox_librenms_plugin.tests.source_snapshot_helpers import module_serial_context
 from netbox_librenms_plugin.tests.test_acquisition_modules import HOST_ID, OOB_ID, device, serve
 
@@ -127,11 +130,8 @@ def test_oob_binding_changes_refuse_every_reader_without_deleting_the_snapshot(c
     original = cache.get(key)
     assert original is not None
     assert source_cache.read(subject, Resource.MODULES, "default") is not None
-    seed_stored_mapping(subject, {"default": {"id": HOST_ID, "oob": {"id": OOB_ID, "type": "idrac"}}})
+    seed_stored_mapping_row(subject, {"default": {"id": HOST_ID, "oob": {"id": OOB_ID, "type": "idrac"}}})
     assert source_cache.read(subject, Resource.MODULES, "default") is None
-    from dcim.models import Device
-
-    Device.objects.filter(pk=subject.pk).update(custom_field_data=subject.custom_field_data)
     assert fragment(client, subject).status_code == 404
     assert cache.get(key) == original
 
@@ -329,7 +329,7 @@ def test_module_grant_reports_an_unusable_source_as_a_snapshot_refusal(
     else:
         subject = owner = device("module-grant-source-refusal")
     serve(live_librenms.server, inventory=INVENTORY, transceivers=[])
-    snapshot = acquire(subject, server_key="default", resources=[Resource.MODULES])
+    snapshot = acquire(plan_acquisition(subject, server_key="default", resources=[Resource.MODULES]))
     assert snapshot.resources[Resource.MODULES].owner.pk == owner.pk
     assert source_cache.store(subject, Resource.MODULES, snapshot)
     if broken_rule:
@@ -342,8 +342,8 @@ def test_module_grant_reports_an_unusable_source_as_a_snapshot_refusal(
     elif failure == "missing-member-owner":
         read = source_cache.read
 
-        def read_then_delete_owner(subject_, resource, server_key):
-            found = read(subject_, resource, server_key)
+        def read_then_delete_owner(subject_, resource, server_key, **kwargs):
+            found = read(subject_, resource, server_key, **kwargs)
             # The owner goes in the window between the cache read and the policy read.
             Device.objects.filter(pk=owner.pk).delete()
             return found
@@ -351,12 +351,12 @@ def test_module_grant_reports_an_unusable_source_as_a_snapshot_refusal(
         monkeypatch.setattr(source_cache, "read", read_then_delete_owner)
     else:
         live_librenms.server.register(f"/api/v0/inventory/{HOST_ID}/all", {"status": "error"}, status=500)
-        snapshot = acquire(subject, server_key="default", resources=[Resource.MODULES])
+        snapshot = acquire(plan_acquisition(subject, server_key="default", resources=[Resource.MODULES]))
         # Inject a stored source with no ready host at the cache transport boundary.
         cache.set(source_cache.snapshot_key(subject, Resource.MODULES, "default"), snapshot.to_payload(), 300)
 
     with pytest.raises(GrantRefused) as refusal:
-        _authorize_module_grant(subject, "default", ACTION_INSTALL_SELECTED, None)
+        _authorize_module_grant(subject, "default", ACTION_INSTALL_SELECTED, None, user=make_request().user)
 
     assert refusal.value.refusal is GrantRefusal.SNAPSHOT
 
@@ -373,8 +373,8 @@ def test_cached_get_renders_no_inventory_when_the_owner_is_deleted_after_the_cac
     assert refresh(client, subject).status_code == 200
     read = source_cache.read
 
-    def read_then_delete_owner(subject_, resource, server_key):
-        snapshot = read(subject_, resource, server_key)
+    def read_then_delete_owner(subject_, resource, server_key, **kwargs):
+        snapshot = read(subject_, resource, server_key, **kwargs)
         # Delete the owner in the window between the cache read and the assessment.
         if resource is Resource.MODULES and snapshot is not None:
             Device.objects.filter(pk=snapshot.resources[resource].owner.pk).delete()
@@ -453,7 +453,7 @@ def _read_inventory_indices(subject):
     view.cache_only = True
     _server, _owner, inventory, _policy, empty = view._read_render_inventory(request, subject, "default")
     assert empty is None, empty
-    return [item["entPhysicalIndex"] for item in inventory]
+    return [item["entPhysicalIndex"] for item in inventory["inventory"]]
 
 
 @pytest.mark.django_db
@@ -515,7 +515,7 @@ def test_a_member_page_merges_transceivers_under_the_serial_rules_of_the_chassis
         ports=[{"port_id": 42, "ifName": "xe-0/0/0"}],
     )
     assert source_cache.store(
-        member, Resource.MODULES, acquire(member, server_key="default", resources=[Resource.MODULES])
+        member, Resource.MODULES, acquire(plan_acquisition(member, server_key="default", resources=[Resource.MODULES]))
     )
 
     assert _read_inventory_indices(member) == [300]
@@ -534,8 +534,8 @@ def test_refresh_does_not_report_success_when_its_source_owner_is_deleted(client
     read = source_cache.read
     deleted = []
 
-    def read_then_delete_owner(subject_, resource, server_key):
-        snapshot = read(subject_, resource, server_key)
+    def read_then_delete_owner(subject_, resource, server_key, **kwargs):
+        snapshot = read(subject_, resource, server_key, **kwargs)
         if resource is Resource.MODULES and snapshot is not None and not deleted:
             deleted.append(owner.pk)
             Device.objects.filter(pk=owner.pk).delete()

@@ -1,5 +1,7 @@
 """Interface acquisition runs without a request and records what LibreNMS answered, over the local HTTP stub."""
 
+from netbox_librenms_plugin.acquisition.coordinator import plan_acquisition
+
 import pytest
 
 SERVER_KEY = "default"
