@@ -350,6 +350,7 @@ def test_a_cables_refresh_leaves_the_interfaces_snapshot_as_it_was(client, live_
 def test_a_hidden_chassis_source_owner_refuses_before_interface_discovery(client, live_librenms):
     from dcim.models import Device
 
+    from netbox_librenms_plugin.server_mappings import read_mappings
     from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
     from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
     from core.models import ObjectChange
@@ -362,7 +363,7 @@ def test_a_hidden_chassis_source_owner_refuses_before_interface_discovery(client
     client.force_login(user)
 
     def persisted_state():
-        rows = list(Device.objects.order_by("pk").values("pk", "last_updated", "custom_field_data"))
+        rows = read_mappings(Device.objects.order_by("pk"), fields=("pk", "last_updated"))
         return rows, ObjectChange.objects.count()
 
     before = persisted_state()
