@@ -345,7 +345,7 @@ class TestTheVerifyPathAgrees:
         from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
 
         configure_default_librenms_server(settings)
-        device = make_device("member-badge-verify")
+        device = seed_mapping(make_device("member-badge-verify"), "default", own=501)
         interface = make_interface(device, "ae0")
         seed_mapping(interface, SERVER_KEY, own=10, save=False)
         interface.save()

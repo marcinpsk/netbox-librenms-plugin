@@ -2,6 +2,8 @@
 
 import pytest
 
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+
 from netbox_librenms_plugin.interface_relationships import resolve_port_relationships
 from netbox_librenms_plugin.tests.conftest import (
     name_rules,
@@ -149,10 +151,9 @@ def test_inline_parent_sync_promotes_a_physical_child_to_virtual(settings):
     """Prepare the source type before NetBox validates a parent relationship."""
     configure_default_librenms_server(settings)
 
-    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
-    device = make_device("parent-type-promotion")
+    device = seed_mapping(make_device("parent-type-promotion"), "default", own=501)
     child = make_interface(device, "bond0.110", iface_type="1000base-t")
     parent = make_interface(device, "bond0")
     for interface, port_id in ((child, 102), (parent, 101)):
@@ -182,10 +183,9 @@ def test_inline_parent_sync_preserves_a_virtual_role_and_its_members(role, setti
     """Reject a parent edge instead of silently replacing a LAG or bridge role."""
     configure_default_librenms_server(settings)
 
-    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
-    device = make_device(f"parent-{role}-preservation")
+    device = seed_mapping(make_device(f"parent-{role}-preservation"), "default", own=501)
     child = make_interface(device, f"target-{role}", iface_type=role)
     role_member = make_interface(device, "nic0")
     setattr(role_member, role, child)
@@ -218,13 +218,12 @@ def test_inline_lag_sync_does_not_replace_a_parent_child_role(settings):
     configure_default_librenms_server(settings)
 
     from netbox_librenms_plugin.models import PortStackLagPattern
-    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
     from netbox_librenms_plugin.views.sync.interfaces import (
         SyncInterfaceLagView,
         SyncInterfaceParentView,
     )
 
-    device = make_device("lag-target-parent-preservation")
+    device = seed_mapping(make_device("lag-target-parent-preservation"), "default", own=501)
     target = make_interface(device, "bond0.110", iface_type="1000base-t")
     parent = make_interface(device, "bond0")
     member = make_interface(device, "nic0")
@@ -279,10 +278,10 @@ def test_inline_lag_sync_rejects_cross_member_parent_on_netbox_44(monkeypatch, s
     from dcim.models import Interface
 
     from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
-    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
 
     _virtual_chassis, (parent_device, target_device) = make_virtual_chassis_members("lag-target-cross-member-parent")
+    seed_mapping(parent_device, "default", own=501)
     parent = make_interface(parent_device, "bond0")
     target = make_interface(target_device, "bond0.110", iface_type="virtual")
     target.parent = parent
@@ -345,10 +344,9 @@ def test_inline_bridge_sync_sets_the_bridge_relationship(settings):
     """Apply a bridge edge through the same inline flow as LAG and parent edges."""
     configure_default_librenms_server(settings)
 
-    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceBridgeView
 
-    device = make_device("inline-bridge-sync")
+    device = seed_mapping(make_device("inline-bridge-sync"), "default", own=501)
     member = make_interface(device, "nic0")
     bridge = make_interface(device, "vmbr0", iface_type="virtual")
     for interface, port_id in ((member, 103), (bridge, 100)):
@@ -381,10 +379,10 @@ def test_inline_bridge_sync_accepts_cross_member_parent_on_netbox_44(monkeypatch
 
     from netbox_librenms_plugin import utils
     from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
-    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceBridgeView
 
     _virtual_chassis, (parent_device, child_device) = make_virtual_chassis_members("bridge-cross-member-parent")
+    seed_mapping(parent_device, "default", own=501)
     parent = make_interface(parent_device, "bond0", iface_type="lag")
     child = make_interface(child_device, "bond0.110", iface_type="virtual")
     child.parent = parent
@@ -446,11 +444,12 @@ def test_inline_bridge_sync_refuses_a_parent_on_another_chassis_on_netbox_44(mon
 
     from netbox_librenms_plugin import utils
     from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
-    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceBridgeView
 
     child_chassis, (child_device, _member) = make_virtual_chassis_members("bridge-other-chassis-child")
+    seed_mapping(child_device, "default", own=501)
     _parent_chassis, (parent_device,) = make_virtual_chassis_members("bridge-other-chassis-parent", count=1)
+    seed_mapping(parent_device, "default", own=501)
     parent = make_interface(parent_device, "bond0", iface_type="lag")
     child = make_interface(child_device, "bond0.110", iface_type="virtual")
     child.parent = parent
@@ -558,10 +557,10 @@ def test_inline_lag_sync_rejects_cross_member_parented_member_on_netbox_44(monke
 
     from netbox_librenms_plugin import utils
     from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
-    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
 
     _virtual_chassis, (parent_device, child_device) = make_virtual_chassis_members("lag-cross-member-parented-member")
+    seed_mapping(parent_device, "default", own=501)
     parent = make_interface(parent_device, "Ethernet1")
     child = make_interface(child_device, "Ethernet1.110", iface_type="virtual")
     child.parent = parent
@@ -617,11 +616,10 @@ def test_inline_lag_sync_rejects_cross_member_parented_member_on_netbox_44(monke
 
 def test_bulk_sync_applies_parent_and_bridge_to_the_same_interface(client, settings):
     """Keep bridge membership independent from the child interface's parent edge."""
-    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
     configure_default_librenms_server(settings)
     client.force_login(make_superuser("bulk-parent-bridge-sync-user"))
-    device = make_device("bulk-parent-bridge-sync")
+    device = seed_mapping(make_device("bulk-parent-bridge-sync"), "default", own=501)
     child = make_interface(device, "bond0.110", iface_type="1000base-t")
     parent = make_interface(device, "bond0", iface_type="lag")
     bridge = make_interface(device, "vmbr0", iface_type="virtual")
@@ -705,10 +703,9 @@ def test_inline_bridge_sync_supports_virtual_machine_interfaces(settings):
     from virtualization.models import VMInterface
 
     from netbox_librenms_plugin.tests.conftest import make_vm
-    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceBridgeView
 
-    vm = make_vm("vm-bridge-sync")
+    vm = seed_mapping(make_vm("vm-bridge-sync"), "default", own=501)
     member = VMInterface.objects.create(virtual_machine=vm, name="nic0")
     bridge = VMInterface.objects.create(virtual_machine=vm, name="vmbr0")
     for interface, port_id in ((member, 103), (bridge, 100)):

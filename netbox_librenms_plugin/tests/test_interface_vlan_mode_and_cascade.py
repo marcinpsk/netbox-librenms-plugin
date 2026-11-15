@@ -7,6 +7,8 @@ rule vendor-neutral (Juniper reports VLANs on the aggregate, other platforms on 
 """
 
 import pytest
+
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from dcim.models import Interface
 
 
@@ -17,7 +19,7 @@ def _fixture(tag, vlans=()):
     from netbox_librenms_plugin.tests.conftest import make_device, make_interface
     from netbox_librenms_plugin.views.mixins import VlanAssignmentMixin
 
-    interface = make_interface(make_device(f"vlan-mode-{tag}"), "eth0")
+    interface = make_interface(seed_mapping(make_device(f"vlan-mode-{tag}"), "default", own=501), "eth0")
     created = [VLAN.objects.create(vid=vid, name=f"VLAN-MODE-{tag}-{vid}") for vid in vlans]
     return VlanAssignmentMixin(), interface, VlanAssignmentMixin._index_vlans(created), created
 
@@ -139,7 +141,7 @@ class TestTheViewPassesTheReportedMode:
         from netbox_librenms_plugin.tests.interface_sync_post_helpers import post_interface_sync, seed_ports, sync_port
         from netbox_librenms_plugin.tests.source_snapshot_helpers import port_vlans
 
-        device = make_device("vlan-mode-view")
+        device = seed_mapping(make_device("vlan-mode-view"), "default", own=501)
         interface = make_interface(device, "Ethernet1")
         vlan = VLAN.objects.create(vid=100, name="VLAN-MODE-VIEW-100", status="active")
         configure_default_librenms_server(settings)

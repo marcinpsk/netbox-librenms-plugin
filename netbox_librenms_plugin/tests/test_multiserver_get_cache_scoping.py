@@ -50,7 +50,7 @@ class TestConfiguredServerCacheScoping:
         from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_interfaces_snapshot
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
-        device = make_device("multiserver-interface")
+        device = seed_mapping(make_device("multiserver-interface"), "production", own=22)
         make_interface(device, "Ethernet1")
         view = DeviceInterfaceTableView()
         request = _request("production")
@@ -203,7 +203,11 @@ class TestRemovedServerFailsClosed:
 
         from netbox_librenms_plugin import source_cache
         from netbox_librenms_plugin.acquisition.registry import Resource
-        from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_ip_snapshot, seed_source_snapshot
+        from netbox_librenms_plugin.tests.source_snapshot_helpers import (
+            seed_interfaces_snapshot,
+            seed_ip_snapshot,
+            seed_source_snapshot,
+        )
 
         view_class = import_string(view_path)
         device = make_device(
@@ -217,6 +221,8 @@ class TestRemovedServerFailsClosed:
         if data_type == "vlans":
             snapshot = seed_source_snapshot(device, Resource.VLANS, "removed", source_id=22, vlans=payload)
             assert source_cache.read(device, Resource.VLANS, "removed", user=request.user) == snapshot
+        elif data_type == "ports":
+            seed_interfaces_snapshot(device, payload, server_key="removed", source_id=22)
         elif data_type == "ip_addresses":
             snapshot = seed_ip_snapshot(device, payload, server_key="removed")
             assert source_cache.read(device, Resource.IP_ADDRESSES, "removed", user=request.user) == snapshot

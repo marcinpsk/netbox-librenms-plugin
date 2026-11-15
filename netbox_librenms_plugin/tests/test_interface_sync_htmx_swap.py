@@ -151,7 +151,7 @@ class TestHtmxSync:
         assert not Interface.objects.filter(device=device).exists()
 
     def test_a_virtual_machine_gets_its_own_fragment(self, client):
-        vm = make_vm("htmx-sync-vm")
+        vm = seed_mapping(make_vm("htmx-sync-vm"), "default", own=501)
         _seed(vm, _ports())
         client.force_login(make_superuser("htmx-sync-vm-user"))
 

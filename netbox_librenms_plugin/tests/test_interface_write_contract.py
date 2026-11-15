@@ -5,6 +5,8 @@ value it accepts reaches the column as-is.
 """
 
 import pytest
+
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from dcim.models import Interface
 
 from netbox_librenms_plugin.interface_rules import InterfaceRuleMatcher
@@ -200,7 +202,7 @@ class TestInterfaceNameGateModel:
         # NetBox gives both models a 64-character name today. The writer already reads the
         # concrete model so the two cannot drift; shrink one to prove the gate reads it too.
         monkeypatch.setattr(VMInterface._meta.get_field("name"), "max_length", 8)
-        vm = make_vm("vm-name-gate")
+        vm = seed_mapping(make_vm("vm-name-gate"), "default", own=501)
 
         warnings = self._post_sync(client, settings, vm, _port(ifName="E" * 20))
 
@@ -216,7 +218,7 @@ class TestInterfaceNameGateModel:
 
         from netbox_librenms_plugin.tests.conftest import make_vm
 
-        vm = make_vm("vm-name-gate-ok")
+        vm = seed_mapping(make_vm("vm-name-gate-ok"), "default", own=501)
 
         warnings = self._post_sync(client, settings, vm, _port(ifName="eth0"))
 

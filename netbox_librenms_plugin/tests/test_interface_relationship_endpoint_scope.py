@@ -89,7 +89,7 @@ def _link(client, owner, relation, port_id, related_port_id):
 
 def _lag_scenario(tag):
     """A member ``eth1`` (port 1) and an aggregate ``Po1`` (port 100) of type ``other``, which the link promotes."""
-    device = make_device(tag)
+    device = seed_mapping(make_device(tag), "default", own=501)
     member = _bound(device, "eth1", 1)
     aggregate = _bound(device, "Po1", 100)
     seed_ports(device, [sync_port(1, "eth1"), sync_port(100, "Po1", if_type="ieee8023adLag")], [port_pair(1, 100)])
@@ -159,7 +159,11 @@ def test_a_parent_or_bridge_link_that_moves_the_source_out_of_the_change_scope_s
     client, flushed_events, write_logs, relation, owner_model, interface_model
 ):
     tag = f"relationship-scope-{relation}-{owner_model._meta.model_name}"
-    owner = make_device(tag) if owner_model is Device else make_vm(tag)
+    owner = (
+        seed_mapping(make_device(tag), "default", own=501)
+        if owner_model is Device
+        else seed_mapping(make_vm(tag), "default", own=501)
+    )
     related_fields = {"type": "bridge"} if relation == "bridge" and owner_model is Device else {}
     source = _bound(owner, "eth1.100", 11)
     related_name = "eth1" if relation == "parent" else "br1"
