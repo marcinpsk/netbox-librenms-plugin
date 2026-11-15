@@ -14,6 +14,7 @@ from netbox_librenms_plugin.models import LibreNMSSettings
 from netbox_librenms_plugin.tests.conftest import (
     configure_librenms_servers,
     make_device,
+    make_interface,
     make_superuser,
     make_virtual_chassis_members,
     make_vm,
@@ -118,6 +119,15 @@ def _change_records(obj):
     ).count()
 
 
+def _apply_confirmation(client, response):
+    """Post the token of the confirmation that the editor rendered, as its plain form does."""
+    from netbox_librenms_plugin.confirmation_intent import FIELD
+
+    assert response.status_code == 200, _messages(response)
+    context = response.context
+    return client.post(context["action_url"], {"server_key": context["server_key"], FIELD: [context["token"]]})
+
+
 def _post(client, obj, **data):
     """Post to the editor directly, as a hand-made request does."""
     url = reverse("plugins:netbox_librenms_plugin:edit_server_mapping", args=[obj.pk])
@@ -147,7 +157,7 @@ def test_a_new_own_id_replaces_the_shown_one_and_keeps_the_other_servers(client,
     seed_mapping(target, "primary", own=14002, preferred=True)
     client.force_login(make_superuser("edit-replace-writer"))
 
-    response = _submit(client, target, "primary", own_id="14003")
+    response = _apply_confirmation(client, _submit(client, target, "primary", own_id="14003"))
 
     assert response.status_code == 302
     target.refresh_from_db()
@@ -163,22 +173,22 @@ def test_a_new_own_id_replaces_the_shown_one_and_keeps_the_other_servers(client,
     ("seed", "typed", "expected"),
     [
         ({"own": 14020}, {"oob_id": "14021", "oob_type": "idrac"}, {"own": 14020, "oob": 14021, "oob_type": "idrac"}),
-        (
-            {"own": 14022, "oob": 14023, "oob_type": "ilo"},
-            {"oob_id": "14024", "oob_type": "ipmi"},
-            {"own": 14022, "oob": 14024, "oob_type": "ipmi"},
-        ),
-        ({"own": 14025, "oob": 14026, "oob_type": "bmc"}, {"oob_id": ""}, {"own": 14025}),
         (None, {"oob_id": "14027", "oob_type": "oob"}, {"oob": 14027, "oob_type": "oob"}),
         (
             {"own": 14030},
             {"own_id": "14030", "oob_id": "14030", "oob_type": "drac"},
             {"own": 14030, "oob": 14030, "oob_type": "drac"},
         ),
+        ({"oob": 14033, "oob_type": "ilo"}, {"own_id": "14034"}, {"own": 14034, "oob": 14033, "oob_type": "ilo"}),
+        (
+            {"own": 14035, "oob": 14036, "oob_type": "ilo"},
+            {"oob_type": "idrac"},
+            {"own": 14035, "oob": 14036, "oob_type": "idrac"},
+        ),
     ],
-    ids=["add", "change", "clear", "oob-only", "same-id"],
+    ids=["add", "oob-only", "same-id", "own-add", "type-only"],
 )
-def test_the_form_adds_changes_and_clears_the_oob_entry(client, servers, seed, typed, expected):
+def test_a_change_that_removes_no_host_id_writes_at_once(client, servers, seed, typed, expected):
     target = make_device(f"edit-oob-{next(_names)}")
     if seed is not None:
         seed_mapping(target, "primary", **seed)
@@ -478,7 +488,7 @@ def test_an_own_id_cannot_be_cleared_because_discovery_would_restore_it(client, 
     ids=["oob-cleared", "own-replaced"],
 )
 def test_an_edit_survives_the_page_load_after_the_redirect(client, servers, typed, expected):
-    """Discovery finds the device by name as 14300, so a page load could write that ID back."""
+    """Matching finds the device by name as 14300; the page load after the save must not write that ID back."""
     target = seed_mapping(
         make_device(f"edit-discoverable-{next(_names)}"), "primary", own=14300, oob=14301, oob_type="idrac"
     )
@@ -490,7 +500,7 @@ def test_an_edit_survives_the_page_load_after_the_redirect(client, servers, type
     )
     client.force_login(make_superuser("edit-discoverable-writer"))
 
-    response = _submit(client, target, "primary", **typed)
+    response = _apply_confirmation(client, _submit(client, target, "primary", **typed))
     assert response.status_code == 302
     assert client.get(response.url).status_code == 200
 
@@ -514,7 +524,7 @@ def test_a_vc_member_edits_its_own_mapping_when_another_member_serves_the_active
     forms = {form["fields"]["server_key"]: form for form in parser.forms.values()}
     action, fields = forms["primary"]["action"], forms["primary"]["fields"]
 
-    response = client.post(action, {**fields, "own_id": "14203"})
+    response = _apply_confirmation(client, client.post(action, {**fields, "own_id": "14203"}))
 
     assert response.status_code == 302
     first.refresh_from_db()
@@ -541,7 +551,7 @@ def test_each_chassis_mapping_owner_gets_its_editor_on_its_own_page(client, serv
 
 @pytest.mark.django_db
 def test_the_editor_shows_the_own_id_that_discovery_stored_on_a_vc_member(client, servers):
-    """Discovery writes the member through another instance; the next OOB edit must not read as a change."""
+    """Discovery writes another instance; the rendered form must bind the stored own ID for the OOB edit."""
     _chassis, (first, _second) = make_virtual_chassis_members("edit-vc-discovery")
     seed_mapping(first, "primary", own=14400)
     _register_device(servers.secondary, 14402, first.name)
@@ -557,7 +567,9 @@ def test_the_editor_shows_the_own_id_that_discovery_stored_on_a_vc_member(client
     parser.feed(rendered.content.decode())
     form = next(form for form in parser.forms.values() if form["fields"]["server_key"] == "secondary")
 
-    response = client.post(form["action"], {**form["fields"], "oob_id": "14403", "oob_type": "ilo"})
+    response = _apply_confirmation(
+        client, client.post(form["action"], {**form["fields"], "oob_id": "14403", "oob_type": "ilo"})
+    )
 
     assert response.status_code == 302
     first.refresh_from_db()
@@ -566,3 +578,124 @@ def test_the_editor_shows_the_own_id_that_discovery_stored_on_a_vc_member(client
         "secondary": {"own": 14402, "oob": 14403, "oob_type": "ilo"},
         "preferred": "primary",
     }
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("kind", ["device", "chassis", "vm"])
+@pytest.mark.parametrize(
+    ("typed", "expected"),
+    [
+        ({"own_id": "14510"}, {"own": 14510, "oob": 14501, "oob_type": "idrac"}),
+        ({"oob_id": "14511", "oob_type": "ilo"}, {"own": 14500, "oob": 14511, "oob_type": "ilo"}),
+        ({"oob_id": "", "oob_type": ""}, {"own": 14500}),
+    ],
+    ids=["own-replace", "oob-replace", "oob-clear"],
+)
+def test_a_confirmed_host_change_clears_only_its_servers_ports(client, servers, kind, typed, expected):
+    """The editor confirms the host and port changes before it writes any row of the scope."""
+    from virtualization.models import VirtualMachine, VMInterface
+
+    from netbox_librenms_plugin.confirmation_intent import FIELD
+    from netbox_librenms_plugin.tests.view_test_helpers import domain_state
+
+    tag = f"edit-cascade-{kind}-{next(_names)}"
+    if kind == "chassis":
+        _chassis, parents = make_virtual_chassis_members(tag)
+        target = parents[0]
+    else:
+        target = make_vm(tag) if kind == "vm" else make_device(tag)
+        parents = [target]
+    seed_mapping(target, "primary", own=14500, oob=14501, oob_type="idrac", save=False)
+    seed_mapping(target, "secondary", own=14502, preferred=True)
+    interfaces = []
+    for index, parent in enumerate(parents):
+        if isinstance(parent, VirtualMachine):
+            interface = VMInterface.objects.create(virtual_machine=parent, name=f"eth{index}")
+        else:
+            interface = make_interface(parent, f"eth{index}")
+        seed_mapping(interface, "primary", own=15500 + index, save=False)
+        seed_mapping(interface, "secondary", own=15600 + index)
+        interfaces.append(interface)
+    outside = seed_mapping(make_interface(make_device(f"{tag}-outside"), "eth0"), "primary", own=15700)
+    client.force_login(make_superuser(f"{tag}-writer"))
+    before = domain_state()
+    records = {interface.pk: _change_records(interface) for interface in interfaces}
+
+    action, fields = _editor_forms(client, target, server_key="secondary")["primary"]
+    confirmation = client.post(action, {**fields, **typed})
+
+    assert confirmation.status_code == 200
+    assert domain_state() == before
+    assert {row["name"] for row in confirmation.context["interfaces"]} == {row.name for row in interfaces}
+    context = confirmation.context
+    response = client.post(context["action_url"], {"server_key": "primary", FIELD: [context["token"]]})
+
+    assert response.status_code == 302
+    target.refresh_from_db()
+    assert mapping_summary(target) == {
+        "primary": expected,
+        "secondary": {"own": 14502},
+        "preferred": "secondary",
+    }
+    for index, interface in enumerate(interfaces):
+        interface.refresh_from_db()
+        assert mapping_summary(interface) == {"secondary": {"own": 15600 + index}}
+        assert _change_records(interface) == records[interface.pk] + 1
+    outside.refresh_from_db()
+    assert mapping_summary(outside) == {"primary": {"own": 15700}}
+
+
+@pytest.mark.django_db
+def test_a_change_of_both_ids_at_once_is_refused(client, servers):
+    target = seed_mapping(make_device("edit-both"), "primary", own=14041, oob=14042, oob_type="ilo")
+    client.force_login(make_superuser("edit-both-writer"))
+
+    response = _submit(client, target, "primary", own_id="14043", oob_id="14044")
+
+    assert response.status_code == 302
+    assert len(_messages(response)) == 1
+    target.refresh_from_db()
+    assert mapping_summary(target) == {"primary": {"own": 14041, "oob": 14042, "oob_type": "ilo"}}
+
+
+@pytest.mark.django_db
+def test_a_new_own_id_with_a_new_oob_type_is_refused(client, servers):
+    """A relink keeps the stored OOB controller, so the type change would be lost: each change is its own."""
+    from netbox_librenms_plugin.tests.view_test_helpers import domain_state
+
+    target = seed_mapping(make_device("edit-own-and-type"), "primary", own=14045, oob=14046, oob_type="ilo")
+    client.force_login(make_superuser("edit-own-and-type-writer"))
+    before = domain_state()
+
+    response = _submit(client, target, "primary", own_id="14047", oob_type="idrac")
+
+    assert response.status_code == 302
+    assert len(_messages(response)) == 1
+    assert domain_state() == before
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("typed", "action", "expected"),
+    [
+        ({"own_id": "14039"}, "relink", {"own": 14039, "oob": 14038, "oob_type": "ilo"}),
+        ({"oob_id": "14040", "oob_type": "ipmi"}, "change_oob", {"own": 14037, "oob": 14040, "oob_type": "ipmi"}),
+        ({"oob_id": ""}, "change_oob", {"own": 14037}),
+    ],
+    ids=["own-replaced", "oob-replaced", "oob-cleared"],
+)
+def test_a_replacement_or_a_clear_renders_its_confirmation_and_writes_nothing(client, servers, typed, action, expected):
+    from netbox_librenms_plugin.tests.view_test_helpers import domain_state
+
+    target = seed_mapping(make_device(f"edit-confirm-{next(_names)}"), "primary", own=14037, oob=14038, oob_type="ilo")
+    client.force_login(make_superuser("edit-confirm-writer"))
+    before = domain_state()
+
+    confirmation = _submit(client, target, "primary", **typed)
+
+    assert confirmation.status_code == 200
+    assert domain_state() == before
+    assert confirmation.context["action"] == action
+    _apply_confirmation(client, confirmation)
+    target.refresh_from_db()
+    assert mapping_summary(target) == ({"primary": expected} if expected else {})

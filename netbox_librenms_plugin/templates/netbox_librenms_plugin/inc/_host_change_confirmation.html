@@ -1,0 +1,74 @@
+{# One plain form: the token names every effect below, so the confirming POST needs no script. #}
+<div class="card" id="librenms-host-change" data-action="{{ action }}">
+    <h5 class="card-header">
+        <i class="mdi {% if action == "unlink" %}mdi-link-variant-off{% else %}mdi-swap-horizontal{% endif %} text-danger me-1" aria-hidden="true"></i>
+        {% if action == "unlink" %}Unlink {{ object.name }} from {{ server_name }}
+        {% elif action == "relink" %}{% if after.own_id %}Replace the LibreNMS ID of {{ object.name }} on {{ server_name }}{% else %}Remove the LibreNMS ID of {{ object.name }} on {{ server_name }}{% endif %}
+        {% elif after.oob_id %}Replace the OOB controller of {{ object.name }} on {{ server_name }}
+        {% else %}Remove the OOB controller of {{ object.name }} on {{ server_name }}{% endif %}
+    </h5>
+    <div class="card-body">
+        <p class="mb-3">
+            {% if action == "unlink" %}
+            This removes the LibreNMS link of {{ object.name }} on {{ server_name }}{% if before.own_id %}: LibreNMS ID {{ before.own_id }}{% endif %}{% if before.oob_id %}{% if before.own_id %},{% else %}:{% endif %} OOB ID {{ before.oob_id }}{% endif %}.
+            {% elif action == "relink" %}
+            {% if after.own_id %}This replaces LibreNMS ID {{ before.own_id }} with {{ after.own_id }}.{% else %}This removes LibreNMS ID {{ before.own_id }}. The OOB controller stays.{% endif %}
+            {% else %}
+            {% if after.oob_id %}This replaces OOB ID {{ before.oob_id }} with {{ after.oob_id }}.{% else %}This removes OOB ID {{ before.oob_id }}. The LibreNMS ID stays.{% endif %}
+            {% endif %}
+            It also clears the {{ server_name }} port IDs of
+            <strong>{{ interfaces|length }} interface{{ interfaces|length|pluralize }}</strong>{% if members|length > 1 %} on {{ members|join:", " }}{% endif %}.
+        </p>
+        <dl class="row mb-3">
+            <dt class="col-sm-4 col-lg-2 text-muted">Server</dt>
+            <dd class="col-sm-8 col-lg-10">{{ server_name }}{% if server_name != server_key %} <span class="text-muted small">({{ server_key }})</span>{% endif %}</dd>
+            <dt class="col-sm-4 col-lg-2 text-muted">LibreNMS ID</dt>
+            <dd class="col-sm-8 col-lg-10">
+                {{ before.own_id|default_if_none:"None" }}
+                {% if before.own_id != after.own_id %}<i class="mdi mdi-arrow-right mx-1" aria-hidden="true"></i><span class="visually-hidden">changes to</span>{{ after.own_id|default_if_none:"removed" }}{% endif %}
+            </dd>
+            <dt class="col-sm-4 col-lg-2 text-muted">OOB controller ID</dt>
+            <dd class="col-sm-8 col-lg-10 mb-0">
+                {{ before.oob_id|default_if_none:"None" }}{% if before.oob_type %} <span class="text-muted small">({{ before.oob_type }})</span>{% endif %}
+                {% if before.oob_id != after.oob_id %}<i class="mdi mdi-arrow-right mx-1" aria-hidden="true"></i><span class="visually-hidden">changes to</span>{{ after.oob_id|default_if_none:"removed" }}{% if after.oob_id and after.oob_type %} <span class="text-muted small">({{ after.oob_type }})</span>{% endif %}{% endif %}
+            </dd>
+        </dl>
+        {% if interfaces %}
+        <h6 class="mb-2">Interfaces whose {{ server_name }} port ID is cleared</h6>
+        <div class="border rounded mb-3" style="max-height: 20rem; overflow-y: auto;">
+            <table class="table table-sm mb-0" id="librenms-host-change-interfaces">
+                <thead>
+                    <tr><th class="ps-3">Interface</th><th>Device</th></tr>
+                </thead>
+                <tbody>
+                    {% for interface in interfaces %}
+                    <tr><td class="ps-3">{{ interface.name }}</td><td>{{ interface.parent }}</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% endif %}
+        <div class="alert alert-info small mb-0" role="note">
+            <i class="mdi mdi-information-outline me-1" aria-hidden="true"></i>
+            <div>
+                The change clears the {{ server_name }} port IDs of every interface of {{ object.name }}{% if members|length > 1 %} and of every member of its virtual chassis{% endif %}, also ports of another
+                link or of the OOB controller; an interface sync sets them again. It does not clear a port held
+                outside these interfaces, such as a cable far end created on another device.
+                {% if action == "unlink" %}After the unlink, the sync page proposes the LibreNMS match again; nothing links by itself.{% endif %}
+            </div>
+        </div>
+    </div>
+    <div class="card-footer d-flex flex-wrap justify-content-end gap-2">
+        <a href="{{ cancel_url }}" class="btn btn-outline-secondary">Cancel</a>
+        <form method="post" action="{{ action_url }}" class="d-inline" id="librenms-host-change-form">
+            {% csrf_token %}
+            <input type="hidden" name="server_key" value="{{ server_key }}">
+            <input type="hidden" name="tab" value="{{ tab }}">
+            <input type="hidden" name="confirmation_intent" value="{{ token }}">
+            <button type="submit" class="btn btn-danger">
+                {% if action == "unlink" %}<i class="mdi mdi-link-variant-off" aria-hidden="true"></i> Unlink
+                {% else %}<i class="mdi mdi-swap-horizontal" aria-hidden="true"></i> Confirm the change{% endif %}
+            </button>
+        </form>
+    </div>
+</div>

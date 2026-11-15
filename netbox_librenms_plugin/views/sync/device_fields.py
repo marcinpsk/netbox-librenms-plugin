@@ -13,6 +13,7 @@ from django.views import View
 from utilities.exceptions import PermissionsViolation
 from virtualization.models import VirtualMachine
 
+from netbox_librenms_plugin.assessment.mapping_lifecycle import host_change_action
 from netbox_librenms_plugin.import_utils import _determine_device_name
 from netbox_librenms_plugin.import_utils.disclosure import serial_conflict_text, visible_object_label
 from netbox_librenms_plugin.import_utils.virtual_chassis import _existing_member_name
@@ -34,10 +35,12 @@ from netbox_librenms_plugin.server_mappings import (
     ServerState,
     convert_legacy,
     edit_server,
+    host_entry,
     persist_mapping,
     read_mapping,
     release_server,
     require_server_key,
+    save_mapping_fields,
     set_preference,
 )
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
@@ -79,6 +82,7 @@ from netbox_librenms_plugin.views.mixins import (
     redirect_with_server_key,
     resolve_configured_server_key,
 )
+from netbox_librenms_plugin.views.sync.mapping_lifecycle import render_host_change
 
 logger = logging.getLogger(__name__)
 
@@ -831,12 +835,6 @@ def _has_removable_mapping(mapping, server_key):
     return mapping.server(server_key) is not None or (server_key == "default" and mapping.legacy.is_legacy)
 
 
-def _save_mapping_fields(row, fields):
-    """Validate only the mapping storage that *fields* names, then save only it: other fields may be invalid."""
-    row.clean_fields(exclude={field.name for field in row._meta.fields if field.name not in fields})
-    row.save(update_fields=[*fields, "last_updated"])
-
-
 class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
     """Remove a single server entry from the device's (or VM's) librenms_id custom field dict."""
 
@@ -922,7 +920,7 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
                 if usable_count <= 1:
                     change = release_server(obj_locked, server_key, clear_preference=True)
                 try:
-                    persist_mapping(obj_locked, change, write=_save_mapping_fields)
+                    persist_mapping(obj_locked, change, write=save_mapping_fields)
                 except ValidationError as exc:
                     transaction.set_rollback(True)
                     logger.exception(
@@ -1003,7 +1001,7 @@ class SetPreferredServerView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
 
             owner.snapshot()
             try:
-                persist_mapping(owner, set_preference(owner, requested_key), write=_save_mapping_fields)
+                persist_mapping(owner, set_preference(owner, requested_key), write=save_mapping_fields)
             except ValidationError as exc:
                 transaction.set_rollback(True)
                 logger.warning(
@@ -1043,8 +1041,53 @@ def _identity_owned_text(exc, user):
     return f"LibreNMS ID {exc.identity} is already assigned to {object_label} '{owner_name}' (ID: {exc.owner.pk})."
 
 
+class _NeedsConfirmation(Exception):
+    """The posted IDs remove or replace a host ID, so the editor renders that host change's confirmation."""
+
+    def __init__(self, owner, action, choices):
+        super().__init__(action)
+        self.owner, self.action, self.choices = owner, action, choices
+
+
+def _editor_host_change(owner, server_key, own_id, oob_id, oob_type, shown):
+    """
+    Return the mapping change that the editor writes, or raise _NeedsConfirmation for a host change.
+
+    A change that replaces an own ID or removes or replaces an OOB ID needs a confirmation.
+    Two host changes at once are refused: each one has its own confirmation.
+    """
+    entry = host_entry(owner, server_key)
+    try:
+        change = edit_server(
+            owner,
+            server_key,
+            own_id=own_id,
+            oob_id=oob_id,
+            oob_type=oob_type,
+            shown=shown,
+            configured_servers=LibreNMSAPI.get_available_servers(),
+        )
+    except ValueError as exc:
+        raise _WriteRefused(str(exc)) from None
+    after = change.after.server(server_key)
+    confirmation = host_change_action(entry, after.own_id, after.oob_id, after.oob_type)
+    if confirmation is None:
+        return change
+    action, choices = confirmation
+    if choices is None:
+        raise _WriteRefused(
+            "Change the LibreNMS ID and the OOB controller one at a time: each change has its own confirmation."
+        )
+    raise _NeedsConfirmation(owner, action, choices)
+
+
 class EditServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
-    """Set the own LibreNMS ID and the OOB controller of a Device or VirtualMachine on one configured server."""
+    """
+    Set the own LibreNMS ID and the OOB controller of a Device or VirtualMachine on one configured server.
+
+    A create and an OOB add on an empty OOB write at once. A change that removes or replaces a host
+    ID renders the confirmation of its mapping lifecycle operation and writes nothing.
+    """
 
     required_object_permissions = {
         "POST": [("change", Device), ("change", VirtualMachine)],
@@ -1074,25 +1117,32 @@ class EditServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
             oob_type=_posted_value(request, "shown_oob_type"),
         )
         try:
-            with transaction.atomic():
+            with atomic_with_events():
                 owner = get_object_or_404(
                     self.restricted_queryset(model, "change").select_for_update(of=("self",)), pk=pk
                 )
-                owner.snapshot()
-                try:
-                    change = edit_server(
-                        owner,
-                        server_key,
-                        own_id=_posted_value(request, "own_id"),
-                        oob_id=_posted_value(request, "oob_id"),
-                        oob_type=_posted_value(request, "oob_type"),
-                        shown=shown,
-                        configured_servers=LibreNMSAPI.get_available_servers(),
-                    )
-                except ValueError as exc:
-                    raise _WriteRefused(str(exc)) from None
+                change = _editor_host_change(
+                    owner,
+                    server_key,
+                    _posted_value(request, "own_id"),
+                    _posted_value(request, "oob_id"),
+                    _posted_value(request, "oob_type"),
+                    shown,
+                )
                 if change.changed:
-                    persist_mapping(owner, change, write=_save_mapping_fields)
+                    owner.snapshot()
+                    persist_mapping(owner, change, write=save_mapping_fields)
+        except _NeedsConfirmation as needed:
+            # The confirmation is an assessment: it reads the object again and writes nothing.
+            return render_host_change(
+                request,
+                needed.owner,
+                server_key,
+                needed.action,
+                needed.choices,
+                tab=active_sync_tab,
+                return_server_key=active_server_key,
+            )
         except IdentityOwned as exc:
             messages.error(request, _identity_owned_text(exc, request.user))
             return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
