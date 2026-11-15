@@ -78,9 +78,7 @@ class BaseVLANTableView(
         if self.librenms_id is None:
             # A failed refresh on a previously-synced device must not leave a stale VLAN table to act on.
             source_cache.delete_planned(plan)
-            error_message = (
-                self.not_linked_message(server_key)
-            )
+            error_message = self.not_linked_message(server_key)
         else:
             result = source_cache.refresh(request, plan)
             error_message = result.error and f"Failed to fetch VLANs: {result.error}"

@@ -19,7 +19,6 @@ from ipam.models import VLAN, VLANGroup
 from netbox_librenms_plugin import confirmation_intent as intent
 from netbox_librenms_plugin.tests import link_intent_helpers as links
 from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, make_device, make_interface
-from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, make_device
 from netbox_librenms_plugin.tests.mapping_fixtures import mapping_summary, seed_mapping, seed_quarantined
 from netbox_librenms_plugin.tests.view_test_helpers import domain_state, make_user_with_perms
 from netbox_librenms_plugin.tests.vlan_intent_helpers import message_texts, reassess, seed_vlans, sync, tab_tokens
@@ -337,6 +336,8 @@ class _ChangeOOBScenario(_HostChangeScenario):
 
     def applied(self):
         return self.entry().get("oob") == self.claimed
+
+
 class _LinkScenario:
     """An unlinked device whose primary IP the LibreNMS fake matches as device 7100, and a user who may link it."""
 

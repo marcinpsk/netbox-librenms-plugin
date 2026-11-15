@@ -27,7 +27,6 @@ from netbox_librenms_plugin.server_mappings import (
     host_change_scope,
     host_entry,
     read_mapping,
-    release_server,
     stored_entry_digest,
 )
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
@@ -311,10 +310,6 @@ class ClaimingHostChangeAssumptions(HostChangeAssumptions):
     owned: bool
 
 
-
-
-
-
 @dataclass(frozen=True)
 class RelinkChoices:
     """The own ID that replaces the stored one; None clears it."""
@@ -353,8 +348,6 @@ def _entry_claim(identity):
 
 def _identity_claim(identity, librenms_id):
     return intent.Claim(f"mapping.identity:{identity.server}:device:{librenms_id}", True)
-
-
 
 
 @intent.register
