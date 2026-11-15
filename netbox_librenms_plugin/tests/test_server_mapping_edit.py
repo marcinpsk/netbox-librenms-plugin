@@ -524,6 +524,22 @@ def test_a_vc_member_edits_its_own_mapping_when_another_member_serves_the_active
 
 
 @pytest.mark.django_db
+def test_each_chassis_mapping_owner_gets_its_editor_on_its_own_page(client, servers):
+    _chassis, (first, second) = make_virtual_chassis_members("edit-each-owner")
+    seed_mapping(first, "primary", own=14300)
+    seed_mapping(second, "secondary", own=14301)
+    client.force_login(make_superuser("edit-each-owner-writer"))
+
+    response = client.get(_sync_url(second), {"server_key": "secondary"})
+
+    assert response.status_code == 200
+    parser = _EditorForms()
+    parser.feed(response.content.decode())
+    forms = {form["fields"]["server_key"]: form for form in parser.forms.values()}
+    assert forms["secondary"]["fields"]["own_id"] == "14301"
+
+
+@pytest.mark.django_db
 def test_the_editor_shows_the_own_id_that_discovery_stored_on_a_vc_member(client, servers):
     """Discovery writes the member through another instance; the next OOB edit must not read as a change."""
     _chassis, (first, _second) = make_virtual_chassis_members("edit-vc-discovery")
