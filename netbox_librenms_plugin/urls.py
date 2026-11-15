@@ -103,6 +103,7 @@ from .views import (
     LocationMappingEditView,
     LocationMappingListView,
     LocationMappingView,
+    MappingLifecycleView,
     MarkBuiltInView,
     MergeNetBoxDevicesView,
     ModuleBayMappingBulkDeleteView,
@@ -536,6 +537,11 @@ urlpatterns = [
         "devices/<int:pk>/assign-vc-serial/",
         AssignVCSerialView.as_view(),
         name="assign_vc_serial",
+    ),
+    path(
+        "<str:object_type>/<int:pk>/mapping-lifecycle/",
+        MappingLifecycleView.as_view(),
+        name="mapping_lifecycle",
     ),
     path(
         "devices/<int:pk>/remove-server-mapping/",

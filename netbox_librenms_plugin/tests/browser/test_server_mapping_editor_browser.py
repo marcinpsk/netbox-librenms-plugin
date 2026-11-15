@@ -1,6 +1,7 @@
 """Browser checks for the server mapping editor on the sync page."""
 
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import parse_qs
 
 TEMPLATES_DIR = Path(__file__).parents[2] / "templates"
@@ -118,3 +119,64 @@ def test_a_long_server_name_fits_a_phone_width_page(page):
     assert page.get_by_text(LONG_SERVER_NAME).is_visible()
     assert state["scrollWidth"] <= state["innerWidth"], state
     assert state["editorRight"] <= state["innerWidth"], state
+
+
+CONFIRM_ACTION = "https://plugin.example.com/device/1/mapping-lifecycle/"
+CONFIRM_DESTINATION = "https://plugin.example.com/device/1/edit-server-mapping/"
+CONFIRM_TOKEN = "mapping_lifecycle:signed-host-change-token"
+
+
+def _render_host_confirmation():
+    """Render the production confirmation card of a relink that clears two chassis interfaces."""
+    from django.template import Context, Engine
+
+    engine = Engine(dirs=[str(TEMPLATES_DIR)])
+    context = {
+        "object": SimpleNamespace(name="sw1"),
+        "action": "relink",
+        "server_key": "production",
+        "server_name": "Production",
+        "before": SimpleNamespace(own_id=101, oob_id=205, oob_type="idrac"),
+        "after": SimpleNamespace(own_id=102, oob_id=205, oob_type="idrac"),
+        "interfaces": [{"name": "ge-0/0/1", "parent": "sw1"}, {"name": "ge-1/0/1", "parent": "sw2"}],
+        "members": ["sw1", "sw2"],
+        "token": CONFIRM_TOKEN,
+        "action_url": CONFIRM_ACTION,
+        "cancel_url": DESTINATION,
+        "tab": "interfaces",
+        "csrf_token": "browser-token",
+    }
+    card = engine.get_template("netbox_librenms_plugin/inc/_host_change_confirmation.html").render(
+        Context(context, use_l10n=False)
+    )
+    return f"<html><body>{card}</body></html>"
+
+
+def test_a_host_change_posts_the_offered_token_without_javascript(page):
+    submissions = []
+
+    def handle_route(route):
+        if route.request.method == "POST" and route.request.url == CONFIRM_ACTION:
+            submissions.append(parse_qs(route.request.post_data or "", keep_blank_values=True))
+            route.fulfill(body="<p id='changed'>changed</p>", content_type="text/html")
+            return
+        if route.request.url == CONFIRM_DESTINATION:
+            route.fulfill(body=_render_host_confirmation(), content_type="text/html")
+            return
+        raise AssertionError(f"Unexpected browser request: {route.request.url}")
+
+    page.route("**/*", handle_route)
+    page.goto(CONFIRM_DESTINATION)
+    assert page.locator("script").count() == 0
+    assert page.locator("#librenms-host-change-interfaces tbody tr").count() == 2
+    page.get_by_role("button", name="Confirm the change").click()
+    page.locator("#changed").wait_for()
+
+    assert submissions == [
+        {
+            "csrfmiddlewaretoken": ["browser-token"],
+            "server_key": ["production"],
+            "tab": ["interfaces"],
+            "confirmation_intent": [CONFIRM_TOKEN],
+        }
+    ]
