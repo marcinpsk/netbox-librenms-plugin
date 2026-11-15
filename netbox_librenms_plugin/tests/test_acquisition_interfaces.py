@@ -1,7 +1,5 @@
 """Interface acquisition runs without a request and records what LibreNMS answered, over the local HTTP stub."""
 
-from netbox_librenms_plugin.acquisition.coordinator import plan_acquisition
-
 import pytest
 
 SERVER_KEY = "default"
@@ -32,7 +30,7 @@ def _serve(server, *, ports=HOST_PORTS, mappings=(), os_name="linux"):
 
 
 def _acquire(subject):
-    from netbox_librenms_plugin.acquisition.coordinator import acquire
+    from netbox_librenms_plugin.acquisition.coordinator import acquire, plan_acquisition
     from netbox_librenms_plugin.acquisition.registry import Resource
 
     return acquire(plan_acquisition(subject, server_key=SERVER_KEY, resources=[Resource.INTERFACES]))
