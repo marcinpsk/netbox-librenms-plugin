@@ -81,7 +81,6 @@ from netbox_librenms_plugin.views.mixins import (
 )
 
 from netbox_librenms_plugin import source_cache
-from netbox_librenms_plugin.acquisition.coordinator import resource_owner
 from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.assessment.cables import (
     assess,
@@ -93,18 +92,24 @@ from netbox_librenms_plugin.assessment.cables import (
 logger = logging.getLogger(__name__)
 
 
-def read_cable_assessment(request, subject, server_key, interface_name_field="ifName"):
+def read_cable_assessment(request, subject, server_key, interface_name_field="ifName", *, snapshot=None):
     """Read the bound source snapshot and assess its cable rows for the current name option."""
-    snapshot = source_cache.read(subject, Resource.CABLES, server_key)
+    provided_snapshot = snapshot is not None
+    if snapshot is None:
+        snapshot = source_cache.read(subject, Resource.CABLES, server_key, user=request.user)
     if snapshot is None:
         return None
+    if provided_snapshot:
+        owner = source_cache.require_cached(subject, Resource.CABLES, server_key, snapshot, user=request.user)
+    else:
+        owner = source_cache.receipt_owner(subject, Resource.CABLES, server_key, snapshot, user=request.user)
+        if owner is None:
+            return None
     assessed = assess(
         snapshot,
         subject=subject,
         interface_name_field=interface_name_field,
-        include_serial=source_cache.can_view_serial_ports(
-            request.user, resource_owner(subject, Resource.CABLES, server_key)
-        ),
+        include_serial=source_cache.can_view_serial_ports(request.user, owner),
     )
     disclosed = source_cache.cable_blockers_for_user(
         snapshot, request.user, {"display": assessed["blockers"], **assessed["blocked_scopes"]}
@@ -114,6 +119,7 @@ def read_cable_assessment(request, subject, server_key, interface_name_field="if
         "blockers": disclosed.pop("display"),
         "blocked_scopes": disclosed,
         "snapshot_id": snapshot.snapshot_id,
+        "source_snapshot": snapshot,
         "last_fetched": snapshot.finished_at,
     }
 
@@ -2149,13 +2155,28 @@ class BaseCableTableView(
             snapshot_cached = coordinator.mark_refresh_outcome(
                 SyncTab.CABLES, server_key, actor_id=request_actor_id(request)
             )
-        assessed = read_cable_assessment(request, obj, server_key, interface_name_field)
+        try:
+            assessed = read_cable_assessment(
+                request,
+                obj,
+                server_key,
+                interface_name_field,
+                snapshot=result.snapshot if result is not None else None,
+            )
+        except source_cache.SnapshotUnavailable:
+            self._cable_refresh_error = "Cable data could not be cached. Refresh before syncing."
+            coordinator.mark_refresh_failure(SyncTab.CABLES, server_key, actor_id=request_actor_id(request))
+            return None
+        except source_cache.SourceChanged:
+            self._cable_refresh_error = source_cache.IDENTITY_CHANGED
+            coordinator.mark_refresh_failure(SyncTab.CABLES, server_key, actor_id=request_actor_id(request))
+            return None
         if assessed is None and result is not None:
             self._cable_refresh_error = "Cable data could not be cached. Refresh before syncing."
             coordinator.mark_refresh_failure(SyncTab.CABLES, server_key, actor_id=request_actor_id(request))
         if assessed is None:
             return None
-        cache_key = source_cache.snapshot_key(obj, Resource.CABLES, server_key)
+        cache_key = source_cache.receipt_key(assessed["source_snapshot"], Resource.CABLES)
         raw_links = assessed["links"]
         if request.user.pk is not None:
             raw_links, _has_manual_picks = apply_cable_manual_picks(
