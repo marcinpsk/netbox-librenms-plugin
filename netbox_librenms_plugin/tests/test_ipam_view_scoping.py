@@ -18,7 +18,6 @@ from netbox_librenms_plugin.tests.conftest import (
     configure_default_librenms_server,
     make_device,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import (
     port_vlans,
     seed_interfaces_snapshot,
