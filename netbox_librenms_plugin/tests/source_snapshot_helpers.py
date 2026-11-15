@@ -39,7 +39,7 @@ def _record(resource, name, value):
     return ResponseRecord(request, Outcome.OBTAINED, http_status=200, value=value, received_at=timezone.now())
 
 
-def build_source_snapshot(subject, resource, server_key="default", **parts):
+def build_source_snapshot(subject, resource, server_key="default", *, source_id=None, **parts):
     """
     Return a snapshot of *resource* whose parts hold *parts* (name -> value, Failed or NotApplicable).
 
@@ -63,7 +63,7 @@ def build_source_snapshot(subject, resource, server_key="default", **parts):
                 owner=ObjectRef.of(owner),
                 host=MappingSource(
                     role=MappingRole.OWN,
-                    librenms_id=stored_librenms_id(owner, server_key),
+                    librenms_id=source_id if source_id is not None else stored_librenms_id(owner, server_key),
                     state=MappingState.RESOLVED,
                     parts=tuple((name, record.request.key) for name, record in records.items()),
                 ),
@@ -73,10 +73,16 @@ def build_source_snapshot(subject, resource, server_key="default", **parts):
     )
 
 
-def seed_source_snapshot(subject, resource, server_key="default", **parts):
+def seed_source_snapshot(subject, resource, server_key="default", *, source_id=None, **parts):
     """Store a snapshot built by :func:`build_source_snapshot` and return it; a seed that is not stored fails."""
-    snapshot = build_source_snapshot(subject, resource, server_key, **parts)
-    assert source_cache.store(subject, resource, snapshot), f"the {resource} seed has no usable scope"
+    snapshot = build_source_snapshot(subject, resource, server_key, source_id=source_id, **parts)
+    if source_id is not None and source_id != stored_identity(subject, resource, server_key):
+        # Inject an old binding at the transport boundary; production storage refuses stale sources.
+        from django.core.cache import cache
+
+        cache.set(source_cache.snapshot_key(subject, resource, server_key), snapshot.to_payload(), 300)
+    else:
+        assert source_cache.store(subject, resource, snapshot), f"the {resource} seed has no usable scope"
     return snapshot
 
 
@@ -91,7 +97,7 @@ def ip_address_row(address, port_id, prefix_length=24):
     return {"ip_address": address, "prefix_length": prefix_length, "port_id": port_id}
 
 
-def seed_ip_snapshot(subject, addresses, ports=(), *, device=None, vrfs=None, server_key="default"):
+def seed_ip_snapshot(subject, addresses, ports=(), *, device=None, vrfs=None, server_key="default", source_id=None):
     """
     Store an IP address snapshot of *addresses* and *ports*, with *device* as the device record.
 
@@ -110,8 +116,16 @@ def seed_ip_snapshot(subject, addresses, ports=(), *, device=None, vrfs=None, se
         subject,
         Resource.IP_ADDRESSES,
         server_key,
+        source_id=source_id,
         addresses=list(addresses),
         ports=ports,
         device={} if device is None else device,
         vrfs=vrfs,
     )
+
+
+def stored_identity(subject, resource, server_key):
+    """Return the effective identity of the source owner for a deliberate stale-source seed."""
+    from netbox_librenms_plugin.librenms_api import stored_librenms_id
+
+    return stored_librenms_id(resource_owner(subject, resource, server_key), server_key)

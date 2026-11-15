@@ -92,6 +92,37 @@ class ObjectRef:
 
 
 @dataclass(frozen=True)
+class MappingLink:
+    """The state and the LibreNMS id of one mapping link, so a stored mapping and a current one compare."""
+
+    state: MappingState
+    librenms_id: int | None
+
+
+@dataclass(frozen=True)
+class SourceBinding:
+    """The source facts that bind acquired data, cached reads and signed module actions."""
+
+    server_key: str
+    owner: ObjectRef
+    host: MappingLink | None
+    oob: MappingLink | None
+
+    def to_payload(self):
+        """Return the canonical source facts used by a signed inventory digest."""
+
+        def link(value):
+            return None if value is None else {"state": value.state.value, "id": value.librenms_id}
+
+        return {
+            "server": self.server_key,
+            "owner": {"label": self.owner.label, "pk": self.owner.pk},
+            "host": link(self.host),
+            "oob": link(self.oob),
+        }
+
+
+@dataclass(frozen=True)
 class MappingSource:
     """The requests made for one LibreNMS device: the owner itself, or its out-of-band controller."""
 
@@ -100,6 +131,11 @@ class MappingSource:
     state: MappingState
     # Part name -> request key of the record in SourceSnapshot.responses.
     parts: tuple[tuple[str, str], ...]
+
+    @property
+    def link(self):
+        """Return the mapping link that this source was acquired for."""
+        return MappingLink(self.state, self.librenms_id)
 
 
 @dataclass(frozen=True)
@@ -127,6 +163,16 @@ class SourceSnapshot:
     finished_at: datetime
     resources: dict
     responses: dict
+
+    def binding(self, resource):
+        """Return the canonical binding of the exact snapshot used by an assessment."""
+        source = self.resources[resource]
+        return SourceBinding(
+            self.server_key,
+            source.owner,
+            source.host.link if source.host is not None else None,
+            source.oob.link if source.oob is not None else None,
+        )
 
     def record(self, resource, part, role=MappingRole.OWN):
         """Return the response record of one part of a resource's mapping."""

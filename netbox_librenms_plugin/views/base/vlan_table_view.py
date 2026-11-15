@@ -87,8 +87,8 @@ class BaseVLANTableView(
                 self.scoped_lookup_message(lookup_error) if lookup_error else "Device not found in LibreNMS."
             )
         else:
-            error = source_cache.refresh(request, plan).error
-            error_message = error and f"Failed to fetch VLANs: {error}"
+            result = source_cache.refresh(request, plan)
+            error_message = result.error and f"Failed to fetch VLANs: {result.error}"
 
         if error_message is not None:
             coordinator.mark_refresh_failure(
@@ -104,11 +104,30 @@ class BaseVLANTableView(
                 {"vlan_sync": self._get_error_context(obj, error_message, server_key=server_key)},
             )
 
-        if coordinator.mark_refresh_outcome(
+        snapshot_cached = coordinator.mark_refresh_outcome(
             SyncTab.VLANS,
             server_key,
             actor_id=request_actor_id(request),
-        ):
+        )
+        try:
+            context = self.get_vlan_context(request, obj, server_key, snapshot=result.snapshot)
+        except source_cache.SnapshotUnavailable:
+            coordinator.mark_refresh_failure(SyncTab.VLANS, server_key, actor_id=request_actor_id(request))
+            notice = "VLAN data could not be cached. Refresh again before syncing."
+            messages.error(request, notice)
+            return self.render_sync_partial(
+                request, obj, server_key, {"vlan_sync": self._get_error_context(obj, notice, server_key=server_key)}
+            )
+        except source_cache.SourceChanged:
+            coordinator.mark_refresh_failure(SyncTab.VLANS, server_key, actor_id=request_actor_id(request))
+            messages.error(request, source_cache.IDENTITY_CHANGED)
+            return self.render_sync_partial(
+                request,
+                obj,
+                server_key,
+                {"vlan_sync": self._get_error_context(obj, source_cache.IDENTITY_CHANGED, server_key=server_key)},
+            )
+        if snapshot_cached:
             messages.success(request, "VLAN data refreshed successfully.")
         else:
             messages.error(
@@ -117,11 +136,9 @@ class BaseVLANTableView(
                 "Refresh again; see server logs for details.",
             )
 
-        return self.render_sync_partial(
-            request, obj, server_key, {"vlan_sync": self.get_vlan_context(request, obj, server_key)}
-        )
+        return self.render_sync_partial(request, obj, server_key, {"vlan_sync": context})
 
-    def get_vlan_context(self, request, obj, server_key=None):
+    def get_vlan_context(self, request, obj, server_key=None, *, snapshot=None):
         """
         Build context for VLAN sync table.
 
@@ -129,6 +146,7 @@ class BaseVLANTableView(
             request (HttpRequest): The current request.
             obj (Device | VirtualMachine): The NetBox object to synchronize.
             server_key (str | None): The selected LibreNMS server key. Resolve it from the request if None.
+            snapshot (SourceSnapshot | None): The acquired source receipt. None reads the bound cache.
 
         Returns:
             dict: Context with:
@@ -187,7 +205,10 @@ class BaseVLANTableView(
                     unscoped_groups=unscoped_groups,
                 ),
             }
-        snapshot = source_cache.read(obj, Resource.VLANS, server_key)
+        if snapshot is not None:
+            source_cache.require_cached(obj, Resource.VLANS, server_key, snapshot, user=request.user)
+        else:
+            snapshot = source_cache.read(obj, Resource.VLANS, server_key, user=request.user)
         cached_vlans = snapshot.value(Resource.VLANS, "vlans") if snapshot is not None else None
         last_fetched = snapshot.finished_at if snapshot is not None else None
 
@@ -221,7 +242,7 @@ class BaseVLANTableView(
             vlan_table.configure(request)
 
         # Calculate cache TTL
-        cache_ttl = source_cache.remaining_ttl(obj, Resource.VLANS, server_key)
+        cache_ttl = source_cache.remaining_ttl(obj, Resource.VLANS, server_key, snapshot=snapshot)
         cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl) if cache_ttl else None
 
         return {
