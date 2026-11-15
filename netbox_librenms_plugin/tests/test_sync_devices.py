@@ -8,6 +8,7 @@ from django.contrib.messages import get_messages
 from django.core.cache import cache
 from django.urls import reverse
 
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.conftest import make_device, make_superuser, make_vm
 from netbox_librenms_plugin.tests.mapping_fixtures import (
     mapping_summary,
@@ -344,6 +345,7 @@ class TestRemoveServerMappingView:
         assert _messages(response, "success") == ["Removed LibreNMS mapping for server 'orphaned-server'."]
         vm.refresh_from_db()
         assert mapping_summary(vm) == {}
+        assert not read_mapping(vm).has_recorded_state
 
     @pytest.mark.parametrize("stored", ["²", 0, -1, True])
     def test_a_legacy_value_the_reader_cannot_resolve_has_no_mapping_to_remove(self, client, settings, stored):
@@ -452,4 +454,5 @@ class TestRemoveServerMappingView:
         assert _messages(response, "success") == ["Removed LibreNMS mapping for server 'orphaned-server'."]
         device.refresh_from_db()
         assert mapping_summary(device) == {}
+        assert not read_mapping(device).has_recorded_state
         assert device.face == "front"
