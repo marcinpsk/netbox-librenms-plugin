@@ -796,7 +796,7 @@ def test_a_refresh_clears_only_the_planned_owner_snapshot_after_owner_change(cli
 
     from netbox_librenms_plugin import source_cache
     from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, SyncTabState
-    from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping_row
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping_row
     from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_modules_snapshot
     from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
     from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
@@ -840,7 +840,7 @@ def test_a_refresh_clears_only_the_planned_owner_snapshot_after_owner_change(cli
         monkeypatch.setattr(source_cache, "store", store_then_change)
     else:
         if phase == "discovery":
-            seed_stored_mapping_row(planned, {})
+            seed_mapping_row(planned, type(planned)())
         real_resolve = BaseModuleTableView.resolve_librenms_id
 
         def resolve_with_owner_change(view, owner):

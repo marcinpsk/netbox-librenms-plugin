@@ -266,7 +266,7 @@ def test_a_deleted_planned_owner_refuses_without_resource_http(live_librenms):
     from netbox_librenms_plugin.acquisition.registry import Resource
     from netbox_librenms_plugin.tests.conftest import make_device
 
-    subject = make_device("deleted-planned-source", librenms_cf={SERVER_KEY: {"id": 501}})
+    subject = seed_mapping(make_device("deleted-planned-source"), SERVER_KEY, own=501)
     plan = plan_acquisition(subject, server_key=SERVER_KEY, resources=[Resource.VLANS])
     Device.objects.filter(pk=subject.pk).delete()
 
@@ -336,7 +336,7 @@ def test_stored_identity_precedes_cached_identity(live_librenms):
     from netbox_librenms_plugin.librenms_api import librenms_id_cache_key
     from netbox_librenms_plugin.tests.conftest import make_device
 
-    subject = make_device("cache-shadowed", librenms_cf={SERVER_KEY: {"id": 501}})
+    subject = seed_mapping(make_device("cache-shadowed"), SERVER_KEY, own=501)
     cache.set(librenms_id_cache_key(subject, SERVER_KEY), 502, timeout=60)
     _serve_ip_and_vlans(live_librenms.server, 501)
     snapshot = acquire(plan_acquisition(subject, server_key=SERVER_KEY, resources=[Resource.IP_ADDRESSES]))
@@ -381,7 +381,7 @@ def test_a_refresh_plan_requires_its_source_owner_to_be_visible(live_librenms):
     from netbox_librenms_plugin.tests.conftest import make_device
     from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
-    subject = make_device("hidden-source", librenms_cf={SERVER_KEY: {"id": 501}})
+    subject = seed_mapping(make_device("hidden-source"), SERVER_KEY, own=501)
     visible = make_device("visible-source")
     user = make_user_with_perms("hidden-source", [("view", Device)], constraints={"pk": visible.pk})
     request = make_request("post", user=user)
@@ -436,9 +436,9 @@ def test_a_refresh_response_refuses_an_identity_change_after_storage(
     from netbox_librenms_plugin import source_cache
     from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, SyncTabState
     from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
-    from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping_row
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping_row
 
-    subject = make_device("receipt-identity-change", librenms_cf={SERVER_KEY: {"id": 5501}})
+    subject = seed_mapping(make_device("receipt-identity-change"), SERVER_KEY, own=5501)
     _serve_ip_and_vlans(live_librenms.server, 5501)
     if resource_name == "modules":
         from netbox_librenms_plugin.tests.test_capture_source_acquisition import serve
@@ -462,7 +462,7 @@ def test_a_refresh_response_refuses_an_identity_change_after_storage(
     def publish_then_replace_identity(coordinator, *args, **kwargs):
         stored = real_outcome(coordinator, *args, **kwargs)
         assert stored
-        seed_stored_mapping_row(subject, {SERVER_KEY: {"id": 5502}})
+        seed_mapping_row(subject, seed_mapping(type(subject)(), SERVER_KEY, own=5502, save=False))
         return stored
 
     monkeypatch.setattr(SyncCacheConsistency, "mark_refresh_outcome", publish_then_replace_identity)
