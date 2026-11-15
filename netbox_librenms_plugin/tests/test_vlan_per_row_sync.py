@@ -404,7 +404,7 @@ def test_vlan_table_renders_each_per_row_action_state():
 
     VLAN.objects.create(vid=402, name="Current update")
     VLAN.objects.create(vid=403, name="Already synced")
-    device = make_device("per-row-action-states")
+    device = make_device("per-row-action-states", librenms_cf={"default": {"id": 42}})
     _seed_vlan_snapshot(
         device,
         [
