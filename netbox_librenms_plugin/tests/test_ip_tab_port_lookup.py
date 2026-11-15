@@ -616,7 +616,7 @@ def test_ip_tab_get_keeps_an_unbound_interface_and_the_source_unchanged(client, 
     device = seed_mapping(make_device("ip-get-no-write"), SERVER_KEY, own=DEVICE_ID)
     interface = make_interface(device, "Ethernet0")
     _serve(live_librenms, 1)
-    snapshot = acquire(device, server_key=SERVER_KEY, resources=[Resource.IP_ADDRESSES])
+    snapshot = acquire(plan_acquisition(device, server_key=SERVER_KEY, resources=[Resource.IP_ADDRESSES]))
     assert source_cache.store(device, Resource.IP_ADDRESSES, snapshot)
     before = (
         Interface.objects.get(pk=interface.pk).custom_field_data,

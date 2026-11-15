@@ -513,3 +513,21 @@ def test_inventory_helpers_import_no_discovery_or_transport_module(module):
 )
 def test_inventory_import_guard_checks_import_and_from_aliases(source, forbidden):
     assert _forbidden_inventory_imports(source) == ({forbidden} if forbidden else set())
+
+
+@pytest.mark.django_db
+def test_a_deleted_planned_owner_refuses_without_resource_http(live_librenms):
+    from dcim.models import Device
+
+    from netbox_librenms_plugin.acquisition.coordinator import SubjectNotMapped, acquire
+    from netbox_librenms_plugin.acquisition.registry import Resource
+    from netbox_librenms_plugin.tests.conftest import make_device
+
+    subject = make_device("deleted-planned-source", librenms_cf={SERVER_KEY: {"id": 501}})
+    plan = plan_acquisition(subject, server_key=SERVER_KEY, resources=[Resource.VLANS])
+    Device.objects.filter(pk=subject.pk).delete()
+
+    with pytest.raises(SubjectNotMapped):
+        acquire(plan)
+
+    assert live_librenms.server.requests == []

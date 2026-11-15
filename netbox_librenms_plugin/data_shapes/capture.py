@@ -83,13 +83,12 @@ def _export_responses(snapshot):
     return exported
 
 
-def capture_device_recording(subject, *, server_key, name=None, description="", meta=None, include_serial=True):
+def capture_device_recording(plan, *, name=None, description="", meta=None, include_serial=True):
     """
     Acquire the subject's structural sources and export a data-shape recording.
 
     Args:
-        subject (Device): The mapped synchronization subject.
-        server_key (str): The configured LibreNMS server.
+        plan (AcquisitionPlan): The selected resources and their resolved owners. Web callers authorize every owner.
         name (str | None): The recording name, or None for a name derived from the host id.
         description (str): The recording description.
         meta (dict | None): Extra recording metadata.
@@ -104,9 +103,7 @@ def capture_device_recording(subject, *, server_key, name=None, description="", 
     """
     try:
         snapshot = acquire(
-            subject,
-            server_key=server_key,
-            resources=CAPTURE_RESOURCES,
+            plan,
             include_serial=include_serial,
             inventory_probes=True,
         )

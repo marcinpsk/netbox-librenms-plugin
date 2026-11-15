@@ -5,6 +5,10 @@ Each test renders the real Modules tab over HTTP from a recording, takes the gra
 carries, changes one input, and posts the form. A writer must refuse a changed input before any write.
 """
 
+from netbox_librenms_plugin import source_cache
+from netbox_librenms_plugin.acquisition.registry import Resource
+from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_modules_snapshot
+
 import json
 import re
 from copy import deepcopy
@@ -103,7 +107,6 @@ def edit_cached_row(device, index, **fields):
     """Change one row of the cached snapshot, as the next refresh would after LibreNMS reported it."""
     from netbox_librenms_plugin import source_cache
     from netbox_librenms_plugin.acquisition.registry import Resource
-    from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_modules_snapshot
 
     snapshot = source_cache.read(device, Resource.MODULES, SERVER_KEY)
     inventory = snapshot.value(Resource.MODULES, "inventory")
@@ -1904,7 +1907,14 @@ def test_a_verify_grant_checks_its_state_like_every_other_grant(ui, vc_grants):
 
     from netbox_librenms_plugin.tests.source_snapshot_helpers import module_inventory
 
-    assert grant.check_state(module_inventory(page, SERVER_KEY), load_inventory_policy(page.pk)) is grant
+    assert (
+        grant.check_state(
+            module_inventory(page, SERVER_KEY),
+            load_inventory_policy(page.pk),
+            source=source_cache.read(page, Resource.MODULES, SERVER_KEY),
+        )
+        is grant
+    )
 
 
 def test_a_selected_install_onto_another_member_needs_the_verified_override(ui, vc_grants):
@@ -2785,3 +2795,118 @@ def test_a_flagged_row_renders_none_of_the_write_controls_its_flag_withholds(fla
     assert expected <= offered
     assert not flagged & FLAG_WITHHOLDS[flag]
     assert flagged == offered - FLAG_WITHHOLDS[flag]
+
+
+def test_same_inventory_from_a_new_source_refuses_an_old_grant(ui, c8300, settings, librenms_server):
+    from core.models import ObjectChange
+    from netbox_librenms_plugin.tests.conftest import configure_librenms_servers
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import module_inventory
+
+    device, entities = c8300
+    action, fields = _install_form(ui, device, entities)
+    snapshot = source_cache.read(device, Resource.MODULES, SERVER_KEY)
+    original_inventory = module_inventory(device, SERVER_KEY)
+    new_id = snapshot.resources[Resource.MODULES].host.librenms_id + 1
+    seed_mapping(device, SERVER_KEY, own=new_id)
+    configure_librenms_servers(
+        settings, {SERVER_KEY: {"librenms_url": librenms_server.url, "api_token": "grants-token", "verify_ssl": False}}
+    )
+    librenms_server.register(
+        f"/api/v0/inventory/{new_id}/all", {"status": "ok", "inventory": snapshot.value(Resource.MODULES, "inventory")}
+    )
+    for suffix in ("ports", "transceivers"):
+        rows = snapshot.value(Resource.MODULES, suffix)
+        librenms_server.register(f"/api/v0/devices/{new_id}/{suffix}", {"status": "ok", suffix: rows})
+    assert rendered_module_form(render(ui, device), "install-module", REAL_NIM)
+    assert module_inventory(device, SERVER_KEY) == original_inventory
+    assert len(librenms_server.requests) == 3
+    before = (written_state(device), ObjectChange.objects.count())
+
+    response = post(ui, action, fields)
+
+    assert (written_state(device), ObjectChange.objects.count()) == before
+    assert any("LibreNMS inventory changed" in text for text in messages_of(response))
+
+
+@pytest.mark.parametrize("revoked_after_render", [False, True])
+def test_hidden_source_owner_refuses_cached_render_verify_and_write(client, ui, vc_grants, revoked_after_render):
+    from core.models import ObjectChange
+    from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
+    from users.models import ObjectPermission
+
+    from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms, make_request
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+    owner, subject = vc_grants()
+    user = make_user_with_perms(
+        "source-owner-visibility",
+        [
+            ("view", ModuleBay),
+            ("view", ModuleType),
+            ("add", Module),
+            ("add", Interface),
+            ("change", Interface),
+            ("delete", Interface),
+        ],
+    )
+    from netbox_librenms_plugin.tests.view_test_helpers import grant
+
+    user = grant(
+        user,
+        "view",
+        Device,
+        constraints=None if revoked_after_render else {"pk": subject.pk},
+        name="source-owner-visibility-device",
+    )
+    # An authorized actor obtains the shared source and its forms before this actor loses access.
+    content = render(ui, subject)
+    checked = verify(ui, content, subject, subject, CARD)
+    assert checked.status_code == 200
+    action, fields = rendered_module_form(checked.json()["formatted_row"]["actions"], "install-module", CARD)
+    if revoked_after_render:
+        client.force_login(user)
+        content = render(client, subject)
+        checked = verify(client, content, subject, subject, CARD)
+        assert checked.status_code == 200
+        action, fields = rendered_module_form(checked.json()["formatted_row"]["actions"], "install-module", CARD)
+        ObjectPermission.objects.filter(name="source-owner-visibility-device").update(constraints={"pk": subject.pk})
+        from django.contrib.auth import get_user_model
+
+        user = get_user_model().objects.get(pk=user.pk)
+    client.force_login(user)
+    request = make_request("get", {"server_key": SERVER_KEY}, user=user)
+    view = DeviceModuleTableView()
+    view.setup(request, pk=subject.pk)
+    assert view.get_context_data(request, subject, server_key=SERVER_KEY)["table"] is None
+    checked = verify(client, content, subject, subject, CARRIER)
+    assert checked.status_code == 404
+    assert checked.json()["status"] == "error"
+    assert "inventory_binding" not in checked.content.decode()
+    assert Device.objects.restrict(user, "view").filter(pk=subject.pk).exists()
+    before = (written_state(subject), ObjectChange.objects.count())
+    response = post(client, action, fields)
+    assert (written_state(subject), ObjectChange.objects.count()) == before
+    assert "No cached inventory data. Please refresh modules first." in messages_of(response)
+
+
+def test_cache_only_source_can_authorize_a_permitted_module_write(ui, c8300):
+    from django.core.cache import cache
+    from extras.models import CustomField
+
+    from netbox_librenms_plugin.librenms_api import librenms_id_cache_key
+    from netbox_librenms_plugin.server_mappings import read_mapping
+
+    device, entities = c8300
+    source_id = read_mapping(device).own_id(SERVER_KEY)
+    CustomField.objects.filter(name="librenms_id").delete()
+    device.custom_field_data = {}
+    device.save()
+    cache.set(librenms_id_cache_key(device, SERVER_KEY), source_id, timeout=60)
+    action, fields = _install_form(ui, device, entities)
+    post(ui, action, fields)
+    from dcim.models import Module
+
+    assert Module.objects.filter(device=device).count() == 1
+    device.refresh_from_db()
+    assert read_mapping(device).own_id(SERVER_KEY) is None

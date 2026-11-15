@@ -1,5 +1,7 @@
 """Cable readers and actions use the bound source facts for the current actor."""
 
+from netbox_librenms_plugin.acquisition.coordinator import plan_acquisition
+
 import pytest
 
 from netbox_librenms_plugin.acquisition.coordinator import plan_acquisition

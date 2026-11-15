@@ -1,5 +1,8 @@
 """Capture exports acquisition responses and replays them through acquisition and assessment."""
 
+from netbox_librenms_plugin.acquisition.coordinator import plan_acquisition
+from netbox_librenms_plugin.data_shapes.capture import CAPTURE_RESOURCES
+
 import pytest
 
 from netbox_librenms_plugin.acquisition.coordinator import acquire
@@ -43,8 +46,7 @@ def serve(server, device_id=5501, *, os_name="capture-test", sensors=()):
 
 def capture(subject, *, include_serial=True):
     return capture_device_recording(
-        subject,
-        server_key="default",
+        plan_acquisition(subject, server_key="default", resources=CAPTURE_RESOURCES),
         name="captured",
         description="Captured fixture.",
         meta={},
@@ -70,7 +72,9 @@ def test_capture_replays_source_acquisition_including_a_vc_member(
             "/api/v0/devices/5501/links",
             {"status": "ok", "links": [{"local_port_id": 7, "remote_device_id": 5502, "remote_port_id": 7}]},
         )
-    before = acquire(subject, server_key="default", resources=RESOURCES, include_serial=True, inventory_probes=True)
+    before = acquire(
+        plan_acquisition(subject, server_key="default", resources=RESOURCES), include_serial=True, inventory_probes=True
+    )
 
     recording = capture(subject)
 
@@ -81,7 +85,9 @@ def test_capture_replays_source_acquisition_including_a_vc_member(
     configure_librenms(
         {"default": {"librenms_url": replay.url, "api_token": replay_api.headers["X-Auth-Token"], "verify_ssl": False}}
     )
-    after = acquire(subject, server_key="default", resources=RESOURCES, include_serial=True, inventory_probes=True)
+    after = acquire(
+        plan_acquisition(subject, server_key="default", resources=RESOURCES), include_serial=True, inventory_probes=True
+    )
     assert assess_modules(after, subject=subject, serial_context=module_serial_context(subject)) == assess_modules(
         before, subject=subject, serial_context=module_serial_context(subject)
     )
@@ -289,7 +295,7 @@ def test_a_missing_transceiver_route_is_captured_and_replays_the_same_modules(
     missing = {"status": "error", "message": "Not Found"}
     live_librenms.server.register("/api/v0/devices/5501/transceivers", missing, status=404)
     before = assess_modules(
-        acquire(subject, server_key="default", resources=RESOURCES),
+        acquire(plan_acquisition(subject, server_key="default", resources=RESOURCES)),
         subject=subject,
         serial_context=module_serial_context(subject),
     )
@@ -304,9 +310,54 @@ def test_a_missing_transceiver_route_is_captured_and_replays_the_same_modules(
     assert before["inventory"]
     assert (
         assess_modules(
-            acquire(subject, server_key="default", resources=RESOURCES),
+            acquire(plan_acquisition(subject, server_key="default", resources=RESOURCES)),
             subject=subject,
             serial_context=module_serial_context(subject),
         )
         == before
     )
+
+
+@pytest.mark.django_db
+def test_capture_uses_the_owners_the_request_authorized_before_a_chassis_change(client, live_librenms, monkeypatch):
+    from dcim.models import Device
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.data_shapes import capture as capture_module
+    from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
+    chassis, (owner, subject, hidden) = make_virtual_chassis_members("capture-planned-owner", count=3)
+    seed_mapping(owner, "default", own=5501)
+    from django.core.cache import cache
+    from netbox_librenms_plugin.librenms_api import librenms_id_cache_key
+
+    cache.set(librenms_id_cache_key(subject, "default"), 5502, timeout=60)
+    serve(live_librenms.server, 5501)
+    serve(live_librenms.server, 5502)
+    user = make_user_with_perms(
+        "capture-planned-owner", [("view", Device)], constraints={"pk__in": [owner.pk, subject.pk]}
+    )
+    client.force_login(user)
+    real_acquire = capture_module.acquire
+
+    def move_identity_then_acquire(plan, **options):
+        assert {resource: planned.pk for resource, planned in plan.owners} == {
+            Resource.INTERFACES: owner.pk,
+            Resource.IP_ADDRESSES: subject.pk,
+            Resource.CABLES: owner.pk,
+            Resource.MODULES: owner.pk,
+        }
+        # A concurrent assignment changes future owner selection after this request's permission checks.
+        seed_mapping(hidden, "default", own=5503)
+        # Move the authorized owner out of the chassis. Its identity remains a usable source.
+        Device.objects.filter(pk=owner.pk).update(virtual_chassis=None, vc_position=None)
+        return real_acquire(plan, **options)
+
+    monkeypatch.setattr(capture_module, "acquire", move_identity_then_acquire)
+    response = client.get(
+        reverse("plugins:netbox_librenms_plugin:capture_data_shape", kwargs={"device_id": subject.pk}),
+        {"server_key": "default"},
+    )
+    assert response.status_code == 200
+    assert response.context["recording_json"]
+    assert all("5503" not in request["path"] for request in live_librenms.server.requests)

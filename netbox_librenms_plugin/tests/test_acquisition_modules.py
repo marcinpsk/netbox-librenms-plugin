@@ -1,5 +1,7 @@
 """Modules acquisition records source facts over the local LibreNMS HTTP stub."""
 
+from netbox_librenms_plugin.acquisition.coordinator import plan_acquisition
+
 import pytest
 
 from netbox_librenms_plugin.acquisition.coordinator import SubjectNotMapped, acquire
@@ -29,7 +31,7 @@ def serve(server, *, inventory=INVENTORY, ports=PORTS, transceivers=TRANSCEIVERS
 
 
 def acquire_modules(subject, **options):
-    return acquire(subject, server_key="default", resources=[Resource.MODULES], **options)
+    return acquire(plan_acquisition(subject, server_key="default", resources=[Resource.MODULES]), **options)
 
 
 @pytest.mark.django_db
@@ -598,3 +600,269 @@ def test_numeric_inventory_names_remain_raw_and_assess_without_a_type_error(live
     assert assess(snapshot, subject=subject, serial_context=module_serial_context(subject))["inventory"][0][
         "entPhysicalName"
     ] == str(name)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("expiry", ["delete", "expire"])
+def test_cached_identity_acquisition_and_snapshot_binding_are_read_only(live_librenms, expiry):
+    from core.models import ObjectChange
+    from dcim.models import Device
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin import source_cache
+    from netbox_librenms_plugin.librenms_api import librenms_id_cache_key
+
+    subject = make_device("cache-only-source")
+    key = librenms_id_cache_key(subject, "default")
+    cache.set(key, str(HOST_ID), timeout=60)
+    serve(live_librenms.server)
+    before = (Device.objects.get(pk=subject.pk).last_updated, ObjectChange.objects.count(), cache.get(key))
+
+    snapshot = acquire_modules(subject)
+
+    assert snapshot.resources[Resource.MODULES].host.librenms_id == HOST_ID
+    assert len(live_librenms.server.requests) == 3
+    assert (Device.objects.get(pk=subject.pk).last_updated, ObjectChange.objects.count(), cache.get(key)) == before
+    assert source_cache.store(subject, Resource.MODULES, snapshot)
+    assert source_cache.read(subject, Resource.MODULES, "default") == snapshot
+    if expiry == "expire":
+        cache.expire(key, 0)
+    else:
+        cache.delete(key)
+    assert source_cache.read(subject, Resource.MODULES, "default") is None
+    assert not source_cache.store(subject, Resource.MODULES, snapshot)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("cached", [True, -1, "not-an-id", "7/ports", {}, None])
+def test_cached_identity_must_be_a_valid_id_on_the_selected_server(live_librenms, cached):
+    from django.core.cache import cache
+    from netbox_librenms_plugin.librenms_api import librenms_id_cache_key, stored_librenms_id
+
+    subject = make_device("cache-only-invalid")
+    cache.set(librenms_id_cache_key(subject, "other"), HOST_ID, timeout=60)
+    cache.set(librenms_id_cache_key(subject, "default"), cached, timeout=60)
+    assert stored_librenms_id(subject, "default") is None
+    with pytest.raises(SubjectNotMapped):
+        acquire_modules(subject)
+    assert live_librenms.server.requests == []
+
+
+@pytest.mark.django_db
+def test_stored_identity_precedes_cached_identity(live_librenms):
+    from django.core.cache import cache
+    from netbox_librenms_plugin.librenms_api import librenms_id_cache_key
+
+    subject = device("cache-shadowed")
+    cache.set(librenms_id_cache_key(subject, "default"), HOST_ID + 1, timeout=60)
+    serve(live_librenms.server)
+    assert acquire_modules(subject).resources[Resource.MODULES].host.librenms_id == HOST_ID
+
+
+@pytest.mark.django_db
+def test_modules_refresh_without_the_optional_mapping_field(client, live_librenms):
+    from django.urls import reverse
+    from extras.models import CustomField
+
+    from netbox_librenms_plugin import source_cache
+    from netbox_librenms_plugin.server_mappings import read_mapping
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+
+    CustomField.objects.filter(name="librenms_id").delete()
+    subject = make_device("optional-mapping.example.invalid")
+    live_librenms.server.register(
+        f"/api/v0/devices/{subject.name}", {"status": "ok", "devices": [{"device_id": HOST_ID}]}
+    )
+    serve(live_librenms.server)
+    client.force_login(make_superuser("optional-module-refresh"))
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:device_module_sync", args=[subject.pk]),
+        {"server_key": "default"},
+        HTTP_HX_REQUEST="true",
+    )
+    assert response.status_code == 200
+    assert response.context["module_sync"]["table"] is not None
+    subject.refresh_from_db()
+    assert read_mapping(subject).own_id("default") is None
+    assert source_cache.read(subject, Resource.MODULES, "default") is not None
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("mapped", [False, True])
+def test_hidden_modules_source_owner_prevents_discovery_and_resource_http(client, live_librenms, mapped):
+    from dcim.models import Device
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
+    _vc, (owner, subject) = make_virtual_chassis_members("hidden-module-source")
+    if mapped:
+        seed_mapping(owner, "default", own=HOST_ID)
+    live_librenms.server.register(
+        f"/api/v0/devices/{owner.name}", {"status": "ok", "devices": [{"device_id": HOST_ID}]}
+    )
+    serve(live_librenms.server)
+    user = make_user_with_perms("hidden-module-source", [("view", Device)], constraints={"pk": subject.pk})
+    client.force_login(user)
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:device_module_sync", args=[subject.pk]),
+        {"server_key": "default"},
+        HTTP_HX_REQUEST="true",
+    )
+    assert response.status_code == 404
+    assert live_librenms.server.requests == []
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("phase", ["acquire", "store"])
+def test_identity_lost_after_discovery_reports_expiry_instead_of_not_found(client, live_librenms, monkeypatch, phase):
+    from django.core.cache import cache
+    from django.urls import reverse
+    from extras.models import CustomField
+
+    from netbox_librenms_plugin import source_cache
+    from netbox_librenms_plugin.librenms_api import librenms_id_cache_key
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+
+    CustomField.objects.filter(name="librenms_id").delete()
+    subject = make_device("expired-source.example.invalid")
+    discovery_path = f"/api/v0/devices/{subject.name}"
+    live_librenms.server.register(discovery_path, {"status": "ok", "devices": [{"device_id": HOST_ID}]})
+    serve(live_librenms.server)
+    real_operation = getattr(source_cache, phase)
+
+    def expire_then_run(*args, **options):
+        assert cache.get(librenms_id_cache_key(subject, "default")) == HOST_ID
+        cache.expire(librenms_id_cache_key(subject, "default"), 0)
+        return real_operation(*args, **options)
+
+    monkeypatch.setattr(source_cache, phase, expire_then_run)
+    client.force_login(make_superuser("expired-module-source"))
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:device_module_sync", args=[subject.pk]),
+        {"server_key": "default"},
+        HTTP_HX_REQUEST="true",
+    )
+    assert response.status_code == 200
+    assert response.context["module_sync"]["table"] is None
+    messages = " ".join(str(message) for message in response.context["messages"])
+    assert "identity changed or expired" in messages
+    assert "Device not found" not in messages
+    paths = [request["path"] for request in live_librenms.server.requests]
+    assert paths[0] == discovery_path
+    assert len(paths) == (1 if phase == "acquire" else 4)
+    assert source_cache.read(subject, Resource.MODULES, "default") is None
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("change", ["replace-cache", "stored-replacement", "oob-link", "owner"])
+def test_a_cached_source_cannot_survive_a_changed_effective_binding(live_librenms, change):
+    from django.core.cache import cache
+    from netbox_librenms_plugin import source_cache
+    from netbox_librenms_plugin.librenms_api import librenms_id_cache_key
+    from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
+
+    subject = make_device("cache-binding-source")
+    cache.set(librenms_id_cache_key(subject, "default"), HOST_ID, timeout=60)
+    serve(live_librenms.server)
+    snapshot = acquire_modules(subject)
+    assert source_cache.store(subject, Resource.MODULES, snapshot)
+    assert source_cache.read(subject, Resource.MODULES, "default") is not None
+    if change == "replace-cache":
+        cache.set(librenms_id_cache_key(subject, "default"), HOST_ID + 1, timeout=60)
+    elif change == "stored-replacement":
+        seed_mapping(subject, "default", own=HOST_ID + 1)
+    elif change == "oob-link":
+        seed_mapping(subject, "default", oob=OOB_ID)
+    else:
+        owner = seed_mapping(make_device("cache-binding-new-owner"), "default", own=HOST_ID)
+        make_virtual_chassis("cache-binding-new-chassis", owner, subject)
+    assert source_cache.read(subject, Resource.MODULES, "default") is None
+    assert not source_cache.store(subject, Resource.MODULES, snapshot)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("phase", ["acquisition", "discovery", "outcome"])
+def test_a_refresh_clears_only_the_planned_owner_snapshot_after_owner_change(client, live_librenms, monkeypatch, phase):
+    from dcim.models import Device, VirtualChassis
+    from django.core.cache import cache
+    from django.urls import reverse
+
+    from netbox_librenms_plugin import source_cache
+    from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, SyncTabState
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping_row
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_modules_snapshot
+    from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+    from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+    chassis, (planned, subject) = make_virtual_chassis_members("refresh-planned-snapshot")
+    seed_mapping(planned, "default", own=HOST_ID)
+    replacement = seed_mapping(make_device("refresh-hidden-replacement"), "default", own=OOB_ID)
+    seed_modules_snapshot(planned, INVENTORY)
+    seed_modules_snapshot(replacement, INVENTORY)
+    planned_key = source_cache.snapshot_key(planned, Resource.MODULES, "default")
+    replacement_key = source_cache.snapshot_key(replacement, Resource.MODULES, "default")
+    old_planned = cache.get(planned_key)
+    replacement_payload = cache.get(replacement_key)
+    assert old_planned is not None and replacement_payload is not None
+    planned_coordinator = SyncCacheConsistency(planned)
+    replacement_coordinator = SyncCacheConsistency(replacement)
+    planned_coordinator.mark_refresh_success(SyncTab.MODULES, "default")
+    replacement_coordinator.mark_refresh_success(SyncTab.MODULES, "default")
+    planned_state_key = planned_coordinator.state_key(SyncTab.MODULES, "default")
+    replacement_state_key = replacement_coordinator.state_key(SyncTab.MODULES, "default")
+    replacement_state = cache.get(replacement_state_key)
+    user = make_user_with_perms(
+        "refresh-planned-snapshot", [("view", Device)], constraints={"pk__in": [planned.pk, subject.pk]}
+    )
+
+    def change_owner():
+        Device.objects.filter(pk=planned.pk).update(virtual_chassis=None, vc_position=None)
+        Device.objects.filter(pk=replacement.pk).update(virtual_chassis=chassis, vc_position=1)
+        VirtualChassis.objects.filter(pk=chassis.pk).update(master=replacement)
+
+    serve(live_librenms.server)
+    if phase == "outcome":
+        real_store = source_cache.store
+
+        def store_then_change(*args):
+            stored = real_store(*args)
+            assert stored
+            change_owner()
+            return stored
+
+        monkeypatch.setattr(source_cache, "store", store_then_change)
+    else:
+        if phase == "discovery":
+            seed_stored_mapping_row(planned, {})
+        real_resolve = BaseModuleTableView.resolve_librenms_id
+
+        def resolve_with_owner_change(view, owner):
+            assert owner.pk == planned.pk
+            if phase == "discovery":
+                change_owner()
+                return real_resolve(view, owner)
+            identity = real_resolve(view, owner)
+            change_owner()
+            return identity
+
+        monkeypatch.setattr(BaseModuleTableView, "resolve_librenms_id", resolve_with_owner_change)
+    client.force_login(user)
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:device_module_sync", args=[subject.pk]),
+        {"server_key": "default"},
+        HTTP_HX_REQUEST="true",
+    )
+    assert response.status_code == 200
+    assert response.context["module_sync"]["table"] is None
+    if phase == "outcome":
+        assert cache.get(planned_key) != old_planned
+    else:
+        assert cache.get(planned_key) is None
+    assert cache.get(replacement_key) == replacement_payload
+    assert source_cache.read(replacement, Resource.MODULES, "default") is not None
+    assert cache.get(replacement_state_key) == replacement_state
+    assert replacement_coordinator.status("default")["modules"]["snapshot_available"]
+    assert cache.get(planned_state_key)["state"] == SyncTabState.REFRESH_FAILED.value
+    assert live_librenms.server.requests
+    assert all(str(OOB_ID) not in request["path"] for request in live_librenms.server.requests)

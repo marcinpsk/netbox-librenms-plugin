@@ -23,7 +23,9 @@ from netbox_librenms_plugin.data_shapes.anonymize import (
     find_pii,
     has_serial_input,
 )
-from netbox_librenms_plugin.data_shapes.capture import capture_device_recording
+from netbox_librenms_plugin.data_shapes.capture import CAPTURE_RESOURCES, capture_device_recording
+from netbox_librenms_plugin import source_cache
+from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.data_shapes.compress import compress_recording
 from netbox_librenms_plugin.data_shapes.signature import (
     classify_novelty,
@@ -32,7 +34,6 @@ from netbox_librenms_plugin.data_shapes.signature import (
 )
 from netbox_librenms_plugin.models import RuleConfigurationError
 from netbox_librenms_plugin.serial_identity import SerialRules, plain_context
-from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.views.mixins import (
     LibreNMSAPIMixin,
     LibreNMSPermissionMixin,
@@ -66,12 +67,11 @@ class CaptureDataShapeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
         if server_key is None:
             return self._error(request, device, "Selected LibreNMS server is no longer configured.")
 
-        sync_device = get_librenms_sync_device(device, server_key=server_key) or device
-        sync_device = self.restrict_object_or_404(Device, pk=sync_device.pk)
+        plan = source_cache.authorized_plan(request, device, server_key=server_key, resources=CAPTURE_RESOURCES)
+        sync_device = plan.owner(Resource.MODULES)
         try:
             recording = capture_device_recording(
-                device,
-                server_key=server_key,
+                plan,
                 name=f"{device.name}-shape",
                 description=f"Captured from {device.name}.",
                 include_serial=True,

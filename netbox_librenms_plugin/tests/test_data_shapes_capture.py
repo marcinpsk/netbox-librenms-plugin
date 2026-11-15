@@ -6,6 +6,9 @@ re-run the real detection / relationship-resolution logic on the captured record
 capture and replay are faithful.
 """
 
+from netbox_librenms_plugin.acquisition.coordinator import plan_acquisition
+from netbox_librenms_plugin.data_shapes.capture import CAPTURE_RESOURCES
+
 import pytest
 
 from netbox_librenms_plugin.data_shapes.capture import capture_device_recording
@@ -174,8 +177,7 @@ def test_capture_records_verbatim_transceiver_body(recording_server):
     _server, api = recording_server(seed)
 
     captured = capture_device_recording(
-        _subject(api, 2000),
-        server_key=api.server_key,
+        plan_acquisition(_subject(api, 2000), server_key=api.server_key, resources=CAPTURE_RESOURCES)
     )
 
     assert (
@@ -190,7 +192,8 @@ def test_capture_meta_os_does_not_override_captured_device_os(recording_server):
     _server, api = recording_server(seed)
 
     captured = capture_device_recording(
-        _subject(api, 2000), server_key=api.server_key, meta={"os": "SPOOFED", "note": "kept"}
+        plan_acquisition(_subject(api, 2000), server_key=api.server_key, resources=CAPTURE_RESOURCES),
+        meta={"os": "SPOOFED", "note": "kept"},
     )
 
     assert captured["meta"]["os"] == "sros"  # the captured device OS wins over the caller's
@@ -203,8 +206,7 @@ def test_capture_serial_sensors_excludes_other_devices(recording_server):
     _server, api = recording_server(seed)
 
     captured = capture_device_recording(
-        _subject(api, 2000),
-        server_key=api.server_key,
+        plan_acquisition(_subject(api, 2000), server_key=api.server_key, resources=CAPTURE_RESOURCES)
     )
 
     recorded = captured["responses"]["GET /api/v0/resources/sensors"]["sensors"]
@@ -236,8 +238,7 @@ def test_capture_serial_sensors_reads_the_server_every_time(recording_server):
     hits.clear()
 
     captured = capture_device_recording(
-        _subject(api, 2000),
-        server_key=api.server_key,
+        plan_acquisition(_subject(api, 2000), server_key=api.server_key, resources=CAPTURE_RESOURCES)
     )
 
     # The capture asked the server itself rather than reusing the previous read.
@@ -255,8 +256,7 @@ def test_capture_serial_sensors_roundtrip_outcome(recording_server):
     source_links = map_sensors_to_serial_links(source_sensors, device_id=2000)
 
     captured = capture_device_recording(
-        _subject(api, 2000),
-        server_key=api.server_key,
+        plan_acquisition(_subject(api, 2000), server_key=api.server_key, resources=CAPTURE_RESOURCES)
     )
 
     _server2, api2 = recording_server(captured, server_key="replay")
@@ -278,8 +278,7 @@ def test_capture_embeds_serial_type_patterns(recording_server):
     _server, api = recording_server(_transceiver_serial_seed())
 
     captured = capture_device_recording(
-        _subject(api, 2000),
-        server_key=api.server_key,
+        plan_acquisition(_subject(api, 2000), server_key=api.server_key, resources=CAPTURE_RESOURCES)
     )
 
     assert captured["serial_type_patterns"] == get_serial_sensor_type_patterns()
@@ -298,8 +297,7 @@ def test_serial_roundtrip_survives_empty_pattern_table(recording_server):
     assert source_links  # non-vacuous: there must be rows to reproduce
 
     captured = capture_device_recording(
-        _subject(api, 2000),
-        server_key=api.server_key,
+        plan_acquisition(_subject(api, 2000), server_key=api.server_key, resources=CAPTURE_RESOURCES)
     )
 
     SerialSensorTypePattern.objects.all().delete()  # the bare replay host
@@ -326,8 +324,7 @@ def test_capture_skips_sensors_route_when_device_has_none(recording_server):
     _server, api = recording_server(seed)
 
     captured = capture_device_recording(
-        _subject(api, 2000),
-        server_key=api.server_key,
+        plan_acquisition(_subject(api, 2000), server_key=api.server_key, resources=CAPTURE_RESOURCES)
     )
 
     assert "GET /api/v0/resources/sensors" not in captured["responses"]
@@ -341,7 +338,8 @@ def test_capture_marks_serial_sensors_unavailable_when_the_sensor_table_fails(re
     server.register("/api/v0/resources/sensors", {"message": "Server Error"}, status=status, method="GET")
 
     captured = capture_device_recording(
-        _subject(api, 2000), server_key=api.server_key, meta={"serial_sensors": "spoofed"}
+        plan_acquisition(_subject(api, 2000), server_key=api.server_key, resources=CAPTURE_RESOURCES),
+        meta={"serial_sensors": "spoofed"},
     )
 
     assert captured["meta"]["serial_sensors"] == "unavailable"
@@ -355,7 +353,8 @@ def test_capture_drops_a_caller_supplied_serial_sensor_marker(recording_server):
     _server, api = recording_server(_transceiver_serial_seed())
 
     captured = capture_device_recording(
-        _subject(api, 2000), server_key=api.server_key, meta={"serial_sensors": "unavailable"}
+        plan_acquisition(_subject(api, 2000), server_key=api.server_key, resources=CAPTURE_RESOURCES),
+        meta={"serial_sensors": "unavailable"},
     )
 
     assert "serial_sensors" not in captured["meta"]
@@ -398,8 +397,7 @@ def test_capture_records_the_ip_and_links_routes(recording_server):
     _server, api = recording_server(seed)
 
     captured = capture_device_recording(
-        _subject(api, 3100),
-        server_key=api.server_key,
+        plan_acquisition(_subject(api, 3100), server_key=api.server_key, resources=CAPTURE_RESOURCES)
     )
 
     assert captured["responses"]["GET /api/v0/devices/3100/ip"] == seed["responses"]["GET /api/v0/devices/3100/ip"]
@@ -420,8 +418,7 @@ def test_capture_records_only_this_devices_vrfs(recording_server):
     _server, api = recording_server(seed)
 
     captured = capture_device_recording(
-        _subject(api, 3100),
-        server_key=api.server_key,
+        plan_acquisition(_subject(api, 3100), server_key=api.server_key, resources=CAPTURE_RESOURCES)
     )
 
     recorded = captured["responses"]["GET /api/v0/routing/vrf"]
@@ -442,8 +439,7 @@ def test_capture_rejects_vrfs_without_a_device(missing_owner, recording_server):
 
     with pytest.raises(RuntimeError, match="VRF.*device_id"):
         capture_device_recording(
-            _subject(api, 3100),
-            server_key=api.server_key,
+            plan_acquisition(_subject(api, 3100), server_key=api.server_key, resources=CAPTURE_RESOURCES)
         )
 
 
@@ -456,8 +452,7 @@ def test_capture_skips_the_vrf_route_when_no_port_is_vrf_tagged(recording_server
     _server, api = recording_server(seed)
 
     captured = capture_device_recording(
-        _subject(api, 3100),
-        server_key=api.server_key,
+        plan_acquisition(_subject(api, 3100), server_key=api.server_key, resources=CAPTURE_RESOURCES)
     )
 
     assert "GET /api/v0/routing/vrf" not in captured["responses"]
@@ -471,8 +466,7 @@ def test_capture_replays_the_vrf_route_for_the_reader(recording_server):
     )
     _server, api = recording_server(seed)
     captured = capture_device_recording(
-        _subject(api, 3100),
-        server_key=api.server_key,
+        plan_acquisition(_subject(api, 3100), server_key=api.server_key, resources=CAPTURE_RESOURCES)
     )
 
     _server2, api2 = recording_server(captured)
@@ -492,8 +486,7 @@ def test_capture_fails_when_the_vrf_read_fails(recording_server):
 
     with pytest.raises(RuntimeError, match="routing/vrf"):
         capture_device_recording(
-            _subject(api, 3100),
-            server_key=api.server_key,
+            plan_acquisition(_subject(api, 3100), server_key=api.server_key, resources=CAPTURE_RESOURCES)
         )
 
 
@@ -506,7 +499,8 @@ def test_capture_roundtrip_preserves_vc_outcome(recording_server):
     _server, api = recording_server(seed)
 
     captured = capture_device_recording(
-        _subject(api, seed["device_id"]), server_key=api.server_key, name="captured-cisco"
+        plan_acquisition(_subject(api, seed["device_id"]), server_key=api.server_key, resources=CAPTURE_RESOURCES),
+        name="captured-cisco",
     )
 
     # os metadata is lifted verbatim from the captured device-info response (the bundled seed's OS
@@ -548,7 +542,8 @@ def test_capture_roundtrip_preserves_a_junos_fpc_virtual_chassis(recording_serve
     _server, api = recording_server(seed)
 
     captured = capture_device_recording(
-        _subject(api, seed["device_id"]), server_key=api.server_key, name="captured-junos"
+        plan_acquisition(_subject(api, seed["device_id"]), server_key=api.server_key, resources=CAPTURE_RESOURCES),
+        name="captured-junos",
     )
 
     _server2, api2 = recording_server(captured)
@@ -564,7 +559,8 @@ def test_capture_roundtrip_preserves_port_relationships(recording_server):
     _server, api = recording_server(seed)
 
     captured = capture_device_recording(
-        _subject(api, seed["device_id"]), server_key=api.server_key, name="captured-lag"
+        plan_acquisition(_subject(api, seed["device_id"]), server_key=api.server_key, resources=CAPTURE_RESOURCES),
+        name="captured-lag",
     )
 
     _server2, api2 = recording_server(captured)
@@ -581,8 +577,7 @@ def test_capture_records_verbatim_port_body(recording_server):
     _server, api = recording_server(seed)
 
     captured = capture_device_recording(
-        _subject(api, _SINGLE_RECORDING_ID),
-        server_key=api.server_key,
+        plan_acquisition(_subject(api, _SINGLE_RECORDING_ID), server_key=api.server_key, resources=CAPTURE_RESOURCES)
     )
 
     captured_ports = captured["responses"][f"GET /api/v0/devices/{_SINGLE_RECORDING_ID}/ports"]
@@ -629,7 +624,10 @@ def test_capture_mirrors_inventory_all_fallback_when_server_ignores_filters(reco
         },
     }
     _server, api = recording_server(seed)
-    captured = capture_device_recording(_subject(api, 1000), server_key=api.server_key, name="captured-fallback")
+    captured = capture_device_recording(
+        plan_acquisition(_subject(api, 1000), server_key=api.server_key, resources=CAPTURE_RESOURCES),
+        name="captured-fallback",
+    )
 
     # Without the fallback the filtered inventory is empty → the VC is silently downgraded to a plain
     # device. The capture must reproduce the entities under the filtered key the signature/replay read.
@@ -663,8 +661,7 @@ def test_capture_records_the_full_inventory_the_modules_tab_reads(recording_serv
     }
     _server, api = recording_server(seed)
     captured = capture_device_recording(
-        _subject(api, 1000),
-        server_key=api.server_key,
+        plan_acquisition(_subject(api, 1000), server_key=api.server_key, resources=CAPTURE_RESOURCES)
     )
 
     _replay_server, replay_api = recording_server(captured)
@@ -687,8 +684,7 @@ def test_capture_raises_when_filtered_inventory_request_has_transport_error(capt
 
     with pytest.raises(RuntimeError, match="inventory/1000"):
         capture_device_recording(
-            _subject(api, 1000),
-            server_key=api.server_key,
+            plan_acquisition(_subject(api, 1000), server_key=api.server_key, resources=CAPTURE_RESOURCES)
         )
 
 
@@ -703,8 +699,7 @@ def test_capture_rejects_transceivers_when_request_has_transport_error(recording
 
     with pytest.raises(RuntimeError, match="transceivers.*no HTTP response"):
         capture_device_recording(
-            _subject(api, _STACK_RECORDING_ID),
-            server_key=api.server_key,
+            plan_acquisition(_subject(api, _STACK_RECORDING_ID), server_key=api.server_key, resources=CAPTURE_RESOURCES)
         )
 
 
@@ -715,8 +710,7 @@ def test_capture_rejects_transceiver_server_error(capture_http):
 
     with pytest.raises(RuntimeError, match="transceivers"):
         capture_device_recording(
-            _subject(api, 1000),
-            server_key=api.server_key,
+            plan_acquisition(_subject(api, 1000), server_key=api.server_key, resources=CAPTURE_RESOURCES)
         )
 
 
@@ -739,8 +733,7 @@ def test_capture_raises_when_required_route_has_transport_error(capture_http):
 
     with pytest.raises(RuntimeError, match="port_stack"):
         capture_device_recording(
-            _subject(api, 1000),
-            server_key=api.server_key,
+            plan_acquisition(_subject(api, 1000), server_key=api.server_key, resources=CAPTURE_RESOURCES)
         )
 
 
@@ -749,7 +742,8 @@ def test_capture_ignores_caller_supplied_oob_id_without_controller(capture_http)
     server, api = capture_http({k: (200, v) for k, v in _all_ok_routes().items()})
 
     captured = capture_device_recording(
-        _subject(api, 1000), server_key=api.server_key, meta={"oob_id": 999, "note": "kept"}
+        plan_acquisition(_subject(api, 1000), server_key=api.server_key, resources=CAPTURE_RESOURCES),
+        meta={"oob_id": 999, "note": "kept"},
     )
 
     # The spoofed oob_id is dropped (no controller was captured); unrelated caller meta is preserved.
@@ -766,8 +760,7 @@ def test_capture_raises_when_inventory_all_fallback_fails(capture_http):
 
     with pytest.raises(RuntimeError, match="inventory/1000/all"):
         capture_device_recording(
-            _subject(api, 1000),
-            server_key=api.server_key,
+            plan_acquisition(_subject(api, 1000), server_key=api.server_key, resources=CAPTURE_RESOURCES)
         )
 
 
@@ -780,8 +773,7 @@ def test_capture_raises_when_inventory_all_fallback_errors_5xx(capture_http):
 
     with pytest.raises(RuntimeError, match="inventory/1000/all"):
         capture_device_recording(
-            _subject(api, 1000),
-            server_key=api.server_key,
+            plan_acquisition(_subject(api, 1000), server_key=api.server_key, resources=CAPTURE_RESOURCES)
         )
 
 
@@ -800,8 +792,7 @@ def test_capture_raises_when_inventory_all_fallback_has_no_definitive_answer(sta
 
     with pytest.raises(RuntimeError, match="inventory/1000/all"):
         capture_device_recording(
-            _subject(api, 1000),
-            server_key=api.server_key,
+            plan_acquisition(_subject(api, 1000), server_key=api.server_key, resources=CAPTURE_RESOURCES)
         )
 
 
@@ -812,8 +803,7 @@ def test_capture_raises_when_inventory_all_fallback_returns_404(capture_http):
 
     with pytest.raises(RuntimeError, match="inventory/1000/all"):
         capture_device_recording(
-            _subject(api, 1000),
-            server_key=api.server_key,
+            plan_acquisition(_subject(api, 1000), server_key=api.server_key, resources=CAPTURE_RESOURCES)
         )
 
 
@@ -822,8 +812,7 @@ def test_capture_replays_successful_empty_inventory_fallback(recording_server, c
     server, api = capture_http({k: (200, v) for k, v in _all_ok_routes().items()})
 
     captured = capture_device_recording(
-        _subject(api, 1000),
-        server_key=api.server_key,
+        plan_acquisition(_subject(api, 1000), server_key=api.server_key, resources=CAPTURE_RESOURCES)
     )
     _server, replay_api = recording_server(captured)
 
@@ -839,8 +828,7 @@ def test_capture_omits_serial_type_patterns_when_device_has_no_serial_sensors(ca
     server, api = capture_http({k: (200, v) for k, v in _all_ok_routes().items()})
 
     captured = capture_device_recording(
-        _subject(api, 1000),
-        server_key=api.server_key,
+        plan_acquisition(_subject(api, 1000), server_key=api.server_key, resources=CAPTURE_RESOURCES)
     )
 
     assert "GET /api/v0/resources/sensors" not in captured["responses"]
@@ -854,8 +842,7 @@ def test_capture_fails_when_configured_oob_controller_ports_fail(capture_http):
 
     with pytest.raises(RuntimeError, match="devices/2000/ports"):
         capture_device_recording(
-            _subject(api, 1000, oob_id=2000),
-            server_key=api.server_key,
+            plan_acquisition(_subject(api, 1000, oob_id=2000), server_key=api.server_key, resources=CAPTURE_RESOURCES)
         )
 
 
@@ -872,7 +859,7 @@ def test_capture_rejects_an_invalid_linked_controller(capture_http, oob_id):
     )
 
     with pytest.raises(RuntimeError):
-        capture_device_recording(subject, server_key=api.server_key)
+        capture_device_recording(plan_acquisition(subject, server_key=api.server_key, resources=CAPTURE_RESOURCES))
 
     assert server.requests
     assert [request["path"] for request in server.requests if str(oob_id) in request["path"].split("/")] == []
@@ -885,8 +872,7 @@ def test_capture_fails_when_successful_route_has_no_json_body(capture_http):
 
     with pytest.raises(RuntimeError, match="devices/1000/ports"):
         capture_device_recording(
-            _subject(api, 1000),
-            server_key=api.server_key,
+            plan_acquisition(_subject(api, 1000), server_key=api.server_key, resources=CAPTURE_RESOURCES)
         )
 
 
@@ -910,8 +896,7 @@ def test_capture_rejects_malformed_success_envelopes(path, payload, oob_id, capt
 
     with pytest.raises(RuntimeError, match=path):
         capture_device_recording(
-            _subject(api, 1000, oob_id=oob_id),
-            server_key=api.server_key,
+            plan_acquisition(_subject(api, 1000, oob_id=oob_id), server_key=api.server_key, resources=CAPTURE_RESOURCES)
         )
 
 
@@ -922,8 +907,7 @@ def test_capture_accepts_port_stack_success_envelopes(payload, capture_http):
     _register_answer(server, "devices/1000/port_stack", (200, payload))
 
     captured = capture_device_recording(
-        _subject(api, 1000),
-        server_key=api.server_key,
+        plan_acquisition(_subject(api, 1000), server_key=api.server_key, resources=CAPTURE_RESOURCES)
     )
 
     assert captured["responses"]["GET /api/v0/devices/1000/port_stack"] == payload
@@ -937,8 +921,7 @@ def test_capture_rejects_incomplete_port_stack_mappings(mapping, capture_http):
 
     with pytest.raises(RuntimeError, match="port_stack"):
         capture_device_recording(
-            _subject(api, 1000),
-            server_key=api.server_key,
+            plan_acquisition(_subject(api, 1000), server_key=api.server_key, resources=CAPTURE_RESOURCES)
         )
 
 
@@ -948,8 +931,7 @@ def test_capture_required_route_http_error_raises(capture_http):
 
     with pytest.raises(RuntimeError, match="HTTP 404"):
         capture_device_recording(
-            _subject(api, 55),
-            server_key=api.server_key,
+            plan_acquisition(_subject(api, 55), server_key=api.server_key, resources=CAPTURE_RESOURCES)
         )
 
 
@@ -973,8 +955,7 @@ def test_capture_snapshots_os_scoped_lag_patterns(capture_http):
     )
 
     recording = capture_device_recording(
-        _subject(api, 77),
-        server_key=api.server_key,
+        plan_acquisition(_subject(api, 77), server_key=api.server_key, resources=CAPTURE_RESOURCES)
     )
 
     # Scoped to the captured OS: the other platform's pattern is not embedded.
@@ -1004,8 +985,7 @@ def test_capture_uses_the_models_normalized_os_scope(capture_http):
     )
 
     recording = capture_device_recording(
-        _subject(api, 87),
-        server_key=api.server_key,
+        plan_acquisition(_subject(api, 87), server_key=api.server_key, resources=CAPTURE_RESOURCES)
     )
 
     assert recording["lag_patterns"] == {"  captest-normalized  ": r"^Bundle\d+$"}
@@ -1031,8 +1011,7 @@ def test_capture_omits_an_empty_lag_pattern(capture_http):
 
     assert (
         capture_device_recording(
-            _subject(api, 77),
-            server_key=api.server_key,
+            plan_acquisition(_subject(api, 77), server_key=api.server_key, resources=CAPTURE_RESOURCES)
         )["lag_patterns"]
         == {}
     )
@@ -1058,8 +1037,7 @@ def test_capture_snapshots_the_os_sap_pattern_and_omits_a_blank_one(capture_http
     )
 
     recording = capture_device_recording(
-        _subject(api, 78),
-        server_key=api.server_key,
+        plan_acquisition(_subject(api, 78), server_key=api.server_key, resources=CAPTURE_RESOURCES)
     )
 
     assert recording["sap_patterns"] == {"captest-sap": ":"}
@@ -1077,8 +1055,7 @@ def test_capture_snapshots_the_os_sap_pattern_and_omits_a_blank_one(capture_http
 
     assert (
         capture_device_recording(
-            _subject(api_nosap, 79),
-            server_key=api_nosap.server_key,
+            plan_acquisition(_subject(api_nosap, 79), server_key=api_nosap.server_key, resources=CAPTURE_RESOURCES)
         )["sap_patterns"]
         == {}
     )
@@ -1103,8 +1080,7 @@ def test_capture_blank_os_embeds_no_lag_patterns(blank_os, capture_http):
     )
 
     recording = capture_device_recording(
-        _subject(api, 78),
-        server_key=api.server_key,
+        plan_acquisition(_subject(api, 78), server_key=api.server_key, resources=CAPTURE_RESOURCES)
     )
 
     assert recording["lag_patterns"] == {}
@@ -1128,8 +1104,7 @@ def test_capture_without_an_os_embeds_no_lag_patterns(capture_http):
     )
 
     recording = capture_device_recording(
-        _subject(api, 79),
-        server_key=api.server_key,
+        plan_acquisition(_subject(api, 79), server_key=api.server_key, resources=CAPTURE_RESOURCES)
     )
 
     assert recording["lag_patterns"] == {}

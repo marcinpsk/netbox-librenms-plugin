@@ -2,6 +2,10 @@
 
 import re
 
+from netbox_librenms_plugin import source_cache
+from netbox_librenms_plugin.acquisition.registry import Resource
+from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_modules_snapshot
+
 from netbox_librenms_plugin.tests.source_snapshot_helpers import transceiver_row
 
 import pytest
@@ -113,7 +117,6 @@ def _post_selected(device, rows, indices, librenms_id, live_librenms, **source_f
 def _seed_pre_version_snapshot(view, device, rows):
     """Store an older source schema so a writer refuses it without deleting it."""
     from django.core.cache import cache
-    from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_modules_snapshot
 
     snapshot = seed_modules_snapshot(device, rows)
     payload = {**snapshot.to_payload(), "schema": 0}
@@ -678,7 +681,9 @@ class TestUpdateModuleSerialView:
             device_id=device.pk,
             server_key="default",
             action=ACTION_UPDATE_SERIAL,
-            inventory_digest=module_inventory_snapshot_digest(inventory),
+            inventory_digest=module_inventory_snapshot_digest(
+                inventory, source=source_cache.read(device, Resource.MODULES, "default")
+            ),
             policy_fingerprint=load_inventory_policy(device.pk).fingerprint,
             render_mode=RENDER_ATTRIBUTED,
             ent_index=11,

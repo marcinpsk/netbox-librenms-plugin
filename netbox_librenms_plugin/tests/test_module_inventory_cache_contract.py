@@ -84,7 +84,7 @@ class TestWritersCheckTheOobLinkOfTheSnapshot:
         from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 
         if link == "none":
-            seed_stored_mapping(device, {"default": {"id": 7}})
+            seed_stored_mapping(device, {"default": {"id": 7}}, save=True)
         elif link == "linked":
             seed_mapping(device, "default", oob=999)
         elif link == "corrupt":
@@ -109,7 +109,7 @@ class TestWritersCheckTheOobLinkOfTheSnapshot:
         from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
 
         seed_stored_mapping(
-            device, {"default": {"id": 7, **({"oob": {"id": cached_oob}} if cached_oob is not None else {})}}
+            device, {"default": {"id": 7, **({"oob": {"id": cached_oob}} if cached_oob is not None else {})}}, save=True
         )
         seed_modules_snapshot(device, inventory, oob_inventory=[] if cached_oob is not None else None)
         self._link(device, link)

@@ -1,5 +1,7 @@
 """Seed source snapshots through the real snapshot types and the web transport."""
 
+from netbox_librenms_plugin.acquisition.coordinator import plan_acquisition
+
 from uuid import uuid4
 
 from django.utils import timezone
@@ -474,9 +476,7 @@ def acquire_recording(api, recording, resources, *, include_serial=False, invent
     }
     with override_settings(PLUGINS_CONFIG=config):
         snapshot = acquire(
-            subject,
-            server_key=api.server_key,
-            resources=resources,
+            plan_acquisition(subject, server_key=api.server_key, resources=resources),
             include_serial=include_serial,
             inventory_probes=inventory_probes,
         )
@@ -572,3 +572,10 @@ def seed_mapped_modules(
     return seed_modules_snapshot(
         subject, inventory, ports, transceivers, server_key=server_key, oob_inventory=oob_inventory
     )
+
+
+def stored_identity(subject, resource, server_key):
+    """Return the effective identity of the source owner for a deliberate stale-source seed."""
+    from netbox_librenms_plugin.librenms_api import stored_librenms_id
+
+    return stored_librenms_id(resource_owner(subject, resource, server_key), server_key)

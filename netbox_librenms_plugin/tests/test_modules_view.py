@@ -5,6 +5,8 @@ Focuses on the bay-scope tracking in _build_context and the serial
 comparison logic in _build_row.
 """
 
+from netbox_librenms_plugin.acquisition.coordinator import plan_acquisition
+
 from netbox_librenms_plugin.tests.source_snapshot_helpers import transceiver_row
 
 from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_mapped_modules
@@ -73,7 +75,7 @@ def _assess_inventory(view, inventory):
         if key not in server.routes:
             server.register(f"/api/v0/devices/{device_id}/{suffix}", {"status": "ok", field: []})
     subject = seed_mapping(make_device(f"assess-inventory-{device_id}"), "test-server", own=device_id)
-    snapshot = acquire(subject, server_key="test-server", resources=[Resource.MODULES])
+    snapshot = acquire(plan_acquisition(subject, server_key="test-server", resources=[Resource.MODULES]))
     result = assess(snapshot, subject=subject, serial_context=module_serial_context(subject))
     return result["inventory"], result["blocked"] or None
 
@@ -1938,7 +1940,15 @@ def _run_build_context_real(view, inventory_data, device):
     from netbox_librenms_plugin.tests.view_test_helpers import make_request
 
     rows_store = _captured_table_view(view)
-    view._build_context(make_request("get"), device, inventory_data)
+    from netbox_librenms_plugin.librenms_api import stored_librenms_id
+
+    source = seed_mapped_modules(
+        device,
+        inventory_data,
+        server_key=view.librenms_api.server_key,
+        librenms_id=stored_librenms_id(device, view.librenms_api.server_key) or 1,
+    )
+    view._build_context(make_request("get"), device, inventory_data, source=source)
     return rows_store.get("rows", [])
 
 
