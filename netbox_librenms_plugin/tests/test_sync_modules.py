@@ -2097,7 +2097,19 @@ def _move_leave_form(world, user):
     }
 
 
+def _bay_template_leave_form(world, user):
+    from django.urls import reverse
+
+    return reverse("plugins:netbox_librenms_plugin:add_bay_template", kwargs={"pk": world["page"].pk}), {
+        "server_key": "default",
+        "target_kind": "device_type",
+        "target_pk": world["member"].device_type_id,
+        "name": "Membership Bay",
+    }
+
+
 LEAVE_WRITERS = {
+    "bay-template": _bay_template_leave_form,
     "carrier-install": _carrier_leave_form,
     "indexed-install": _indexed_leave_form,
     "branch": _branch_leave_form,
@@ -2111,11 +2123,13 @@ LEAVE_WRITERS = {
 
 
 def _leave_written_state():
-    from dcim.models import Interface, Module
+    from dcim.models import Interface, Module, ModuleBay, ModuleBayTemplate
 
     return (
         set(Module.objects.values_list("pk", "device_id", "module_bay_id", "module_type_id", "serial")),
         set(Interface.objects.values_list("pk", "device_id", "module_id", "type")),
+        set(ModuleBay.objects.values_list("pk", "device_id", "module_id")),
+        set(ModuleBayTemplate.objects.values_list("pk", "device_type_id", "module_type_id")),
     )
 
 
@@ -4947,51 +4961,109 @@ def test_a_module_write_that_waits_for_an_unlink_reads_the_unlinked_mapping(clie
     assert read_mapping(interface).own_id("default") is None
 
 
-# Read-only, or no port write: the mismatch preview only renders, and Mark built-in writes a rule.
-_GRANT_READS_WITHOUT_A_LOCK = {("ModuleMismatchPreviewView", "get"), ("MarkBuiltInView", "_plan")}
+# This inventory covers the nine participating writers. It checks direct calls in their
+# named methods, not aliases, arbitrary control flow or core/API writers.
+_MODULE_WRITER_METHODS = {
+    "InstallModuleView": "post",
+    "InstallBranchView": "_install_branch",
+    "InstallSelectedView": "post",
+    "UpdateModuleSerialView": "post",
+    "UpdateModuleInterfaceView": "post",
+    "ApplyModuleInterfaceTypesView": "post",
+    "ReplaceModuleView": "post",
+    "MoveModuleView": "post",
+    "AddBayTemplateView": "post",
+}
+_GRANT_WRITERS = frozenset(_MODULE_WRITER_METHODS) - {
+    "ApplyModuleInterfaceTypesView",
+    "MoveModuleView",
+    "AddBayTemplateView",
+}
 
 
-def _grant_reads_before_their_lock(source):
-    """Return (class, function) of each module grant read that no destination lock precedes in its function."""
+def _module_writer_protocol(source):
+    """Return the known methods seen and direct-call violations of their required phase order."""
     import ast
 
-    locks = {"_lock_module_destinations", "_lock_module_scope"}
-    found = []
-    for owner in ast.walk(ast.parse(source)):
-        if not isinstance(owner, ast.ClassDef | ast.Module):
-            continue
+    def name(call):
+        return getattr(call.func, "id", getattr(call.func, "attr", ""))
+
+    seen, violations = set(), []
+    for owner in (node for node in ast.parse(source).body if isinstance(node, ast.ClassDef)):
         for function in (node for node in owner.body if isinstance(node, ast.FunctionDef)):
-            calls = [
-                node for node in ast.walk(function) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-            ]
-            locked_at = [call.lineno for call in calls if call.func.id in locks]
-            found.extend(
-                (getattr(owner, "name", "<module>"), function.name)
-                for call in calls
-                if call.func.id == "_authorize_module_grant" and not any(line < call.lineno for line in locked_at)
-            )
-    return found
+            calls = [node for node in ast.walk(function) if isinstance(node, ast.Call)]
+            if function.name == "_granted_selection":
+                forbidden = {"lock_module_write", "select_for_update", "_validate_module_destinations"}
+                if any(name(call) in forbidden or name(call).startswith("_lock_module_") for call in calls):
+                    violations.append((owner.name, "selection planning locks"))
+            if _MODULE_WRITER_METHODS.get(owner.name) != function.name:
+                continue
+            seen.add(owner.name)
+            owners = [call for call in calls if name(call) == "lock_module_write"]
+            observed = [call for call in calls if name(call) == "observe_module_write"]
+            membership = [call for call in calls if name(call) == "_validate_module_destinations"]
+            types = [call for call in calls if name(call) in {"lock_module_types", "lock_template_type"}]
+            if len(owners) != 1 or len(membership) != 1 or not observed:
+                violations.append((owner.name, "complete owner and membership phases"))
+                continue
+            if any(not any(keyword.arg == "page_device" for keyword in call.keywords) for call in observed):
+                violations.append((owner.name, "page and observed chassis owners"))
+            if membership[0].lineno <= owners[0].end_lineno or any(
+                call.lineno <= membership[0].end_lineno for call in types
+            ):
+                violations.append((owner.name, "membership follows owners and precedes types"))
+            if owner.name in _GRANT_WRITERS:
+                grants = [call for call in calls if name(call) == "_authorize_module_grant"]
+                final_wait = max(call.end_lineno for call in [*owners, *membership, *types])
+                if not grants or max(call.lineno for call in grants) <= final_wait:
+                    violations.append((owner.name, "final grant follows every wait"))
+    return seen, violations
 
 
-def test_every_module_writer_locks_its_destinations_before_it_reads_its_grant():
-    """A grant read before the lock can read a host binding that an unlink is about to remove."""
+def test_every_module_writer_validates_membership_and_final_grants_after_its_complete_owner_locks():
     import inspect
 
     from netbox_librenms_plugin.views.sync import modules
 
-    assert set(_grant_reads_before_their_lock(inspect.getsource(modules))) == _GRANT_READS_WITHOUT_A_LOCK
+    source = inspect.getsource(modules)
+    seen, violations = _module_writer_protocol(source)
+    assert seen == set(_MODULE_WRITER_METHODS)
+    assert violations == []
+    assert "FOR KEY SHARE" not in source
+    assert "def _lock_module_destinations" not in source
+    assert "def _lock_module_scope" not in source
 
 
-def test_the_lock_order_guard_finds_a_grant_read_before_the_lock():
+@pytest.mark.parametrize("bad_phase", ["none", "grant", "membership", "page"])
+def test_the_module_protocol_guard_allows_planning_and_requires_final_authority(bad_phase):
     source = """
-class InstallView:
+class InstallModuleView:
     def post(self):
-        _authorize_module_grant(page_device)
-        _lock_module_destinations(page_device, targets)
-
-    def put(self):
-        _lock_module_scope(page_device)
-        _authorize_module_grant(page_device)
+        granted = _authorize_module_grant(page)
+        scope = lock_module_write(observe_module_write(page_device=page))
+        _validate_module_destinations(page, targets, scope)
+        scope = scope.lock_module_types(types)
+        granted = _authorize_module_grant(page)
 """
+    if bad_phase == "grant":
+        source = source.rsplit("        granted = _authorize_module_grant(page)", 1)[0]
+    elif bad_phase == "membership":
+        source = source.replace(
+            "        scope = lock_module_write(observe_module_write(page_device=page))\n"
+            "        _validate_module_destinations(page, targets, scope)",
+            "        _validate_module_destinations(page, targets, scope)\n"
+            "        scope = lock_module_write(observe_module_write(page_device=page))",
+        )
+    elif bad_phase == "page":
+        source = source.replace("page_device=page", "device_ids=targets")
+    _seen, violations = _module_writer_protocol(source)
+    assert bool(violations) is (bad_phase != "none")
 
-    assert _grant_reads_before_their_lock(source) == [("InstallView", "post")]
+
+def test_the_module_protocol_guard_refuses_locks_in_selection_planning():
+    source = """
+class InstallSelectedView:
+    def _granted_selection(self):
+        _lock_module_destinations(page, targets)
+"""
+    assert _module_writer_protocol(source)[1] == [("InstallSelectedView", "selection planning locks")]

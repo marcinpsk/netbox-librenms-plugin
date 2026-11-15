@@ -8,7 +8,6 @@ from django.contrib.messages import get_messages
 from django.core.cache import cache
 from django.urls import reverse
 
-from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.conftest import make_device, make_superuser, make_vm
 from netbox_librenms_plugin.tests.mapping_fixtures import (
     seed_mapping,

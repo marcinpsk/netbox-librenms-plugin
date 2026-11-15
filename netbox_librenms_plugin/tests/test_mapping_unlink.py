@@ -961,7 +961,6 @@ def test_a_stale_host_change_sends_no_event(client, server, flushed_events):
     assert flushed_events == []
 
 
-
 @transactional_db_with_all_apps()
 def test_a_refused_host_change_write_sends_no_event(client, server, flushed_events):
     """The cleared interfaces leave the change scope, so the whole savepoint rolls back with its events."""
@@ -975,7 +974,6 @@ def test_a_refused_host_change_write_sends_no_event(client, server, flushed_even
 
     assert mapping_summary(_fresh(owner))["default"]["own"] == 4100
     assert flushed_events == []
-
 
 
 @transactional_db_with_all_apps()
@@ -992,7 +990,6 @@ def test_an_applied_host_change_sends_the_events_of_the_object_and_the_cleared_i
     assert sorted(flushed_events) == sorted(
         [("device", owner.pk), ("interface", interfaces["both"].pk), ("interface", interfaces["default"].pk)]
     )
-
 
 
 @transactional_db_with_all_apps()
@@ -1013,7 +1010,6 @@ def test_a_port_written_on_a_scope_interface_after_the_offer_makes_the_host_chan
     assert mapping_summary(_fresh(owner))["default"]["own"] == 4100
     assert mapping_summary(_fresh(interfaces["none"])) == {"default": {"own": 5150}}
     assert mapping_summary(_fresh(interfaces["default"])) == {"default": {"own": 5101}}
-
 
 
 @transactional_db_with_all_apps()
@@ -1044,7 +1040,6 @@ def test_a_host_change_whose_device_moved_before_the_lock_retries_and_is_stale(c
     assert chassis_locks == [owner.virtual_chassis_id, other_chassis.pk]
     assert "assumptions.chassis" in stale_paths(response, owner.name)
     assert mapping_summary(_fresh(owner))["default"]["own"] == 4100
-
 
 
 @transactional_db_with_all_apps()
@@ -1081,7 +1076,6 @@ def test_a_lock_conflict_of_the_host_change_write_gives_the_try_again_answer(cli
     assert mapping_summary(_fresh(owner))["default"]["own"] == 4100
     assert _ports(interfaces)["default"] == {"default": {"own": 5101}}
     assert [record.getMessage() for record in caplog.records if record.levelname == "ERROR"] == []
-
 
 
 @pytest.mark.django_db
@@ -1127,4 +1121,3 @@ class TestTheHostChangeRoute:
 
         assert domain_state() == before
         assert len(message_texts(response)) == 1
-

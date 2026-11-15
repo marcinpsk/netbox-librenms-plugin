@@ -128,35 +128,6 @@ def link_selected(client, object_type, tokens, *, server_key="default"):
     return client.post(url, {"server_key": server_key, FIELD: list(tokens)})
 
 
-def lifecycle_url(obj):
-    """Return the lifecycle route of *obj*: its POST applies the host change token."""
-    return reverse(
-        "plugins:netbox_librenms_plugin:mapping_lifecycle", kwargs={"object_type": model_name(obj), "pk": obj.pk}
-    )
-
-
-def edit_mapping(client, obj, server_key="default", **typed):
-    """Post the mapping editor of *obj* with the shown entry of *server_key* and the *typed* values."""
-    from netbox_librenms_plugin.server_mappings import host_entry
-
-    entry = host_entry(type(obj).objects.get(pk=obj.pk), server_key)
-    shown = {
-        "own_id": "" if entry.own_id is None else str(entry.own_id),
-        "oob_id": "" if entry.oob_id is None else str(entry.oob_id),
-        "oob_type": entry.oob_type or "",
-    }
-    data = {"object_type": model_name(obj), "server_key": server_key, **shown}
-    data.update({f"shown_{field}": value for field, value in shown.items()})
-    data.update(typed)
-    return client.post(reverse("plugins:netbox_librenms_plugin:edit_server_mapping", args=[obj.pk]), data)
-
-
-def offered_token(response):
-    """Return the token of a rendered host change confirmation."""
-    assert response.status_code == 200, (response.status_code, message_texts(response))
-    return response.context["token"]
-
-
 def message_texts(response):
     """Return the texts of the messages that a test client response queued."""
     return [str(message) for message in response.wsgi_request._messages]

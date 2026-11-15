@@ -187,30 +187,3 @@ def wrapped_database_error(sqlstate):
     except DatabaseError as exc:
         return exc
     raise AssertionError("the wrapper did not raise")
-
-
-def commit_when_waited(write, run, *, timeout=5.0):
-    """
-    Hold the uncommitted ``write(other)`` of a second connection, and return ``run()`` on the test's connection.
-
-    The second connection commits once ``run()`` waits for a lock. A ``run()`` that never waits for one
-    fails the test after *timeout*.
-    """
-    from netbox_librenms_plugin.tests.conftest import bounded_executor
-
-    run_pid = backend_pid(connection)
-    written = Event()
-
-    def write_and_commit_when_waited():
-        with second_connection() as other:
-            write(other)
-            written.set()
-            wait_for_lock_wait(other, run_pid, timeout)
-            other.commit()
-
-    with bounded_executor(max_workers=1) as executor:
-        writer = executor.submit(write_and_commit_when_waited)
-        assert written.wait(timeout), "the second connection did not write"
-        result = run()
-        writer.result(timeout=2 * timeout)
-    return result
