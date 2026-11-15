@@ -335,7 +335,7 @@ class _GrantedInventory:
 
 
 def _authorize_module_grant(page_device, server_key, action, token, *, user):
-    """Read the granted source and policy before a module write."""
+    """Read the current source and policy before planning and after the final writer lock."""
     from dcim.models import Device
     from netbox_librenms_plugin.models import RuleConfigurationError
 
@@ -1112,7 +1112,11 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                 scope = scope.lock_module_types([module_type.pk])
                 if indexed:
                     granted = _authorize_module_grant(
-                        self, page_device, server_key, ACTION_INSTALL_MODULE, request.POST.get("inventory_binding")
+                        page_device,
+                        server_key,
+                        ACTION_INSTALL_MODULE,
+                        request.POST.get("inventory_binding"),
+                        user=request.user,
                     )
                 # Re-fetch bay under lock to prevent TOCTOU race with concurrent installs.
                 locked_bay = (
@@ -1342,7 +1346,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         )
 
         granted = _authorize_module_grant(
-            self, page_device, server_key, ACTION_INSTALL_BRANCH, request.POST.get("inventory_binding")
+            page_device, server_key, ACTION_INSTALL_BRANCH, request.POST.get("inventory_binding"), user=request.user
         )
 
         # Preload all ModuleBayMappings once to avoid N+1 per-item queries.
@@ -2069,7 +2073,11 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                     is not None
                 )
                 granted = _authorize_module_grant(
-                    self, page_device, server_key, ACTION_INSTALL_SELECTED, request.POST.get("inventory_binding")
+                    page_device,
+                    server_key,
+                    ACTION_INSTALL_SELECTED,
+                    request.POST.get("inventory_binding"),
+                    user=request.user,
                 )
                 plan = self._granted_selection(request, granted, selected_list, page_device, server_key)
                 scope.require_devices([target.pk for _item, target, _pinned in plan])
@@ -2268,7 +2276,11 @@ class UpdateModuleSerialView(
                     rules=serial_rules,
                 )
                 granted = _authorize_module_grant(
-                    self, page_device, server_key, ACTION_UPDATE_SERIAL, request.POST.get("inventory_binding")
+                    page_device,
+                    server_key,
+                    ACTION_UPDATE_SERIAL,
+                    request.POST.get("inventory_binding"),
+                    user=request.user,
                 )
                 target_device = scope.devices[target_device.pk]
                 module = (
@@ -2369,7 +2381,11 @@ class UpdateModuleInterfaceView(
                     rules=granted.policy.serial_identity_rules,
                 )
                 granted = _authorize_module_grant(
-                    self, page_device, server_key, ACTION_UPDATE_INTERFACE, request.POST.get("inventory_binding")
+                    page_device,
+                    server_key,
+                    ACTION_UPDATE_INTERFACE,
+                    request.POST.get("inventory_binding"),
+                    user=request.user,
                 )
                 target_device = scope.devices[target_device.pk]
                 module.refresh_from_db()
@@ -3085,7 +3101,11 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
 
                 scope = scope.lock_module_types([matched_type.pk])
                 granted = _authorize_module_grant(
-                    self, page_device, server_key, ACTION_REPLACE_MODULE, request.POST.get("inventory_binding")
+                    page_device,
+                    server_key,
+                    ACTION_REPLACE_MODULE,
+                    request.POST.get("inventory_binding"),
+                    user=request.user,
                 )
                 # Re-fetch with row lock to prevent concurrent modifications
                 installed_module = (

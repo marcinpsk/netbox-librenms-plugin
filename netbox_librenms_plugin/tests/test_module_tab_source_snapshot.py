@@ -531,17 +531,17 @@ def test_refresh_does_not_report_success_when_its_source_owner_is_deleted(client
     map_device_to_librenms(owner, HOST_ID, server_key="default")
     client.force_login(make_superuser("refresh-owner-deleted-user"))
     serve(live_librenms.server, inventory=INVENTORY, transceivers=[])
-    read = source_cache.read
+    read = source_cache.require_cached
     deleted = []
 
-    def read_then_delete_owner(subject_, resource, server_key, **kwargs):
-        snapshot = read(subject_, resource, server_key, **kwargs)
-        if resource is Resource.MODULES and snapshot is not None and not deleted:
+    def read_then_delete_owner(subject_, resource, server_key, snapshot, **kwargs):
+        bound_owner = read(subject_, resource, server_key, snapshot, **kwargs)
+        if resource is Resource.MODULES and not deleted:
             deleted.append(owner.pk)
             Device.objects.filter(pk=owner.pk).delete()
-        return snapshot
+        return bound_owner
 
-    monkeypatch.setattr(source_cache, "read", read_then_delete_owner)
+    monkeypatch.setattr(source_cache, "require_cached", read_then_delete_owner)
 
     response = refresh(client, subject)
 

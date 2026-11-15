@@ -13,8 +13,6 @@ Then the action that follows from the first: when the neighbour IS modelled and 
 the row can never be synced, so it offers to create the far end and the cable together.
 """
 
-from netbox_librenms_plugin.acquisition.coordinator import plan_acquisition
-
 import json
 import time
 

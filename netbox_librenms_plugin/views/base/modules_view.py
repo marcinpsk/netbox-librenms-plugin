@@ -42,7 +42,6 @@ from netbox_librenms_plugin.server_mappings import (
     port_holders,
     read_mapping,
 )
-from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.sync_cache import (
     SyncCacheConsistency,
     SyncTab,
@@ -710,27 +709,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         """Return the table class. Subclasses must override this method."""
         raise NotImplementedError("Subclasses must implement get_table()")
 
-    def _get_sync_device(self, obj, server_key=None):
-        """
-        Resolve the LibreNMS sync device for cache reads/writes in VC contexts.
-
-        Scoped to the POST-resolved server when provided (fallback: session server)
-        so a VC member synced from a non-default server resolves the right sync
-        device.
-
-        Args:
-            obj: The NetBox device (or VC member) being synced.
-            server_key: The LibreNMS server key; falls back to the session server
-                when None.
-
-        Returns:
-            The resolved sync device, or *obj* itself for non-VC devices.
-
-        """
-        server_key = server_key or self.librenms_api.server_key
-        sync_device = get_librenms_sync_device(obj, server_key=server_key)
-        return sync_device or obj
-
     def _count_adoptable_template_interfaces(self, module):
         """Count standalone interfaces that match an installed module's interface templates."""
         from dcim.models import Interface
@@ -841,13 +819,19 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         snapshot_cached = coordinator.mark_refresh_outcome(
             SyncTab.MODULES, server_key, actor_id=request_actor_id(request)
         )
-        # The response reads the page and its chassis once (the policy) and the snapshot once; the table and
-        # the outcome both come from these reads, so a later cache or chassis state cannot change them.
+        # The table uses the acquired receipt and one page policy. It never substitutes another cached snapshot.
         page, policy, read_membership = self._page_policy(pk)
-        snapshot = None if page is None else source_cache.read(page, Resource.MODULES, server_key)
+        snapshot = None if page is None else result.snapshot
         context = None
+        source_changed = False
         if snapshot is not None:
-            context = self.get_context_data(request, page, server_key=server_key, snapshot=snapshot, policy=policy)
+            try:
+                context = self.get_context_data(request, page, server_key=server_key, snapshot=snapshot, policy=policy)
+            except source_cache.SourceChanged:
+                source_changed = True
+            except source_cache.SnapshotUnavailable:
+                snapshot_cached = False
+                coordinator.mark_refresh_failure(SyncTab.MODULES, server_key, actor_id=request_actor_id(request))
         final = self.get_object(pk)
         refused = bool(context and (context.get("vc_numbering_error") or context.get("inventory_rule_error")))
         if (
@@ -862,7 +846,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             page, context = final, {"object": final, "table": None, "cache_expiry": None, "server_key": server_key}
         # A rule or numbering refusal comes after a complete read: the snapshot and the ready state stay.
         if not snapshot_cached:
-            messages.error(request, "Inventory data could not be cached. Refresh Modules before syncing.")
+            messages.error(
+                request,
+                source_cache.IDENTITY_CHANGED
+                if source_changed
+                else "Inventory data could not be cached. Refresh Modules before syncing.",
+            )
         elif not refused:
             messages.success(request, "Inventory data refreshed successfully.")
         return self.render_sync_partial(request, page, server_key, {"module_sync": context})
@@ -910,13 +899,21 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
         from netbox_librenms_plugin.models import RuleConfigurationError
 
+        provided_snapshot = snapshot is not None
+        owner = None
+        if provided_snapshot:
+            owner = source_cache.require_cached(obj, Resource.MODULES, scoped_server, snapshot, user=request.user)
         try:
             if policy is None:
                 policy = load_inventory_policy(obj.pk)
             if snapshot is None:
                 snapshot = source_cache.read(obj, Resource.MODULES, scoped_server, user=request.user)
-            if snapshot is None or not source_cache.snapshot_visible(request.user, snapshot, Resource.MODULES):
+            if snapshot is None:
                 return None, None, None, None, empty
+            if not provided_snapshot:
+                owner = source_cache.receipt_owner(obj, Resource.MODULES, scoped_server, snapshot, user=request.user)
+                if owner is None:
+                    return None, None, None, None, empty
             assessed = read_module_assessment(
                 obj, scoped_server, snapshot, serial_context=policy.chassis_serial_context()
             )
@@ -932,7 +929,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 messages.warning(request, source_cache.blocker_notice(blockers))
         if "host" in assessed["blocked"]:
             return None, None, None, None, empty
-        owner = self._get_sync_device(obj, server_key=scoped_server)
         return scoped_server, owner, assessed, policy, None
 
     def get_context_data(self, request, obj, server_key=None, *, snapshot=None, policy=None):
@@ -941,7 +937,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
         A refresh passes the *snapshot* and the *policy* it read, so the table makes no read of its own.
         """
-        scoped_server, sync_device, inventory, policy, empty = self._read_render_inventory(
+        scoped_server, _sync_device, inventory, policy, empty = self._read_render_inventory(
             request, obj, server_key, snapshot=snapshot, policy=policy
         )
         if empty is not None:
@@ -953,7 +949,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             obj,
             inventory["inventory"],
             server_key=scoped_server,
-            sync_device=sync_device,
             policy=policy,
             source=inventory["source_snapshot"],
         )
@@ -965,7 +960,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         The page table is not built again: the verify grant carries what it showed for the row.
         """
         # The verify answer is JSON, so a queued notice would show on a later page.
-        scoped_server, sync_device, inventory, policy, empty = self._read_render_inventory(
+        scoped_server, _sync_device, inventory, policy, empty = self._read_render_inventory(
             request, page_device, server_key, notify=False
         )
         if empty is not None:
@@ -978,7 +973,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             inventory["inventory"],
             source=inventory["source_snapshot"],
             server_key=scoped_server,
-            sync_device=sync_device,
             policy=policy,
             pin_to=member,
         )
@@ -989,7 +983,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         obj,
         inventory_data,
         server_key=None,
-        sync_device=None,
         *,
         source,
         policy=None,
@@ -1004,7 +997,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             inventory_data (list[dict]): The inventory snapshot.
             source (SourceSnapshot): The source that produced this assessment.
             server_key (str | None): The LibreNMS server of the snapshot.
-            sync_device (Device | None): The device that owns the cached snapshot.
             policy (InventoryPolicy | None): The policy inputs of *obj*, loaded here when None.
             pin_to (Device | None): A member that every row is attributed to, as the verify view renders it.
 
@@ -1023,9 +1015,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         from netbox_librenms_plugin.models import RuleConfigurationError
 
         try:
-            return self._build_table_context(
-                request, obj, inventory_data, sync_device, source=source, policy=policy, pin_to=pin_to
-            )
+            return self._build_table_context(request, obj, inventory_data, source=source, policy=policy, pin_to=pin_to)
         except Device.DoesNotExist:
             return {
                 "table": None,
@@ -1054,7 +1044,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 "vc_numbering_error": str(exc),
             }
 
-    def _build_table_context(self, request, obj, inventory_data, sync_device, *, source, policy, pin_to):
+    def _build_table_context(self, request, obj, inventory_data, *, source, policy, pin_to):
         """Build the module table context of ``_build_context``; raise RuleConfigurationError for a broken rule."""
         if policy is None:
             policy = load_inventory_policy(obj.pk)
@@ -1157,10 +1147,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         table.attrs["data-page-device"] = obj.pk
         table.configure(request)
 
-        # Reuse the device the caller (post / get_context_data) already resolved to avoid a second
-        # _get_sync_device() VC-members query per request; falls back to resolving here.
-        sync_device = sync_device or self._get_sync_device(obj, server_key=self._active_server_key)
-        cache_ttl = source_cache.remaining_ttl(sync_device, Resource.MODULES, self._active_server_key)
+        cache_ttl = source_cache.remaining_ttl(obj, Resource.MODULES, self._active_server_key, snapshot=source)
         cache_expiry = (
             timezone.now() + timezone.timedelta(seconds=cache_ttl) if cache_ttl is not None and cache_ttl > 0 else None
         )

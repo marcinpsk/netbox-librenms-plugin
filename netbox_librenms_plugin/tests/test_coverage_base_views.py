@@ -4,7 +4,6 @@ from netbox_librenms_plugin.acquisition.coordinator import plan_acquisition
 
 import pytest
 
-from netbox_librenms_plugin.acquisition.coordinator import plan_acquisition
 from django.core.cache import cache, caches
 
 from netbox_librenms_plugin import source_cache
