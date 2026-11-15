@@ -50,14 +50,19 @@ def seed_inventory(
     from netbox_librenms_plugin import source_cache
     from netbox_librenms_plugin.acquisition.registry import Resource
     from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_modules_snapshot
-    from netbox_librenms_plugin.tests.mapping_fixtures import stored_mapping_for_test, seed_stored_mapping, seed_mapping
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
     if oob_id is not None:
         seed_mapping(device, server_key, oob=oob_id)
-    mapping = stored_mapping_for_test(device)
-    seed_mapping(device, server_key, own=librenms_id, save=False)
-    seed_modules_snapshot(device, inventory, ports, transceivers, server_key=server_key, oob_inventory=oob_inventory)
-    seed_stored_mapping(device, mapping)
+    seed_modules_snapshot(
+        device,
+        inventory,
+        ports,
+        transceivers,
+        server_key=server_key,
+        oob_inventory=oob_inventory,
+        source_id=librenms_id,
+    )
     return source_cache.snapshot_key(device, Resource.MODULES, server_key)
 
 

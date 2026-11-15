@@ -465,9 +465,9 @@ def test_recorded_optic_serials_and_their_ports_survive_assessment(recording_ser
             for entity in snapshot.value(Resource.MODULES, "inventory")
             if entity["entPhysicalIndex"] in (640, 642)
         ]
-        assert [(entity["ifIndex"], by_ifindex[entity["entPhysicalIndex"]]["ifName"]) for entity in optics] == [
-            (600, "xe-0/0/3:2"),
-            (591, "xe-0/0/3:3"),
+        assert [(entity["ifIndex"], by_ifindex[entity["ifIndex"]]["ifName"]) for entity in optics] == [
+            (600, "et-0/5/0"),
+            (591, "et-0/5/2"),
         ]
         for entity in optics:
             if entity["entPhysicalIndex"] in (640, 642):

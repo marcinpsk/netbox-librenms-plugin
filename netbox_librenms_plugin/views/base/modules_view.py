@@ -944,7 +944,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         if snapshot is not None:
             context = self.get_context_data(request, page, server_key=server_key, snapshot=snapshot, policy=policy)
         final = self.get_object(pk)
-        if context is None or self._chassis_membership(final) != read_membership:
+        refused = bool(context and (context.get("vc_numbering_error") or context.get("inventory_rule_error")))
+        if (
+            context is None
+            or (context.get("table") is None and not refused)
+            or self._chassis_membership(final) != read_membership
+        ):
             # No snapshot of the page's scope, or the chassis changed after the read: show nothing of it.
             if snapshot_cached:
                 SyncCacheConsistency(final).mark_refresh_failure(
@@ -953,7 +958,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 snapshot_cached = False
             page, context = final, {"object": final, "table": None, "cache_expiry": None, "server_key": server_key}
         # A rule or numbering refusal comes after a complete read: the snapshot and the ready state stay.
-        refused = bool(context.get("vc_numbering_error") or context.get("inventory_rule_error"))
         if not snapshot_cached:
             messages.error(request, "Inventory data could not be cached. Refresh Modules before syncing.")
         elif not refused:
