@@ -800,7 +800,10 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         else:
             result = source_cache.refresh(obj, Resource.IP_ADDRESSES, server_key)
             snapshot = result.snapshot
-            error_message = result.error and f"Failed to fetch IP addresses from LibreNMS: {result.error}"
+            error_message = None
+            if result.error:
+                logger.warning("Failed to fetch IP addresses from LibreNMS: %s", result.error)
+                error_message = "Failed to fetch IP addresses from LibreNMS."
 
         if error_message is not None:
             messages.error(request, error_message)

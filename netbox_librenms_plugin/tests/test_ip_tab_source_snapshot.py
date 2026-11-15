@@ -94,7 +94,7 @@ def _device(name, *interfaces):
     ids=["device-record-fails", "device-record-malformed", "vrfs-fail-when-a-port-names-one"],
 )
 def test_a_refresh_without_every_needed_response_fails_and_drops_the_older_snapshot(
-    client, live_librenms, rows, break_source, failed_path
+    client, live_librenms, rows, break_source, failed_path, caplog
 ):
     device, _interfaces = _device("ip-snap-refresh-fails", "eth1")
     client.force_login(make_superuser("ip-snap-refresh-fails-user"))
@@ -109,7 +109,9 @@ def test_a_refresh_without_every_needed_response_fails_and_drops_the_older_snaps
     assert response.status_code == 200
     assert _messages(response, messages.SUCCESS) == []
     (error,) = _messages(response, messages.ERROR)
-    assert error.startswith(f"Failed to fetch IP addresses from LibreNMS: {failed_path} was not obtained")
+    assert error == "Failed to fetch IP addresses from LibreNMS."
+    assert f"{failed_path} was not obtained" in caplog.text
+    assert failed_path.encode() not in response.content
     assert source_cache.read(device, Resource.IP_ADDRESSES, SERVER_KEY) is None
     assert not _snapshot_available(device)
     assert b"No IP address data loaded" in response.content
