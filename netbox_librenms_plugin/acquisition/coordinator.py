@@ -7,7 +7,7 @@ from dcim.models import Device
 from django.utils import timezone
 from virtualization.models import VirtualMachine
 
-from netbox_librenms_plugin.acquisition.registry import RESOURCE_SPECS, OwnerPolicy
+from netbox_librenms_plugin.acquisition.registry import RESOURCE_SPECS, OwnerPolicy, Resource
 from netbox_librenms_plugin.acquisition.resources import (
     ACQUIRERS,
     OOB_ACQUIRERS,
@@ -24,7 +24,12 @@ from netbox_librenms_plugin.acquisition.snapshot import (
     ResponseRecord,
     SourceSnapshot,
 )
-from netbox_librenms_plugin.librenms_api import DEFAULT_API_TIMEOUT, EXTENDED_API_TIMEOUT, build_librenms_api, stored_librenms_id
+from netbox_librenms_plugin.librenms_api import (
+    DEFAULT_API_TIMEOUT,
+    EXTENDED_API_TIMEOUT,
+    build_librenms_api,
+    stored_librenms_id,
+)
 from netbox_librenms_plugin.server_mappings import MappingRole, read_mapping, require_server_key
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
@@ -182,7 +187,6 @@ class CablePortAcquisition:
         owner_ids = tuple(dict.fromkeys(owner_ids))
         parts = fetch_cable_ports(self._fetch, owner_ids)
         return {owner_id: parts[f"{NEIGHBOUR_PORTS_PREFIX}{owner_id}"] for owner_id in owner_ids}
-
 
 
 @dataclass(frozen=True)

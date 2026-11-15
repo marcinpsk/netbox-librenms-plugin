@@ -16,6 +16,8 @@ from netbox_librenms_plugin.tests.source_snapshot_helpers import link_row, port_
 
 import pytest
 
+from netbox_librenms_plugin.acquisition.coordinator import plan_acquisition
+
 from netbox_librenms_plugin.tests.conftest import (
     bind_librenms_server,
     make_device,
@@ -107,7 +109,7 @@ class TestCableSourceCompleteness:
         _bind_server(settings, librenms_server)
         _links_route(librenms_server, 141, [link_row(1, "eth1", local_port="eth0")])
 
-        snapshot = acquire(device, server_key=SERVER_KEY, resources=[Resource.CABLES])
+        snapshot = acquire(plan_acquisition(device, server_key=SERVER_KEY, resources=[Resource.CABLES]))
         assessment = assess(snapshot, subject=device)
 
         assert assessment["links"] == []
@@ -128,7 +130,7 @@ class TestCableSourceCompleteness:
             [link_row(999, "e1", id=1, local_port="eth9", remote_hostname="peer")],
         )
 
-        snapshot = acquire(device, server_key=SERVER_KEY, resources=[Resource.CABLES])
+        snapshot = acquire(plan_acquisition(device, server_key=SERVER_KEY, resources=[Resource.CABLES]))
         assessment = assess(snapshot, subject=device)
 
         assert [link["local_port"] for link in assessment["links"]] == ["eth9"]

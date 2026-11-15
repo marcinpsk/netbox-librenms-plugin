@@ -1,6 +1,8 @@
 """Integration tests for the base cable, interface, and IP address views."""
 
 import pytest
+
+from netbox_librenms_plugin.acquisition.coordinator import plan_acquisition
 from django.core.cache import cache, caches
 
 from netbox_librenms_plugin import source_cache
@@ -104,7 +106,7 @@ def _acquired_cables(subject):
     from netbox_librenms_plugin.acquisition.coordinator import acquire
     from netbox_librenms_plugin.assessment.cables import assess
 
-    snapshot = acquire(subject, server_key="default", resources=[Resource.CABLES])
+    snapshot = acquire(plan_acquisition(subject, server_key="default", resources=[Resource.CABLES]))
     return snapshot, assess(snapshot, subject=subject)
 
 

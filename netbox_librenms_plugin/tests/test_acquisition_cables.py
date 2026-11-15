@@ -2,6 +2,8 @@
 
 import pytest
 
+from netbox_librenms_plugin.acquisition.coordinator import plan_acquisition
+
 from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.acquisition.resources import blocked_scopes, is_ready
 from netbox_librenms_plugin.acquisition.snapshot import IncompleteSource, Outcome
@@ -29,7 +31,7 @@ def _serve(server, device_id=HOST_ID, *, links=()):
 def _acquire(device, **options):
     from netbox_librenms_plugin.acquisition.coordinator import acquire
 
-    return acquire(device, server_key="default", resources=[Resource.CABLES], **options)
+    return acquire(plan_acquisition(device, server_key="default", resources=[Resource.CABLES]), **options)
 
 
 @pytest.mark.django_db
@@ -364,7 +366,7 @@ def test_an_omitted_neighbour_is_still_requested_for_another_resources_owner(liv
     if not cables_first:
         requested.reverse()
 
-    snapshot = acquire(member, server_key="default", resources=requested)
+    snapshot = acquire(plan_acquisition(member, server_key="default", resources=requested))
 
     assert is_ready(snapshot, Resource.IP_ADDRESSES)
     assert snapshot.value(Resource.IP_ADDRESSES, "ports") == PORTS
@@ -394,7 +396,9 @@ def test_an_attempted_failed_neighbour_is_not_requested_again_for_another_resour
         f"/api/v0/devices/{NEIGHBOUR_ID}", {"status": "ok", "devices": [{"device_id": NEIGHBOUR_ID}]}
     )
 
-    snapshot = acquire(member, server_key="default", resources=[Resource.CABLES, Resource.IP_ADDRESSES])
+    snapshot = acquire(
+        plan_acquisition(member, server_key="default", resources=[Resource.CABLES, Resource.IP_ADDRESSES])
+    )
 
     assert not is_ready(snapshot, Resource.IP_ADDRESSES)
     assert snapshot.record(Resource.IP_ADDRESSES, "ports").received_at is not None

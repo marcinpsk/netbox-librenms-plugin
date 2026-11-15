@@ -2129,24 +2129,30 @@ class BaseCableTableView(
         snapshot_cached = None
         if fetch_fresh:
             self._cable_refresh_error = None
+            plan = source_cache.authorized_plan(request, obj, server_key=server_key, resources=[Resource.CABLES])
+            coordinator = SyncCacheConsistency.for_refresh(plan)
+            owner = plan.owner(Resource.CABLES)
             librenms_id, lookup_error = self.resolve_librenms_id(owner)
             if lookup_error is not None or (librenms_id is None and not read_mapping(owner).has_oob(server_key)):
-                source_cache.delete(obj, Resource.CABLES, server_key)
+                source_cache.delete_planned(plan)
                 self._cable_refresh_error = (
                     self.scoped_lookup_message(lookup_error) if lookup_error else "Device not found in LibreNMS."
                 )
+                coordinator.mark_refresh_failure(SyncTab.CABLES, server_key, actor_id=request_actor_id(request))
                 return None
-            result = source_cache.refresh(request, obj, Resource.CABLES, server_key)
+            result = source_cache.refresh(request, plan)
             self._cable_refresh_error = result.error
             if result.error is not None:
+                coordinator.mark_refresh_failure(SyncTab.CABLES, server_key, actor_id=request_actor_id(request))
                 return None
             # Publish with the write: a later failure, such as the TTL read, must not leave the old state.
-            snapshot_cached = SyncCacheConsistency(obj).mark_refresh_outcome(
+            snapshot_cached = coordinator.mark_refresh_outcome(
                 SyncTab.CABLES, server_key, actor_id=request_actor_id(request)
             )
         assessed = read_cable_assessment(request, obj, server_key, interface_name_field)
         if assessed is None and result is not None:
             self._cable_refresh_error = "Cable data could not be cached. Refresh before syncing."
+            coordinator.mark_refresh_failure(SyncTab.CABLES, server_key, actor_id=request_actor_id(request))
         if assessed is None:
             return None
         cache_key = source_cache.snapshot_key(obj, Resource.CABLES, server_key)
@@ -2276,10 +2282,8 @@ class BaseCableTableView(
             )
         context = self._prepare_context(request, obj, fetch_fresh=True, server_key=server_key)
 
-        coordinator = SyncCacheConsistency(obj)
         if context is None:
             messages.error(request, getattr(self, "_cable_refresh_error", None) or "No cable source was obtained.")
-            coordinator.mark_refresh_failure(SyncTab.CABLES, server_key, actor_id=request_actor_id(request))
             context = {"object": obj, "table": None, "cache_expiry": None, "server_key": server_key}
         else:
             if context["snapshot_cached"]:
