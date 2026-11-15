@@ -18,6 +18,8 @@ import time
 
 import pytest
 
+from netbox_librenms_plugin.acquisition.coordinator import plan_acquisition
+
 from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_cables_snapshot, link_row, port_row, sensor_row
 from netbox_librenms_plugin.assessment.cables import assess as assess_cables
@@ -40,7 +42,7 @@ def _acquire_rows(subject, server_key):
     from netbox_librenms_plugin.acquisition.registry import Resource
     from netbox_librenms_plugin.assessment.cables import assess
 
-    snapshot = acquire(subject, server_key=server_key, resources=[Resource.CABLES])
+    snapshot = acquire(plan_acquisition(subject, server_key=server_key, resources=[Resource.CABLES]))
     return assess(snapshot, subject=subject)["links"]
 
 
@@ -657,7 +659,7 @@ class TestRemotePortAliasesAreFetched:
         from netbox_librenms_plugin.acquisition.coordinator import acquire
         from netbox_librenms_plugin.acquisition.registry import Resource
 
-        snapshot = acquire(device, server_key=server_key, resources=[Resource.CABLES])
+        snapshot = acquire(plan_acquisition(device, server_key=server_key, resources=[Resource.CABLES]))
         assessed = assess_cables(snapshot, subject=device)
 
         assert assessed["links"] == []
@@ -766,7 +768,7 @@ class TestProtocolDuplicates:
         )
         live_librenms.server.register("/api/v0/devices/8/ports", {"status": "ok", "ports": []})
 
-        snapshot = acquire(subject, server_key="default", resources=[Resource.CABLES])
+        snapshot = acquire(plan_acquisition(subject, server_key="default", resources=[Resource.CABLES]))
         assessed = assess_cables(snapshot, subject=subject)
 
         assert snapshot.record(Resource.CABLES, "links").outcome is Outcome.FAILED
@@ -2140,7 +2142,7 @@ class TestTheVerifiedRowRendersLikeTheTable:
             "/api/v0/devices/8/links", {"status": "ok", "links": [link_row(100, "Ethernet1", protocol=[])]}
         )
         live_librenms.server.register("/api/v0/devices/8/ports", {"status": "ok", "ports": []})
-        snapshot = acquire(subject, server_key="default", resources=[Resource.CABLES])
+        snapshot = acquire(plan_acquisition(subject, server_key="default", resources=[Resource.CABLES]))
         assert snapshot.record(Resource.CABLES, "links").outcome is Outcome.FAILED
         client.force_login(make_superuser("verify-invalid-protocol-user"))
 

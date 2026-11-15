@@ -25,7 +25,9 @@ def test_cable_blockers_use_the_notification_channel_of_the_response(client, liv
     server.register("/api/v0/devices/5501/ports", {"status": "ok", "ports": []})
     server.register("/api/v0/devices/5502/links", {"status": "ok", "links": []})
     server.register("/api/v0/devices/5502/ports", {"status": "error"}, status=500)
-    source_cache.refresh(make_request("post", user=user), device, Resource.CABLES, "default")
+    request = make_request("post", user=user)
+    plan = source_cache.authorized_plan(request, device, server_key="default", resources=[Resource.CABLES])
+    source_cache.refresh(request, plan)
     client.force_login(user)
     route = "device_cable_sync" if action == "refresh" else "sync_device_cables"
     headers = {} if action == "sync-redirect" else {"HTTP_HX_REQUEST": "true"}

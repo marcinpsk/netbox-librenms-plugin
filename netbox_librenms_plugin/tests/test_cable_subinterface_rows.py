@@ -10,6 +10,8 @@ physical port only, so the sub-unit rows can never be anything but a mismatch.
 
 import pytest
 
+from netbox_librenms_plugin.acquisition.coordinator import plan_acquisition
+
 
 def _link(local_id, local_name, remote_port, remote_port_id, *, remote_device_id=55):
     """One LibreNMS LLDP link row."""
@@ -39,7 +41,7 @@ def _acquire_links(links, live_librenms):
         neighbour_id = coerce_librenms_id(link.get("remote_device_id"))
         if neighbour_id is not None:
             live_librenms.server.register(f"/api/v0/devices/{neighbour_id}/ports", {"status": "ok", "ports": []})
-    snapshot = acquire(subject, server_key="default", resources=[Resource.CABLES])
+    snapshot = acquire(plan_acquisition(subject, server_key="default", resources=[Resource.CABLES]))
     return subject, snapshot
 
 

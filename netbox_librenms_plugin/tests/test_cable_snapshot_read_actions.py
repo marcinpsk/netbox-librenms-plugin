@@ -1,6 +1,8 @@
 """Cable readers and actions use the bound source facts for the current actor."""
 
 import pytest
+
+from netbox_librenms_plugin.acquisition.coordinator import plan_acquisition
 from dcim.models import Cable, ConsoleServerPort, Device, Interface
 from django.contrib import messages
 from django.contrib.messages import get_messages
@@ -249,7 +251,9 @@ def test_refresh_requires_an_actor(live_librenms):
     live_librenms.server.register(f"/api/v0/devices/{HOST_ID}/ports", {"status": "ok", "ports": []})
 
     with pytest.raises(TypeError):
-        source_cache.refresh(None, subject, Resource.CABLES, SERVER_KEY)
+        source_cache.refresh(
+            None, source_cache.authorized_plan(None, subject, server_key=SERVER_KEY, resources=[Resource.CABLES])
+        )
 
     assert live_librenms.server.requests == []
 
@@ -269,7 +273,7 @@ def test_assessment_always_reports_its_identity_state(live_librenms):
         {"status": "ok", "ports": [port_row(LOCAL_PORT_ID, "eth1", device_id=HOST_ID)]},
     )
 
-    snapshot = acquire(subject, server_key=SERVER_KEY, resources=[Resource.CABLES])
+    snapshot = acquire(plan_acquisition(subject, server_key=SERVER_KEY, resources=[Resource.CABLES]))
     result = assess(snapshot, subject=subject)
 
     assert result["identity_error"] is False

@@ -16,7 +16,13 @@ from netbox_librenms_plugin.acquisition.coordinator import (
     resource_owner,
 )
 from netbox_librenms_plugin.acquisition.registry import RESOURCE_SPECS, Resource
-from netbox_librenms_plugin.acquisition.resources import Blocker, NEIGHBOUR_PORTS_PREFIX, OOB_ACQUIRERS, blocked_scopes, is_ready
+from netbox_librenms_plugin.acquisition.resources import (
+    Blocker,
+    NEIGHBOUR_PORTS_PREFIX,
+    OOB_ACQUIRERS,
+    blocked_scopes,
+    is_ready,
+)
 from netbox_librenms_plugin.acquisition.snapshot import (
     MappingLink,
     MappingState,
@@ -101,7 +107,6 @@ def visible_cable_port_sources(user, server_key, identities):
     return {source_id for source_id, visible in visibility.items() if visible}
 
 
-
 def cable_blockers_for_user(snapshot, user, groups):
     """Redact failed auxiliary port sources without changing shared snapshot facts."""
     source = snapshot.resources[Resource.CABLES]
@@ -126,7 +131,6 @@ def cable_blockers_for_user(snapshot, user, groups):
         )
         for scope, blockers in groups.items()
     }
-
 
 
 def authorized_plan(request, subject, *, server_key, resources):

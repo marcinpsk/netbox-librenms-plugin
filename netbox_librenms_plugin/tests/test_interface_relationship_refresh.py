@@ -8,7 +8,6 @@ from netbox_librenms_plugin.models import PortStackLagPattern
 from netbox_librenms_plugin.tests.source_snapshot_helpers import interface_rows
 from netbox_librenms_plugin.tests.view_test_helpers import make_request
 
-
 SERVER_KEY = "default"
 DEVICE_ID = 42
 DEVICE_PATH = f"/api/v0/devices/{DEVICE_ID}"
