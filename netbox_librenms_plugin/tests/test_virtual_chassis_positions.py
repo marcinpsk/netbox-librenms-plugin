@@ -6,6 +6,8 @@ Junos numbers its members from 0 and names their ports ``ge-<member>/0/0``. NetB
 that its interface names carry. A 1-based stack keeps its numbering unchanged.
 """
 
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+
 import pytest
 
 from netbox_librenms_plugin.data_shapes.envelope import unwrap_response
@@ -198,6 +200,7 @@ class TestOneBasedStackKeepsPortZeroLocal:
         configure_default_librenms_server(settings)
         _chassis, members = make_virtual_chassis_members("cat9300-rows", count=3)
         viewed = members[0]
+        seed_mapping(viewed, "default", own=63001)
         seed_interfaces_snapshot(
             viewed,
             [
@@ -209,7 +212,7 @@ class TestOneBasedStackKeepsPortZeroLocal:
         view._librenms_api = LibreNMSAPI(server_key="default")
         view.request = make_request("get", user=make_superuser("cat9300-rows-user"))
 
-        context = view.get_context_data(view.request, viewed, "ifName", "default", sync_device=viewed)
+        context = view.get_context_data(view.request, viewed, "ifName", "default")
 
         rows = {row["port_id"]: row for row in context["table"].data}
         assert rows[9601]["selected_object_id"] == viewed.pk
