@@ -258,6 +258,8 @@ class BaseLibreNMSSyncView(
     def _mapping_editor(self, selection, obj):
         """Return the server mapping editor of *obj*, or None when the user may not edit its mapping on this page."""
         owner = selection.mapping_owner if selection is not None else None
+        if owner is not None and read_mapping(obj).has_recorded_state:
+            owner = obj
         # A VC member edits the mapping on the page of the device that owns it.
         if owner is None or type(owner) is not type(obj) or owner.pk != obj.pk or not self.has_write_permission():
             return None
