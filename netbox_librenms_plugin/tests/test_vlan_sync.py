@@ -51,6 +51,16 @@ class TestVLANModeDetection:
                 {"port_id": 3, "ifName": "Gi1/0/48", "ifVlan": "", "ifTrunk": None},
                 {"mode": None, "untagged_vlan": None, "tagged_vlans": []},
             ),
+            (
+                {
+                    "port_id": 4,
+                    "ifName": "Gi1/0/49",
+                    "ifVlan": "",
+                    "ifTrunk": "dot1Q",
+                    "vlans": [{"vlan": 90, "untagged": 1}, {"vlan": 50, "untagged": 0}],
+                },
+                {"mode": None, "untagged_vlan": 90, "tagged_vlans": [50]},
+            ),
         ],
     )
     def test_parse_port_vlan_data(self, port, expected):
