@@ -279,6 +279,41 @@ def test_host_and_oob_neighbours_share_one_budget(live_librenms, monkeypatch):
 
 
 @pytest.mark.django_db
+def test_each_neighbour_request_uses_only_the_remaining_budget(live_librenms, monkeypatch):
+    from urllib.parse import urlsplit
+
+    from requests.adapters import HTTPAdapter
+
+    from netbox_librenms_plugin.acquisition import resources
+
+    _serve(live_librenms.server, links=LINKS)
+    _serve(live_librenms.server, OOB_ID, links=[{"local_port_id": 2, "remote_device_id": NEIGHBOUR_ID + 1}])
+    _serve(live_librenms.server, NEIGHBOUR_ID + 1)
+    clock = [0.0]
+
+    def first_neighbour(method, path, query, headers, body):
+        clock[0] = 10.0
+        return 200, {"status": "ok", "ports": PORTS}
+
+    live_librenms.server.register(f"/api/v0/devices/{NEIGHBOUR_ID}/ports", first_neighbour)
+    monkeypatch.setattr(resources, "monotonic", lambda: clock[0])
+    timeouts = []
+    send = HTTPAdapter.send
+
+    def record_timeout(adapter, request, **kwargs):
+        if urlsplit(request.url).path == f"/api/v0/devices/{NEIGHBOUR_ID + 1}/ports":
+            timeouts.append(kwargs["timeout"])
+        return send(adapter, request, **kwargs)
+
+    monkeypatch.setattr(HTTPAdapter, "send", record_timeout)
+
+    snapshot = _acquire(_device("acq-cable-remaining-budget", oob={"id": OOB_ID, "type": "idrac"}))
+
+    assert snapshot.record(Resource.CABLES, f"neighbour_ports:{NEIGHBOUR_ID + 1}", MappingRole.OOB).obtained
+    assert timeouts == [5.0]
+
+
+@pytest.mark.django_db
 def test_acquisition_writes_no_netbox_row_or_cache_key(live_librenms):
     from core.models import ObjectChange
     from dcim.models import Device

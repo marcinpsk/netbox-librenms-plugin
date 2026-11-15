@@ -50,7 +50,7 @@ class _SeededFetch:
         self.responses = {}
         self.neighbour_deadline = None
 
-    def __call__(self, endpoint):
+    def __call__(self, endpoint, *, timeout=None):
         return self._keep(_record(endpoint.request, [] if self._values is None else self._values[endpoint.request.key]))
 
     def skip(self, endpoint, outcome, reason):
@@ -63,7 +63,7 @@ class _SeededFetch:
 class _CableSeededFetch(_SeededFetch):
     """Decode each raw seeded envelope through the real cable endpoint contract."""
 
-    def __call__(self, endpoint):
+    def __call__(self, endpoint, *, timeout=None):
         if endpoint.request.key not in self._values:
             raise TypeError(
                 f"The cables seed has no value for {endpoint.request.path}; it seeds only {sorted(self._values)}."

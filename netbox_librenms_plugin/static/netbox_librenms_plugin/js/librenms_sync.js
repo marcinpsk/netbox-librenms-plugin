@@ -3765,6 +3765,7 @@ function handleCableChange(select, value) {
             device_id: value,
             origin_device_id: verifyContext?.dataset.cableOriginDeviceId || null,
             row_id: select.dataset.interface,
+            interface_name_field: document.querySelector('input[name="interface_name_field"]:checked')?.value || null,
             server_key: syncServerKey() || null
         })
     })

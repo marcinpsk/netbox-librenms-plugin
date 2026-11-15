@@ -122,10 +122,11 @@ def fetch_cable_ports(fetch, owner_ids):
         else:
             if fetch.neighbour_deadline is None:
                 fetch.neighbour_deadline = monotonic() + REMOTE_ALIAS_FETCH_BUDGET_SECONDS
-            if monotonic() >= fetch.neighbour_deadline:
+            remaining = fetch.neighbour_deadline - monotonic()
+            if remaining <= 0:
                 record = fetch.skip(endpoint, Outcome.FAILED, NEIGHBOUR_BUDGET_EXHAUSTED_REASON)
             else:
-                record = fetch(endpoint)
+                record = fetch(endpoint, timeout=remaining)
         parts[f"{NEIGHBOUR_PORTS_PREFIX}{owner_id}"] = record
     return parts
 
