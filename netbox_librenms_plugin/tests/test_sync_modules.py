@@ -231,7 +231,7 @@ def _rendered_fields(device, path_part, ent_index=None, *, user=None, server_key
 @pytest.mark.django_db
 def test_module_inventory_snapshot_digest_is_canonical_and_content_sensitive():
     """Equivalent snapshots share a digest, while changed inventory content does not."""
-    device = make_device("canonical-digest", librenms_cf={"default": 41})
+    device = seed_mapping(make_device("canonical-digest"), own=41)
     source = seed_modules_snapshot(device, [])
     first = [{"entPhysicalIndex": 17, "nested": {"b": 2, "a": 1}}]
     reordered = [{"nested": {"a": 1, "b": 2}, "entPhysicalIndex": 17}]

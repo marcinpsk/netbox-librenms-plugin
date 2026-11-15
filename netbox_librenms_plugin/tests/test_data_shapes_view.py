@@ -685,7 +685,7 @@ def test_capture_detects_a_stack_before_reading_an_unrelated_invalid_serial_cont
     )
     NormalizationRule.objects.filter(pk=rule.pk).update(replacement=r"invalid-\1")
     server, api = recording_server(load_recording("cisco-stackwise-3member"))
-    device = make_device("capture-valid-context", librenms_cf={"test": {"id": _STACK_RECORDING_ID}})
+    device = seed_mapping(make_device("capture-valid-context"), "test", own=_STACK_RECORDING_ID)
 
     response = _run_capture(_view_with_api(api), server, device)
 

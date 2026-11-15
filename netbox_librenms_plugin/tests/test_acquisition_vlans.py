@@ -117,7 +117,7 @@ def test_acquisition_refuses_a_subject_it_cannot_acquire(live_librenms):
 def test_the_stored_snapshot_round_trips_and_follows_the_mapping(live_librenms):
     from netbox_librenms_plugin import source_cache
     from netbox_librenms_plugin.acquisition.registry import Resource
-    from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping_row
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_mapping_row
 
     device = _device("acq-vlan-store")
     live_librenms.server.register(VLANS_PATH, {"status": "ok", "vlans": [_vlan(10)]})
@@ -128,7 +128,7 @@ def test_the_stored_snapshot_round_trips_and_follows_the_mapping(live_librenms):
     assert source_cache.remaining_ttl(device, Resource.VLANS, SERVER_KEY) > 0
 
     # A concurrent database update sends no signal. The binding check must reject the old snapshot.
-    seed_stored_mapping_row(device, {SERVER_KEY: {"id": DEVICE_ID + 1}})
+    seed_mapping_row(device, seed_mapping(type(device)(), SERVER_KEY, own=DEVICE_ID + 1, save=False))
     assert source_cache.read(device, Resource.VLANS, SERVER_KEY) is None
     # The countdown follows the readable snapshot, not the raw entry that still holds its TTL.
     assert source_cache.remaining_ttl(device, Resource.VLANS, SERVER_KEY) is None

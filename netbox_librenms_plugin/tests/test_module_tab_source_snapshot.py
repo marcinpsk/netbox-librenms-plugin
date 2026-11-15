@@ -131,7 +131,9 @@ def test_oob_binding_changes_refuse_every_reader_without_deleting_the_snapshot(c
     original = cache.get(key)
     assert original is not None
     assert source_cache.read(subject, Resource.MODULES, "default") is not None
-    seed_mapping_row(subject, seed_mapping(type(subject)(), "default", own=HOST_ID, oob=OOB_ID, oob_type="idrac", save=False))
+    seed_mapping_row(
+        subject, seed_mapping(type(subject)(), "default", own=HOST_ID, oob=OOB_ID, oob_type="idrac", save=False)
+    )
     assert source_cache.read(subject, Resource.MODULES, "default") is None
     assert fragment(client, subject).status_code == 404
     assert cache.get(key) == original
