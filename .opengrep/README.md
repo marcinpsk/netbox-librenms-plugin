@@ -378,3 +378,7 @@ The `module-writer-claims-released-identities` rule rejects incoming-only claims
 update and replacement views, and moved-only claims in the move view. Installation can claim one
 incoming serial. The rule covers these concrete omissions. It cannot infer which identities an
 arbitrary write set needs. Real PostgreSQL concurrency tests cover the writer protocol.
+
+The `recording-export-needs-response-keys` rule requires recording export helpers to keep
+response keys while selecting captured source responses. This lets an export exclude responses
+acquired only for neighbour matching. Other snapshot readers can still read response values.

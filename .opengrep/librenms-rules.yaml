@@ -2247,3 +2247,17 @@ rules:
       # Only a variable or tag reads the attribute; prose and comments do not.
       - pattern-regex: \{[{%][^}]*\.primary_ip\b
       - pattern-not-inside: "{# ... #}"
+
+  - id: recording-export-needs-response-keys
+    languages: [python]
+    severity: ERROR
+    message: Iterate recording responses with their keys to exclude neighbour-only sources.
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              def _export_responses($SNAPSHOT):
+                ...
+          - pattern-inside: |
+              def _recording_records($SNAPSHOT):
+                ...
+      - pattern: $SNAPSHOT.responses.values()
