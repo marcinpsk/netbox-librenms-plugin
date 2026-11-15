@@ -2261,9 +2261,10 @@ def test_a_module_snapshot_removed_and_stored_again_during_the_refresh_is_no_suc
         return published
 
     def read_then_store_again(view, *args, **kwargs):
-        context = real_context(view, *args, **kwargs)
-        cache.set(snapshot_key, removed[0], timeout=300)
-        return context
+        try:
+            return real_context(view, *args, **kwargs)
+        finally:
+            cache.set(snapshot_key, removed[0], timeout=300)
 
     monkeypatch.setattr(SyncCacheConsistency, "mark_refresh_outcome", outcome_then_removal)
     monkeypatch.setattr(BaseModuleTableView, "get_context_data", read_then_store_again)
@@ -2271,6 +2272,7 @@ def test_a_module_snapshot_removed_and_stored_again_during_the_refresh_is_no_suc
     response = _post_refresh(client, device, SyncTab.MODULES)
 
     assert removed and removed[0] is not None
+    assert cache.get(snapshot_key) == removed[0]
     assert response.status_code == 200
     assert response.context["module_sync"]["table"] is None
     assert b"Inventory data refreshed successfully" not in response.content

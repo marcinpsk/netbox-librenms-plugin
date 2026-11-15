@@ -244,8 +244,12 @@ def acquire(plan, *, include_serial=False, inventory_probes=False):
         if owner is None:
             raise SubjectNotMapped(planned_owner, plan.server_key)
         sources[resource] = _resource_source(
-            fetch, resource, owner, plan.server_key,
-            include_serial=include_serial, inventory_probes=inventory_probes,
+            fetch,
+            resource,
+            owner,
+            plan.server_key,
+            include_serial=include_serial,
+            inventory_probes=inventory_probes,
         )
     return SourceSnapshot(
         snapshot_id=uuid4().hex,

@@ -45,9 +45,6 @@ class SnapshotUnavailable(Exception):
     """The acquired receipt has no matching snapshot in the shared cache."""
 
 
-IDENTITY_CHANGED = "LibreNMS source identity changed or expired. Refresh this tab and try again."
-
-
 @dataclass(frozen=True)
 class Refresh:
     """The result of one refresh: the acquired snapshot, and why nothing was stored when it was not."""

@@ -113,18 +113,11 @@ def module_inventory_snapshot_digest(inventory, *, source) -> str:
         raise TypeError("inventory must be a list of dictionaries")
     from netbox_librenms_plugin.acquisition.registry import Resource
 
-    owner = source.resources[Resource.MODULES]
-
-    def link(mapping):
-        return None if mapping is None else {"state": mapping.state.value, "id": mapping.librenms_id}
-
-    facts = {
-        "server": source.server_key,
-        "owner": {"label": owner.owner.label, "pk": owner.owner.pk},
-        "host": link(owner.host),
-        "oob": link(owner.oob),
-    }
-    serialized = json.dumps({"inventory": inventory, "source": facts}, sort_keys=True, separators=(",", ":"))
+    serialized = json.dumps(
+        {"inventory": inventory, "source": source.binding(Resource.MODULES).to_payload()},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return hashlib.sha256(serialized.encode()).hexdigest()
 
 

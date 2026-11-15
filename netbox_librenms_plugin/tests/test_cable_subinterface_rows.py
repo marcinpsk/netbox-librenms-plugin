@@ -8,8 +8,6 @@ one local port can report the same neighbour three times. A cable terminates on 
 physical port only, so the sub-unit rows can never be anything but a mismatch.
 """
 
-from netbox_librenms_plugin.acquisition.coordinator import plan_acquisition
-
 import pytest
 
 from netbox_librenms_plugin.acquisition.coordinator import plan_acquisition

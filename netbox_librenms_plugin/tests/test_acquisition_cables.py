@@ -4,7 +4,6 @@ from netbox_librenms_plugin.acquisition.coordinator import plan_acquisition
 
 import pytest
 
-from netbox_librenms_plugin.acquisition.coordinator import plan_acquisition
 
 from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.acquisition.resources import blocked_scopes, is_ready

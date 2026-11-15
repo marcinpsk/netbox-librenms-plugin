@@ -572,10 +572,3 @@ def seed_mapped_modules(
     return seed_modules_snapshot(
         subject, inventory, ports, transceivers, server_key=server_key, oob_inventory=oob_inventory
     )
-
-
-def stored_identity(subject, resource, server_key):
-    """Return the effective identity of the source owner for a deliberate stale-source seed."""
-    from netbox_librenms_plugin.librenms_api import stored_librenms_id
-
-    return stored_librenms_id(resource_owner(subject, resource, server_key), server_key)

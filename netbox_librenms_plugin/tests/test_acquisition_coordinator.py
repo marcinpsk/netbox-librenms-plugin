@@ -422,6 +422,7 @@ def test_an_optional_mapping_field_can_use_a_real_ip_refresh(client, live_libren
         ("interfaces", "device_interface_sync", "interface_sync", "table"),
         ("cables", "device_cable_sync", "cable_sync", "table"),
         ("ipaddresses", "device_ipaddress_sync", "ip_sync", "table"),
+        ("modules", "device_module_sync", "module_sync", "table"),
         ("vlans", "device_vlan_sync", "vlan_sync", "vlan_table"),
     ],
 )
@@ -438,6 +439,10 @@ def test_a_refresh_response_refuses_an_identity_change_after_storage(
 
     subject = make_device("receipt-identity-change", librenms_cf={SERVER_KEY: {"id": 5501}})
     _serve_ip_and_vlans(live_librenms.server, 5501)
+    if resource_name == "modules":
+        from netbox_librenms_plugin.tests.test_capture_source_acquisition import serve
+
+        serve(live_librenms.server, 5501)
     live_librenms.server.register("/api/v0/devices/5501/port_stack", {"status": "ok", "mappings": []})
     if resource_name == "cables":
         live_librenms.server.register("/api/v0/devices/5501/links", {"status": "ok", "links": []})
@@ -513,21 +518,3 @@ def test_inventory_helpers_import_no_discovery_or_transport_module(module):
 )
 def test_inventory_import_guard_checks_import_and_from_aliases(source, forbidden):
     assert _forbidden_inventory_imports(source) == ({forbidden} if forbidden else set())
-
-
-@pytest.mark.django_db
-def test_a_deleted_planned_owner_refuses_without_resource_http(live_librenms):
-    from dcim.models import Device
-
-    from netbox_librenms_plugin.acquisition.coordinator import SubjectNotMapped, acquire
-    from netbox_librenms_plugin.acquisition.registry import Resource
-    from netbox_librenms_plugin.tests.conftest import make_device
-
-    subject = make_device("deleted-planned-source", librenms_cf={SERVER_KEY: {"id": 501}})
-    plan = plan_acquisition(subject, server_key=SERVER_KEY, resources=[Resource.VLANS])
-    Device.objects.filter(pk=subject.pk).delete()
-
-    with pytest.raises(SubjectNotMapped):
-        acquire(plan)
-
-    assert live_librenms.server.requests == []

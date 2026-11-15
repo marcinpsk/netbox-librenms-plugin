@@ -360,7 +360,7 @@ def _require_posted_module(authorized):
 
 
 def _authorize_module_grant(page_device, server_key, action, token, *, user):
-    """Read the granted source and policy before a module write."""
+    """Read the current source and policy before planning and after the final writer lock."""
     from dcim.models import Device
     from netbox_librenms_plugin.models import RuleConfigurationError
 
