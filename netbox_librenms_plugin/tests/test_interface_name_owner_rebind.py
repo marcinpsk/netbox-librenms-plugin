@@ -460,7 +460,9 @@ class TestRebind:
 
     def test_rebind_on_a_virtual_machine(self, client, settings):
         configure_default_librenms_server(settings)
-        vm = make_vm("name-owner-rebind-vm", make_cluster("name-owner-rebind-cluster"))
+        vm = seed_mapping(
+            make_vm("name-owner-rebind-vm", make_cluster("name-owner-rebind-cluster")), "default", own=501
+        )
         interface = _bound_interface(vm, "eth0", STALE_PORT)
         _seed(vm, [_port(HOST_PORT, "eth0")])
         client.force_login(make_superuser("name-owner-rebind-vm-user"))

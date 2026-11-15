@@ -5,6 +5,8 @@ from functools import partial
 from threading import Event
 
 import pytest
+
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from django.apps import apps
 
 from netbox_librenms_plugin import source_cache
@@ -74,6 +76,7 @@ def test_selected_vc_target_is_locked_through_interface_sync(settings, monkeypat
 
     configure_default_librenms_server(settings)
     _vc, (page_device, target_device) = make_virtual_chassis_members("sync-target-lock")
+    seed_mapping(page_device, "default", own=501)
     user = make_superuser("sync-target-lock-user")
     validation_done = Event()
     release_sync = Event()
@@ -269,6 +272,7 @@ def test_auto_selected_owner_is_revalidated_after_vc_position_changes(client, se
         "sync-auto-position",
         count=3,
     )
+    seed_mapping(page_device, "default", own=501)
     port = {
         **_PORT_KEYS_UNSET,
         "port_id": 10,
@@ -301,8 +305,8 @@ def test_inaccessible_selected_target_is_not_locked(settings):
     from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
 
     configure_default_librenms_server(settings)
-    page_device = make_device("restricted-target-page")
-    inaccessible_target = make_device("restricted-target-hidden")
+    page_device = seed_mapping(make_device("restricted-target-page"), "default", own=501)
+    inaccessible_target = seed_mapping(make_device("restricted-target-hidden"), "default", own=501)
     user = make_user_with_perms("restricted-target-user", [("add", Interface), ("change", Interface)])
     user = grant(user, "view", Device, constraints={"id": page_device.pk})
     seed_ports(page_device, [{**_PORT_KEYS_UNSET, "port_id": 10, "ifName": "Ethernet1", "ifAdminStatus": "up"}])
@@ -344,8 +348,8 @@ def test_viewable_outside_selected_target_is_not_locked(settings):
     from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
 
     configure_default_librenms_server(settings)
-    page_device = make_device("outside-target-page")
-    outside_target = make_device("outside-target-device")
+    page_device = seed_mapping(make_device("outside-target-page"), "default", own=501)
+    outside_target = seed_mapping(make_device("outside-target-device"), "default", own=501)
     user = make_superuser("outside-target-user")
     seed_ports(page_device, [{**_PORT_KEYS_UNSET, "port_id": 10, "ifName": "Ethernet1", "ifAdminStatus": "up"}])
 
@@ -385,6 +389,7 @@ def test_selected_vc_targets_lock_chassis_before_devices(client, settings):
 
     configure_default_librenms_server(settings)
     _virtual_chassis, (page_device, target_device) = make_virtual_chassis_members("bulk-lock-order")
+    seed_mapping(page_device, "default", own=501)
     seed_ports(page_device, [{**_PORT_KEYS_UNSET, "port_id": 10, "ifName": "Ethernet1"}])
     client.force_login(make_superuser("bulk-lock-order-user"))
     locked_selects = []
@@ -412,7 +417,7 @@ def test_vm_sync_serializes_duplicate_display_name_resolution(settings, monkeypa
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
     server_key = configure_default_librenms_server(settings)
-    vm = make_vm("vm-duplicate-name-lock")
+    vm = seed_mapping(make_vm("vm-duplicate-name-lock"), "default", own=501)
     VMInterface.objects.create(virtual_machine=vm, name="Ethernet")
     user = make_superuser("vm-duplicate-name-lock-user")
     resolved = {10: Event(), 11: Event()}
@@ -496,6 +501,7 @@ def test_relationship_write_locks_virtual_chassis_members_through_validation():
     server_key = configured_server_key()
 
     _vc, (aggregate_device, member_device) = make_virtual_chassis_members("relationship-scope-lock")
+    seed_mapping(aggregate_device, "default", own=501)
     aggregate = make_interface(aggregate_device, "Port-Channel1", iface_type="lag")
     member = make_interface(member_device, "Ethernet2")
     seed_mapping(aggregate, server_key, own=20, save=False)
@@ -592,8 +598,8 @@ def test_inline_relationship_rechecks_migrated_donor_after_lock():
 
     server_key = configured_server_key()
 
-    donor = make_device("relationship-migrated-donor")
-    winner = make_device("relationship-migrated-winner")
+    donor = seed_mapping(make_device("relationship-migrated-donor"), "default", own=501)
+    winner = seed_mapping(make_device("relationship-migrated-winner"), "default", own=501)
     child = make_interface(donor, "Ethernet1.100", iface_type="virtual")
     parent = make_interface(donor, "Ethernet1")
     seed_mapping(child, server_key, own=10, save=False)
@@ -672,7 +678,7 @@ def test_inline_relationship_does_not_lock_unrelated_interfaces():
 
     server_key = configured_server_key()
 
-    device = make_device("targeted-inline-lock")
+    device = seed_mapping(make_device("targeted-inline-lock"), "default", own=501)
     child = make_interface(device, "Ethernet1.100", iface_type="virtual")
     parent = make_interface(device, "Ethernet1")
     unrelated = make_interface(device, "Ethernet99")
@@ -757,7 +763,7 @@ def test_bulk_relationship_pass_skips_scope_locks_without_selected_edges(client,
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
     server_key = configure_default_librenms_server(settings)
-    device = make_device("bulk-unrelated-edge")
+    device = seed_mapping(make_device("bulk-unrelated-edge"), "default", own=501)
     selected = make_interface(device, "Ethernet1")
     child = make_interface(device, "Ethernet2.100", iface_type="virtual")
     parent = make_interface(device, "Ethernet2")
@@ -803,7 +809,7 @@ def test_bulk_relationship_pass_does_not_lock_unrelated_interfaces(settings):
 
     server_key = configure_default_librenms_server(settings)
 
-    device = make_device("bulk-targeted-edge")
+    device = seed_mapping(make_device("bulk-targeted-edge"), "default", own=501)
     child = make_interface(device, "Ethernet1.100", iface_type="virtual")
     parent = make_interface(device, "Ethernet1")
     unrelated = make_interface(device, "Ethernet99")
@@ -913,7 +919,7 @@ def test_concurrent_cross_model_port_claim_refuses_without_partial_writes(settin
 
     server_key = configure_default_librenms_server(settings)
     device = make_device("claim-device", librenms_cf={server_key: {"id": 71}})
-    vm = make_vm("claim-vm", make_cluster("claim-cluster"))
+    vm = seed_mapping(make_vm("claim-vm", make_cluster("claim-cluster")), "default", own=501)
     winner, loser = (device, vm) if winner_kind == "device" else (vm, device)
     winner_model = Interface if winner_kind == "device" else VMInterface
     loser_model = VMInterface if winner_kind == "device" else Interface

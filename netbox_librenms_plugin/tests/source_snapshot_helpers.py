@@ -204,7 +204,9 @@ def port_vlans(mode=None, untagged=None, tagged=()):
 SEEDED_OS = "seeded-os"
 
 
-def seed_interfaces_snapshot(subject, ports, port_stack=(), *, device=None, oob_ports=None, server_key="default"):
+def seed_interfaces_snapshot(
+    subject, ports, port_stack=(), *, device=None, oob_ports=None, server_key="default", source_id=None
+):
     """
     Store an interfaces snapshot of the raw *ports* and *port_stack* mappings, as a refresh acquires them.
 
@@ -215,6 +217,7 @@ def seed_interfaces_snapshot(subject, ports, port_stack=(), *, device=None, oob_
         device (dict | Failed | None): The device record; None names :data:`SEEDED_OS`.
         oob_ports (Iterable[dict] | Failed | None): The OOB controller's port rows, when the owner links one.
         server_key (str): The LibreNMS server key.
+        source_id (int | None): A historical host identity for an explicitly stale source.
 
     Returns:
         SourceSnapshot: The stored snapshot.
@@ -224,6 +227,7 @@ def seed_interfaces_snapshot(subject, ports, port_stack=(), *, device=None, oob_
         subject,
         Resource.INTERFACES,
         server_key,
+        source_id=source_id,
         oob=None if oob_ports is None else {"ports": oob_ports if isinstance(oob_ports, Failed) else list(oob_ports)},
         ports=list(ports),
         port_stack=list(port_stack),

@@ -75,7 +75,7 @@ def test_an_unreadable_vlan_scope_skips_the_vlan_write_instead_of_clearing_it(cl
     from dcim.models import Interface
     from ipam.models import VLAN
 
-    device = make_device("vlan-scope-hidden-device")
+    device = seed_mapping(make_device("vlan-scope-hidden-device"), "default", own=501)
     vlan = VLAN.objects.create(vid=812, name="hidden-scope-vlan")
     interface = make_interface(device, "GigabitEthernet0/1")
     interface.mode = "access"
@@ -102,7 +102,7 @@ def test_a_constrained_vlan_grant_also_skips_the_vlan_write(client, settings):
     from dcim.models import Interface
     from ipam.models import VLAN, VLANGroup
 
-    device = make_device("vlan-constrained-device")
+    device = seed_mapping(make_device("vlan-constrained-device"), "default", own=501)
     visible = VLAN.objects.create(vid=901, name="constrained-visible-vlan")
     hidden = VLAN.objects.create(vid=902, name="constrained-hidden-vlan")
     interface = make_interface(device, "GigabitEthernet0/2")
@@ -163,7 +163,7 @@ OOB_ID = 9900
 
 def _link_oob(device):
     """Link an OOB controller on the device's mapping and return the device."""
-    return map_device_to_librenms(device, server_key="default", oob={"id": OOB_ID, "type": "idrac"})
+    return map_device_to_librenms(device, 501, server_key="default", oob={"id": OOB_ID, "type": "idrac"})
 
 
 def _relationship_ports(relation_field, source_id, related_id, source_name="", related_name=""):
@@ -249,7 +249,7 @@ class TestSyncInterfaceParentViewPermissions:
         from netbox_librenms_plugin.tests.conftest import make_vm
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
-        vm = make_vm("parent-permissions-vm")
+        vm = seed_mapping(make_vm("parent-permissions-vm"), "default", own=501)
         child = VMInterface.objects.create(virtual_machine=vm, name="Ethernet1.100")
         parent = VMInterface.objects.create(virtual_machine=vm, name="Ethernet1")
         seed_mapping(child, own=10, save=False)
@@ -551,7 +551,7 @@ class TestSyncInterfacesViewReadAssessment:
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
-        device = make_device(f"cached-ports-{tag}")
+        device = seed_mapping(make_device(f"cached-ports-{tag}"), server_key, own=501)
         request = _make_request()
         view = make_view(SyncInterfacesView, request, librenms_api=LibreNMSAPI(server_key=server_key))
         return view, request, device
@@ -616,7 +616,7 @@ class TestInterfaceContextOOBRows:
     def _host_with_idrac():
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface
 
-        device = make_device("host1")
+        device = seed_mapping(make_device("host1"), "default", own=501)
         # An OOB row cannot claim an unbound host interface by name.
         make_interface(device, "idrac0")
         return device
@@ -691,8 +691,8 @@ class TestInterfaceContextOOBRows:
     def test_host_name_on_another_chassis_member_does_not_mark_oob_collision(self):
         from dcim.models import VirtualChassis
 
-        master = make_device("oob-collision-scope-master")
-        member = make_device("oob-collision-scope-member")
+        master = seed_mapping(make_device("oob-collision-scope-master"), "default", own=501)
+        member = seed_mapping(make_device("oob-collision-scope-member"), "default", own=501)
         chassis = VirtualChassis.objects.create(name="oob-collision-scope", master=master)
         for device, position in ((master, 1), (member, 2)):
             device.virtual_chassis = chassis
@@ -770,7 +770,7 @@ class TestInterfaceContextOOBRows:
         assert "Will sync as" not in rendered
 
     def test_name_fallback_does_not_match_an_interface_bound_to_another_port(self):
-        device = make_device("table-conflicting-port-id")
+        device = seed_mapping(make_device("table-conflicting-port-id"), "default", own=501)
         wrong_interface = make_interface(device, "Ethernet1")
         aggregate = make_interface(device, "Port-Channel1", iface_type="lag")
         seed_mapping(wrong_interface, own=30, save=False)
@@ -794,7 +794,7 @@ class TestInterfaceContextOOBRows:
         assert "lag-sync-btn" not in str(context["table"].render_parent(None, row))
 
     def test_relationship_button_is_hidden_when_related_interface_does_not_exist(self):
-        device = make_device("table-missing-related-interface")
+        device = seed_mapping(make_device("table-missing-related-interface"), "default", own=501)
         source = make_interface(device, "Ethernet1")
         seed_mapping(source, own=10, save=False)
         source.save()
@@ -815,7 +815,7 @@ class TestInterfaceContextOOBRows:
 
     def test_a_related_interface_with_a_malformed_binding_is_not_a_name_match(self):
         """A malformed binding is never unbound, so a same-name LAG cannot stand for the LibreNMS LAG port."""
-        device = make_device("table-malformed-related-binding")
+        device = seed_mapping(make_device("table-malformed-related-binding"), "default", own=501)
         lag = make_interface(device, "Port-Channel1", iface_type="lag")
         seed_stored_mapping(lag, {"default": {"id": "junk"}}, save=True)
         source = make_interface(device, "Ethernet1")
@@ -838,7 +838,7 @@ class TestInterfaceContextOOBRows:
     def test_relationship_button_resolves_an_unbound_same_name_source(self):
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
-        device = make_device("table-unbound-relationship-source")
+        device = seed_mapping(make_device("table-unbound-relationship-source"), "default", own=501)
         child = make_interface(device, "Ethernet1.100", iface_type="virtual")
         parent = make_interface(device, "Ethernet1")
         seed_mapping(parent, own=20, save=False)
@@ -875,7 +875,7 @@ class TestInterfaceContextOOBRows:
         """Duplicate cached IDs outside the current edge must not make its button fail."""
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
-        device = make_device("inline-unrelated-duplicate-id")
+        device = seed_mapping(make_device("inline-unrelated-duplicate-id"), "default", own=501)
         child = make_interface(device, "Ethernet1.100", iface_type="virtual")
         parent = make_interface(device, "Ethernet1")
         for interface, port_id in ((child, 10), (parent, 20)):
@@ -908,7 +908,7 @@ class TestInterfaceContextOOBRows:
     def test_duplicate_display_name_does_not_make_unbound_source_actionable(self):
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
-        device = make_device("table-ambiguous-unbound-source")
+        device = seed_mapping(make_device("table-ambiguous-unbound-source"), "default", own=501)
         source = make_interface(device, "Ethernet", iface_type="virtual")
         first_parent = make_interface(device, "Parent1")
         second_parent = make_interface(device, "Parent2")
@@ -952,7 +952,7 @@ class TestInterfaceContextOOBRows:
     def test_inline_relationship_rejects_an_edge_replaced_in_the_current_cache(self):
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
-        device = make_device("stale-inline-parent")
+        device = seed_mapping(make_device("stale-inline-parent"), "default", own=501)
         child = make_interface(device, "Ethernet1.100", iface_type="virtual")
         old_parent = make_interface(device, "Ethernet1")
         current_parent = make_interface(device, "Ethernet2")
@@ -989,7 +989,7 @@ class TestInterfaceContextOOBRows:
     def test_inline_relationship_rejects_conflicting_canonical_cache_edges(self):
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
-        device = make_device("conflicting-canonical-inline-edge")
+        device = seed_mapping(make_device("conflicting-canonical-inline-edge"), "default", own=501)
         child = make_interface(device, "Ethernet1.100", iface_type="virtual")
         first_parent = make_interface(device, "Ethernet1")
         second_parent = make_interface(device, "Ethernet2")
@@ -1019,6 +1019,7 @@ class TestInterfaceContextOOBRows:
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
 
         _virtual_chassis, (member1, member2) = make_virtual_chassis_members("ambiguous-related-vc")
+        seed_mapping(member1, "default", own=501)
         source = make_interface(member1, "Ethernet1")
         first_aggregate = make_interface(member1, "Port-Channel1")
         second_aggregate = make_interface(member2, "Port-Channel1")
@@ -1051,6 +1052,7 @@ class TestInterfaceContextOOBRows:
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
 
         _virtual_chassis, (member1, member2) = make_virtual_chassis_members("duplicate-related-id-vc")
+        seed_mapping(member1, "default", own=501)
         source = make_interface(member1, "Ethernet1")
         first_aggregate = make_interface(member1, "Port-Channel1")
         second_aggregate = make_interface(member2, "Port-Channel2")
@@ -1079,7 +1081,7 @@ class TestInterfaceContextOOBRows:
     def test_duplicate_cached_related_port_id_has_no_inline_action(self):
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
-        device = make_device("duplicate-cached-related-id")
+        device = seed_mapping(make_device("duplicate-cached-related-id"), "default", own=501)
         source = make_interface(device, "Ethernet1.100", iface_type="virtual")
         parent = make_interface(device, "Ethernet1")
         seed_mapping(source, own=10, save=False)
@@ -1111,7 +1113,7 @@ class TestInterfaceContextOOBRows:
         from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
         from netbox_librenms_plugin.views.object_sync.devices import SingleInterfaceVerifyView
 
-        device = make_device("duplicate-cached-source-id")
+        device = seed_mapping(make_device("duplicate-cached-source-id"), "default", own=501)
         source = make_interface(device, "Ethernet1.100", iface_type="virtual")
         parent = make_interface(device, "Ethernet1")
         seed_mapping(source, own=10, save=False)
@@ -1159,6 +1161,7 @@ class TestInterfaceContextOOBRows:
         from netbox_librenms_plugin.views.object_sync.devices import SingleInterfaceVerifyView
 
         _virtual_chassis, (page_device, _member) = make_virtual_chassis_members("missing-row-port-id")
+        seed_mapping(page_device, "default", own=501)
         seed_interfaces_snapshot(
             page_device,
             [
@@ -1195,7 +1198,7 @@ class TestInterfaceContextOOBRows:
     def test_duplicate_source_port_id_has_no_inline_action(self):
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
 
-        device = make_device("duplicate-source-id")
+        device = seed_mapping(make_device("duplicate-source-id"), "default", own=501)
         source = make_interface(device, "Ethernet1")
         duplicate_source = make_interface(device, "Ethernet2")
         aggregate = make_interface(device, "Port-Channel1", iface_type="lag")
@@ -1228,7 +1231,7 @@ class TestInterfaceContextOOBRows:
 
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
-        device = make_device("hidden-related-interface-action")
+        device = seed_mapping(make_device("hidden-related-interface-action"), "default", own=501)
         child = make_interface(device, "Ethernet1.100", iface_type="virtual")
         parent = make_interface(device, "Ethernet1")
         seed_mapping(child, own=10, save=False)
@@ -1267,6 +1270,7 @@ class TestInterfaceContextOOBRows:
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
         _virtual_chassis, (page_device, hidden_member) = make_virtual_chassis_members("hidden-row-owner-vc")
+        seed_mapping(page_device, "default", own=501)
         hidden_rack = Rack.objects.create(
             name="Hidden Row Owner Rack",
             site=hidden_member.site,
@@ -1352,6 +1356,7 @@ class TestInterfaceContextVirtualChassisOwner:
         from dcim.models import Device, Interface
 
         _virtual_chassis, (page_device, other_member) = make_virtual_chassis_members("logical-row-owner")
+        seed_mapping(page_device, "default", own=501)
         correct = make_interface(page_device, "Vlan2", iface_type="virtual")
         wrong = make_interface(other_member, "Vlan2", iface_type="virtual")
         correct.description = "original correct"
@@ -1400,6 +1405,7 @@ class TestInterfaceContextVirtualChassisOwner:
 
     def test_non_string_interface_type_does_not_crash_row_owner_resolution(self):
         _virtual_chassis, (page_device, _other_member) = make_virtual_chassis_members("invalid-row-type")
+        seed_mapping(page_device, "default", own=501)
         port = {
             "port_id": 10,
             "ifName": "Vlan2",
@@ -1428,6 +1434,7 @@ class TestInterfaceContextVirtualChassisOwner:
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
         _virtual_chassis, (member1, member2) = make_virtual_chassis_members("row-vlan-owner")
+        seed_mapping(member1, "default", own=501)
         rack1 = Rack.objects.create(name="Row VLAN Rack 1", site=member1.site, status="active")
         rack2 = Rack.objects.create(name="Row VLAN Rack 2", site=member1.site, status="active")
         member1.rack = rack1
@@ -1495,7 +1502,7 @@ class TestInterfaceContextVirtualChassisOwner:
         from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
         from netbox_librenms_plugin.views.object_sync.devices import SingleInterfaceVerifyView
 
-        device = make_device("verify-vlan-group-override")
+        device = seed_mapping(make_device("verify-vlan-group-override"), "default", own=501)
         default_group = VLANGroup.objects.create(
             name="Verify VLAN Group A",
             slug="verify-vlan-group-a",
@@ -1549,6 +1556,7 @@ class TestInterfaceContextVirtualChassisOwner:
         from ipam.models import VLAN, VLANGroup
 
         _virtual_chassis, (member1, member2) = make_virtual_chassis_members("sync-vlan-owner")
+        seed_mapping(member1, "default", own=501)
         rack1 = Rack.objects.create(name="Sync VLAN Rack 1", site=member1.site, status="active")
         rack2 = Rack.objects.create(name="Sync VLAN Rack 2", site=member1.site, status="active")
         member1.rack = rack1
@@ -1671,7 +1679,7 @@ class TestSyncInterfacesViewPost:
         from netbox_librenms_plugin.tests.view_test_helpers import make_superuser, message_texts
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
-        device = make_device("outer-commit-integrity")
+        device = seed_mapping(make_device("outer-commit-integrity"), "default", own=501)
         port = {
             "port_id": 10,
             "ifName": "Ethernet1",
@@ -1708,6 +1716,7 @@ class TestSyncInterfacesViewPost:
             "selected-vlan-owner-scope",
             count=3,
         )
+        seed_mapping(page_device, "default", own=501)
         port = {
             "port_id": 10,
             "ifName": "Ethernet2",
@@ -1747,6 +1756,7 @@ class TestSyncInterfacesViewPost:
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         _virtual_chassis, (page_device, target_device) = make_virtual_chassis_members("auto-owner-candidate-scope")
+        seed_mapping(page_device, "default", own=501)
         target = make_interface(target_device, "Ethernet2")
         seed_mapping(target, own=10, save=False)
         target.save()
@@ -1782,6 +1792,7 @@ class TestSyncInterfacesViewPost:
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         _virtual_chassis, (page_device, target_device) = make_virtual_chassis_members("auto-owner-batched-lookup")
+        seed_mapping(page_device, "default", own=501)
         port_ids = set(range(1, 301))
         ports = [
             {
@@ -1817,7 +1828,7 @@ class TestSyncInterfacesViewPost:
         """The relationship pass must honor the form's explicit Type exclusion."""
         from dcim.models import Device, Interface
 
-        device = make_device("bulk-exclude-lag-type")
+        device = seed_mapping(make_device("bulk-exclude-lag-type"), "default", own=501)
         member = make_interface(device, "Ethernet1")
         aggregate = make_interface(device, "Port-Channel1", iface_type="other")
         for interface, port_id in ((member, 10), (aggregate, 20)):
@@ -1857,7 +1868,7 @@ class TestSyncInterfacesViewPost:
         """An already-linked member must still repair a stale aggregate type."""
         from dcim.models import Device, Interface
 
-        device = make_device("bulk-lag-type-repair")
+        device = seed_mapping(make_device("bulk-lag-type-repair"), "default", own=501)
         member = make_interface(device, "Ethernet1")
         aggregate = make_interface(device, "Port-Channel1", iface_type="lag")
         for interface, port_id in ((member, 10), (aggregate, 20)):
@@ -1912,7 +1923,7 @@ class TestSyncInterfacesViewPost:
     def test_bulk_parent_link_resolves_a_unique_unbound_related_name(self):
         from dcim.models import Device, Interface
 
-        device = make_device("bulk-unbound-related-parent")
+        device = seed_mapping(make_device("bulk-unbound-related-parent"), "default", own=501)
         child = make_interface(device, "Ethernet1.100", iface_type="virtual")
         parent = make_interface(device, "Ethernet1")
         seed_mapping(child, own=11, save=False)
@@ -1955,7 +1966,7 @@ class TestSyncInterfacesViewPost:
         from dcim.models import Device, Interface
         from ipam.models import VLAN, VLANGroup
 
-        device = make_device("cross-page-parent-vlan")
+        device = seed_mapping(make_device("cross-page-parent-vlan"), "default", own=501)
         wrong_group = VLANGroup.objects.create(name="Parent fallback", slug="parent-fallback")
         kept_group = VLANGroup.objects.create(name="Parent selected", slug="parent-selected")
         wrong_vlan = VLAN.objects.create(vid=100, name="Parent fallback", group=wrong_group, status="active")
@@ -2021,6 +2032,7 @@ class TestSyncInterfacesViewPost:
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         _virtual_chassis, (page_device, member_device) = make_virtual_chassis_members("cross-page-lag-member")
+        seed_mapping(page_device, "default", own=501)
         aggregate = make_interface(page_device, "Port-Channel1", iface_type="lag")
         member = make_interface(member_device, "Ethernet2")
         seed_mapping(aggregate, own=100, save=False)
@@ -2088,6 +2100,7 @@ class TestSyncInterfacesViewPost:
         from dcim.models import Device, Interface
 
         _virtual_chassis, (page_device, member_device) = make_virtual_chassis_members("ifdescr-cross-page-member")
+        seed_mapping(page_device, "default", own=501)
         aggregate = make_interface(member_device, "Bundle", iface_type="lag")
         seed_mapping(aggregate, own=100, save=False)
         aggregate.save()
@@ -2140,6 +2153,7 @@ class TestSyncInterfacesViewPost:
         from dcim.models import Device, Interface
 
         _virtual_chassis, (page_device, other_member) = make_virtual_chassis_members("cross-member-lag")
+        seed_mapping(page_device, "default", own=501)
         aggregate = make_interface(page_device, "Port-Channel1", iface_type="lag")
         member = make_interface(other_member, "Ethernet2")
         seed_mapping(aggregate, own=100, save=False)
@@ -2195,6 +2209,7 @@ class TestSyncInterfacesViewPost:
         from dcim.models import Device, Interface
 
         _virtual_chassis, (page_device, other_member) = make_virtual_chassis_members("cross-member-parent")
+        seed_mapping(page_device, "default", own=501)
         parent = make_interface(page_device, "Ethernet1")
         child = make_interface(other_member, "Ethernet2.100", iface_type="virtual")
         seed_mapping(parent, own=10, save=False)
@@ -2249,7 +2264,8 @@ class TestSyncInterfacesViewPost:
         from dcim.models import Device, Interface
 
         _virtual_chassis, (page_device, other_member) = make_virtual_chassis_members("invalid-parent-target")
-        outside_device = make_device("invalid-parent-target-outside")
+        seed_mapping(page_device, "default", own=501)
+        outside_device = seed_mapping(make_device("invalid-parent-target-outside"), "default", own=501)
         child = make_interface(page_device, "Ethernet1.100", iface_type="virtual")
         existing_parent = make_interface(other_member, "Ethernet1")
         seed_mapping(child, own=11, save=False)
@@ -2291,6 +2307,7 @@ class TestSyncInterfacesViewPost:
         from dcim.models import Device, Interface
 
         _virtual_chassis, (page_device, other_member) = make_virtual_chassis_members("view-only-parent-owner")
+        seed_mapping(page_device, "default", own=501)
         child = make_interface(page_device, "Ethernet1.100", iface_type="virtual")
         parent = make_interface(other_member, "Ethernet1", iface_type="virtual")
         seed_mapping(child, own=11, save=False)
@@ -2345,6 +2362,7 @@ class TestSyncInterfacesViewPost:
         from dcim.models import Device, Interface
 
         _virtual_chassis, (page_device, child_member) = make_virtual_chassis_members("unbound-logical-parent-owner")
+        seed_mapping(page_device, "default", own=501)
         child = make_interface(child_member, "Ethernet2.100", iface_type="virtual")
         seed_mapping(child, own=11, save=False)
         child.save()
@@ -2387,7 +2405,7 @@ class TestSyncInterfacesViewPost:
 
         from netbox_librenms_plugin.models import InterfaceTypeMapping
 
-        device = make_device("nested-off-page-parent")
+        device = seed_mapping(make_device("nested-off-page-parent"), "default", own=501)
         InterfaceTypeMapping.objects.create(librenms_type="nestedVirtual", netbox_type="virtual")
         InterfaceTypeMapping.objects.create(librenms_type="nestedPhysical", netbox_type="other")
         user = make_user_with_perms(
@@ -2443,7 +2461,7 @@ class TestSyncInterfacesViewPost:
     def test_selected_row_with_blank_active_name_is_skipped(self):
         from dcim.models import Device, Interface
 
-        device = make_device("blank-selected-interface-name")
+        device = seed_mapping(make_device("blank-selected-interface-name"), "default", own=501)
         child = make_interface(device, "Ethernet2", iface_type="virtual")
         parent = make_interface(device, "Ethernet1")
         seed_mapping(child, own=11, save=False)
@@ -2485,6 +2503,7 @@ class TestSyncInterfacesViewPost:
         from dcim.models import Device, Interface
 
         _virtual_chassis, (member1, member2) = make_virtual_chassis_members("stable-selection")
+        seed_mapping(member1, "default", own=501)
         selected_interface = make_interface(member1, "Ethernet")
         selected_interface.description = "old selected"
         seed_mapping(selected_interface, own=10, save=False)
@@ -2542,7 +2561,7 @@ class TestSyncInterfacesViewPost:
     def test_same_device_duplicate_display_name_does_not_rebind_existing_port(self):
         from dcim.models import Device, Interface
 
-        device = make_device("same-device-stable-selection")
+        device = seed_mapping(make_device("same-device-stable-selection"), "default", own=501)
         existing = make_interface(device, "Ethernet")
         existing.description = "original port"
         seed_mapping(existing, own=10, save=False)
@@ -2593,7 +2612,7 @@ class TestSyncInterfacesViewPost:
     def test_same_vm_duplicate_display_name_does_not_rebind_existing_port(self):
         from virtualization.models import VirtualMachine, VMInterface
 
-        vm = make_vm("same-vm-stable-selection")
+        vm = seed_mapping(make_vm("same-vm-stable-selection"), "default", own=501)
         existing = VMInterface.objects.create(virtual_machine=vm, name="Ethernet", description="original port")
         seed_mapping(existing, own=10, save=False)
         existing.save()
@@ -2655,12 +2674,12 @@ class TestSyncInterfacesViewPost:
         from virtualization.models import VirtualMachine, VMInterface
 
         if object_type == "device":
-            obj = make_device("corrupt-name-fallback-device")
+            obj = seed_mapping(make_device("corrupt-name-fallback-device"), "default", own=501)
             interface_model = Interface
             owner_filter = {"device": obj}
             permissions = [("view", Device), ("add", Interface), ("change", Interface)]
         else:
-            obj = make_vm("corrupt-name-fallback-vm")
+            obj = seed_mapping(make_vm("corrupt-name-fallback-vm"), "default", own=501)
             interface_model = VMInterface
             owner_filter = {"virtual_machine": obj}
             permissions = [("view", VirtualMachine), ("add", VMInterface), ("change", VMInterface)]
@@ -2713,7 +2732,7 @@ class TestSyncInterfacesViewPost:
 
         from dcim.models import Device, Interface
 
-        device = make_device("oob-row-not-syncable")
+        device = seed_mapping(make_device("oob-row-not-syncable"), "default", own=501)
         user = make_user_with_perms(
             "oob-row-not-syncable",
             [("view", Device), ("add", Interface), ("change", Interface)],
@@ -2740,8 +2759,8 @@ class TestSyncInterfacesViewPost:
     def test_oob_sync_can_use_a_name_owned_by_another_chassis_member(self, selected_ports):
         from dcim.models import Device, Interface, VirtualChassis
 
-        master = make_device("oob-sync-scope-master")
-        member = make_device("oob-sync-scope-member")
+        master = seed_mapping(make_device("oob-sync-scope-master"), "default", own=501)
+        member = seed_mapping(make_device("oob-sync-scope-member"), "default", own=501)
         chassis = VirtualChassis.objects.create(name="oob-sync-scope", master=master)
         for device, position in ((master, 1), (member, 2)):
             device.virtual_chassis = chassis
@@ -2787,6 +2806,7 @@ class TestSyncInterfacesViewPost:
         from netbox_librenms_plugin.tests.view_test_helpers import grant
 
         _chassis, (page, member) = make_virtual_chassis_members("oob-displayed-owner")
+        seed_mapping(page, "default", own=501)
         _link_oob(page)
         user = make_user_with_perms(
             "oob-displayed-owner", [("view", Interface), ("add", Interface), ("change", Interface)]
@@ -2879,7 +2899,7 @@ class TestSyncInterfacesViewPost:
         """One physical port reported on both sides must not become two NetBox interfaces."""
         from dcim.models import Device, Interface
 
-        device = make_device("oob-shared-lom")
+        device = seed_mapping(make_device("oob-shared-lom"), "default", own=501)
         user = make_user_with_perms(
             "oob-shared-lom",
             [("view", Device), ("add", Interface), ("change", Interface)],
@@ -2917,7 +2937,7 @@ class TestSyncInterfacesViewPost:
     def test_oob_port_does_not_adopt_an_unbound_host_interface_by_name(self, viewable):
         from dcim.models import Device, Interface
 
-        device = make_device("oob-name-collision")
+        device = seed_mapping(make_device("oob-name-collision"), "default", own=501)
         host_interface = make_interface(device, "lom0")
         host_interface.description = "host interface"
         host_interface.save()
@@ -2971,7 +2991,7 @@ class TestSyncInterfacesViewPost:
 
         from dcim.models import Device, Interface
 
-        device = make_device("oob-name-collision-host")
+        device = seed_mapping(make_device("oob-name-collision-host"), "default", own=501)
         user = make_user_with_perms(
             "oob-name-collision-host",
             [("view", Device), ("add", Interface), ("change", Interface)],
@@ -3004,7 +3024,7 @@ class TestSyncInterfacesViewPost:
         """A host-owned bare name derives an OOB name instead of reporting a skip."""
         from dcim.models import Device, Interface
 
-        device = make_device("oob-collision-reported")
+        device = seed_mapping(make_device("oob-collision-reported"), "default", own=501)
         user = make_user_with_perms(
             "oob-collision-reported",
             [("view", Device), ("add", Interface), ("change", Interface)],
@@ -3074,7 +3094,7 @@ class TestSyncInterfacesViewPost:
 
         from dcim.models import Device, Interface
 
-        device = make_device("oob-unselected-lom")
+        device = seed_mapping(make_device("oob-unselected-lom"), "default", own=501)
         user = make_user_with_perms(
             "oob-unselected-lom",
             [("view", Device), ("add", Interface), ("change", Interface)],
@@ -3115,12 +3135,12 @@ class TestSyncInterfacesViewPost:
         """A different bound port keeps the bare name unavailable to the OOB row."""
         from dcim.models import Device, Interface
 
-        device = make_device("oob-collision-host-gone")
+        device = seed_mapping(make_device("oob-collision-host-gone"), "default", own=501)
         host_interface = make_interface(device, "eno1")
         seed_mapping(host_interface, own=8901, save=False)
         host_interface.save()
         if bound_elsewhere:
-            foreign = make_interface(make_device("oob-foreign-owner"), "eth9")
+            foreign = make_interface(seed_mapping(make_device("oob-foreign-owner"), "default", own=501), "eth9")
             seed_mapping(foreign, own=8902, save=False)
             foreign.save()
 
@@ -3168,7 +3188,7 @@ class TestSyncInterfacesViewPost:
     def test_duplicate_normalized_selected_port_id_is_rejected_before_writes(self):
         from dcim.models import Device, Interface
 
-        device = make_device("duplicate-normalized-selected-id")
+        device = seed_mapping(make_device("duplicate-normalized-selected-id"), "default", own=501)
         user = make_user_with_perms(
             "duplicate-normalized-selected-id",
             [("view", Device), ("add", Interface), ("change", Interface)],
@@ -3201,7 +3221,7 @@ class TestSyncInterfacesViewPost:
     def test_duplicate_normalized_related_port_id_is_not_linked(self):
         from dcim.models import Device
 
-        device = make_device("duplicate-normalized-related-id")
+        device = seed_mapping(make_device("duplicate-normalized-related-id"), "default", own=501)
         child = make_interface(device, "Ethernet1.100", iface_type="virtual")
         parent = make_interface(device, "Ethernet1")
         seed_mapping(child, own=10, save=False)
@@ -3240,7 +3260,7 @@ class TestSyncInterfacesViewPost:
     def test_padded_cached_port_id_updates_its_existing_stable_match(self):
         from dcim.models import Device, Interface
 
-        device = make_device("padded-stable-port-id")
+        device = seed_mapping(make_device("padded-stable-port-id"), "default", own=501)
         interface = make_interface(device, "oldname")
         seed_stored_mapping(interface, {"default": "0010"}, save=True)
         user = make_user_with_perms(
@@ -3332,7 +3352,7 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         """End-to-end: the sync POST creates a real Interface on a real Device and persists the synced attributes."""
         from dcim.models import Interface
 
-        dev = make_device("sync-create")
+        dev = seed_mapping(make_device("sync-create"), "default", own=501)
         librenms_port = {
             **_PORT_KEYS_UNSET,
             "ifName": "Gi0/1",
@@ -3374,11 +3394,11 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         from dcim.models import Interface
 
         # The device the user is syncing — it legitimately owns its own Gi0/1.
-        dev = make_device("sync-fallback-own")
+        dev = seed_mapping(make_device("sync-fallback-own"), "default", own=501)
         own_iface = make_interface(dev, "Gi0/1")
 
         # A DIFFERENT device whose Gi0/1 carries the LibreNMS port_id (stale/duplicate id).
-        other = make_device("sync-fallback-other")
+        other = seed_mapping(make_device("sync-fallback-other"), "default", own=501)
         other_iface = make_interface(other, "Gi0/1")
         seed_mapping(other_iface, own=77, save=False)
         other_iface.save()
@@ -3409,6 +3429,7 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         from dcim.models import Interface
 
         _vc, (host, sibling) = make_virtual_chassis_members("selvalid")
+        seed_mapping(host, "default", own=501)
         port = {**_PORT_KEYS_UNSET, "ifName": "Gi0/1", "port_id": 10}
 
         _post_sync(client, settings, host, [port], [10], extra={"device_selection_10": str(sibling.pk)})
@@ -3420,8 +3441,8 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         """A device that is neither the page device nor a VC sibling is refused."""
         from dcim.models import Interface
 
-        dev = make_device("selinvalid-page")
-        other = make_device("selinvalid-other")
+        dev = seed_mapping(make_device("selinvalid-page"), "default", own=501)
+        other = seed_mapping(make_device("selinvalid-other"), "default", own=501)
         port = {**_PORT_KEYS_UNSET, "ifName": "Gi0/1", "port_id": 10}
 
         response = _post_sync(client, settings, dev, [port], [10], extra={"device_selection_10": str(other.pk)})
@@ -3435,7 +3456,7 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
     def test_device_selection_does_not_exist_is_skipped(self, client, settings):
         from dcim.models import Device, Interface
 
-        dev = make_device("selgone-page")
+        dev = seed_mapping(make_device("selgone-page"), "default", own=501)
         absent_pk = missing_pk(Device)
         port = {**_PORT_KEYS_UNSET, "ifName": "Gi0/1", "port_id": 10}
 
@@ -3451,6 +3472,7 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         from dcim.models import Device, Interface
 
         _vc, (host, sibling) = make_virtual_chassis_members("selhidden")
+        seed_mapping(host, "default", own=501)
         user = make_user_with_perms("selhidden-user", [("add", Interface), ("change", Interface)])
         user = grant(user, "view", Device, constraints={"pk": host.pk})
         port = {**_PORT_KEYS_UNSET, "ifName": "Gi0/1", "port_id": 10}
@@ -3469,7 +3491,7 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         """A port_id stored on this device's own interface updates that interface directly, no duplicate."""
         from dcim.models import Interface
 
-        dev = make_device("sync-prefers-own")
+        dev = seed_mapping(make_device("sync-prefers-own"), "default", own=501)
         iface = make_interface(dev, "Gi0/1")
         seed_mapping(iface, own=42, save=False)
         iface.save()
@@ -3498,8 +3520,8 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         """A foreign port binding refuses creation when no local interface exists."""
         from dcim.models import Interface
 
-        dev = make_device("sync-conflict-nolocal")  # deliberately has NO Gi0/1
-        other = make_device("sync-conflict-other")
+        dev = seed_mapping(make_device("sync-conflict-nolocal"), "default", own=501)  # deliberately has NO Gi0/1
+        other = seed_mapping(make_device("sync-conflict-other"), "default", own=501)
         other_iface = make_interface(other, "Gi0/1")
         seed_mapping(other_iface, own=77, save=False)
         other_iface.save()
@@ -3524,7 +3546,7 @@ class TestSyncInterfacesViewSyncInterfaceVM:
     def test_vm_interface_created(self, client, settings):
         from virtualization.models import VMInterface
 
-        vm = make_vm("vmsync-created")
+        vm = seed_mapping(make_vm("vmsync-created"), "default", own=501)
 
         _post_sync(client, settings, vm, [{**_PORT_KEYS_UNSET, "ifName": "eth0", "port_id": 1}], [1])
 
@@ -3534,7 +3556,7 @@ class TestSyncInterfacesViewSyncInterfaceVM:
         """A port_id already stored on this VM's interface updates it; no second interface."""
         from virtualization.models import VMInterface
 
-        vm = make_vm("vmsync-portid")
+        vm = seed_mapping(make_vm("vmsync-portid"), "default", own=501)
         matched = VMInterface.objects.create(virtual_machine=vm, name="eth0")
         seed_mapping(matched, "default", own=55)
         librenms_port = {**_PORT_KEYS_UNSET, "ifName": "renamed-in-librenms", "port_id": 55}
@@ -3551,7 +3573,7 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
         """An unbound interface that the row matches by name is bound to the row's port ID."""
         from dcim.models import Interface
 
-        interface = make_interface(make_device("port-id-write"), "Gi0/1")
+        interface = make_interface(seed_mapping(make_device("port-id-write"), "default", own=501), "Gi0/1")
         librenms_port = {
             **_PORT_KEYS_UNSET,
             "ifName": "Gi0/1",
@@ -3613,7 +3635,7 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
 
     def test_ifalias_not_set_when_same_as_name(self, client, settings):
         """IfAlias should not overwrite when equal to interface name."""
-        interface = make_interface(make_device("ifalias-same-as-name"), "Gi0/1")
+        interface = make_interface(seed_mapping(make_device("ifalias-same-as-name"), "default", own=501), "Gi0/1")
         librenms_port = {
             **_PORT_KEYS_UNSET,
             "ifName": "Gi0/1",
@@ -3644,7 +3666,7 @@ class TestSyncLagAndParentRelationships:
     def _make_device():
         from netbox_librenms_plugin.tests.conftest import make_device
 
-        return make_device("lag-dev")
+        return seed_mapping(make_device("lag-dev"), "default", own=501)
 
     @staticmethod
     def _iface(device, name, port_id, itype="1000base-t"):
@@ -3676,7 +3698,7 @@ class TestSyncLagAndParentRelationships:
 
         from netbox_librenms_plugin.tests.conftest import make_vm
 
-        vm = make_vm("relgate-vm")
+        vm = seed_mapping(make_vm("relgate-vm"), "default", own=501)
         parent = self._vm_iface(vm, "eth0", 10)
         child = self._vm_iface(vm, "eth0.100", 11)
         # The child's name is the parent's name plus ".100", so the assessment derives the edge.
@@ -4426,7 +4448,7 @@ class TestSyncInterfaceLagViewRealDB:
     def test_links_member_to_aggregate(self):
         from netbox_librenms_plugin.tests.conftest import make_device
 
-        device = make_device("lag-host")
+        device = seed_mapping(make_device("lag-host"), "default", own=501)
         member = self._iface(device, "Gi0/1", 10)
         agg = self._iface(device, "Po1", 20)
 
@@ -4447,7 +4469,7 @@ class TestSyncInterfaceLagViewRealDB:
 
         from netbox_librenms_plugin.tests.conftest import make_device
 
-        device = make_device("lag-host-virtual-member")
+        device = seed_mapping(make_device("lag-host-virtual-member"), "default", own=501)
         member = self._iface(device, "virt0", 30, itype="virtual")
         aggregate = self._iface(device, "Po1", 31, itype="lag")
 
@@ -4466,8 +4488,8 @@ class TestSyncInterfaceLagViewRealDB:
     def test_cross_member_aggregate_is_linked_within_virtual_chassis(self):
         from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis
 
-        member1 = make_device("vc-lag-m1")
-        member2 = make_device("vc-lag-m2")
+        member1 = seed_mapping(make_device("vc-lag-m1"), "default", own=501)
+        member2 = seed_mapping(make_device("vc-lag-m2"), "default", own=501)
         make_virtual_chassis("VC-LAG", member1, member2)
         local = self._iface(member1, "Gi0/1", 40)
         aggregate = self._iface(member2, "Po1", 50)
@@ -4491,8 +4513,8 @@ class TestSyncInterfaceParentViewRealPermissions:
         from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
-        donor = make_device("parent-migrated-donor")
-        winner = make_device("parent-migrated-winner")
+        donor = seed_mapping(make_device("parent-migrated-donor"), "default", own=501)
+        winner = seed_mapping(make_device("parent-migrated-winner"), "default", own=501)
         child = make_interface(donor, "Ethernet1.100", iface_type="virtual")
         parent = make_interface(donor, "Ethernet1")
         seed_mapping(child, own=10, save=False)
@@ -4504,8 +4526,9 @@ class TestSyncInterfaceParentViewRealPermissions:
 
         request = _make_request({"port_id": "10", "parent_port_id": "11"})
         view = make_view(SyncInterfaceParentView)
-        _seed_relationship(donor, "sub_interfaces", 10, 11, child.name, parent.name)
-        assert interface_rows(donor)["port_stack_relationships"]["sub_interfaces"] == {10: 11}
+        ports, port_stack = _relationship_ports("sub_interfaces", 10, 11, child.name, parent.name)
+        seed_interfaces_snapshot(donor, ports, port_stack, source_id=501)
+        assert interface_rows(donor) is None
 
         response = _post(view, request, object_type="device", object_id=donor.pk)
 
@@ -4519,7 +4542,7 @@ class TestSyncInterfaceParentViewRealPermissions:
 
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
-        device = make_device("parent-related-view-permission")
+        device = seed_mapping(make_device("parent-related-view-permission"), "default", own=501)
         child = make_interface(device, "Ethernet1.100", iface_type="virtual")
         parent = make_interface(device, "Ethernet1")
         seed_mapping(child, own=10, save=False)
@@ -4557,7 +4580,7 @@ class TestSyncInterfaceParentViewRealPermissions:
 
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
-        device = make_device("parent-rejected-link")
+        device = seed_mapping(make_device("parent-rejected-link"), "default", own=501)
         child = make_interface(device, "Ethernet1.100", iface_type="virtual")
         parent = make_interface(device, "Ethernet1")
         for interface, port_id in ((child, 12), (parent, 13)):
@@ -4588,7 +4611,7 @@ class TestSyncInterfaceParentViewRealPermissions:
     def test_name_fallback_rejects_interface_bound_to_a_different_port(self):
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
-        device = make_device("parent-conflicting-id")
+        device = seed_mapping(make_device("parent-conflicting-id"), "default", own=501)
         child = make_interface(device, "Ethernet1.100", iface_type="virtual")
         wrong_parent = make_interface(device, "Ethernet1")
         seed_mapping(child, own=10, save=False)
@@ -4716,8 +4739,8 @@ class TestRelationshipSyncObjectScope:
     def test_lag_sync_refuses_an_out_of_scope_interface(self):
         from dcim.models import Device, Interface
 
-        in_scope_device = make_device("relscope-in")
-        out_of_scope_device = make_device("relscope-out")
+        in_scope_device = seed_mapping(make_device("relscope-in"), "default", own=501)
+        out_of_scope_device = seed_mapping(make_device("relscope-out"), "default", own=501)
         self._iface(in_scope_device, "Gi0/1", 700)
         member = self._iface(out_of_scope_device, "Gi0/1", 701)
         agg = self._iface(out_of_scope_device, "Po1", 702)
@@ -4738,7 +4761,7 @@ class TestRelationshipSyncObjectScope:
         """The interfaces the grant DOES cover still link — the scoping must not over-block."""
         from dcim.models import Device, Interface
 
-        device = make_device("relscope-ok")
+        device = seed_mapping(make_device("relscope-ok"), "default", own=501)
         member = self._iface(device, "Gi0/1", 710)
         agg = self._iface(device, "Po1", 711)
         user = self._writer(
@@ -4762,7 +4785,7 @@ class TestRelationshipSyncObjectScope:
 
         site_a = Site.objects.create(name="relationship-owner-site-a", slug="relationship-owner-site-a")
         site_b = Site.objects.create(name="relationship-owner-site-b", slug="relationship-owner-site-b")
-        device = make_device("relationship-owner-moved")
+        device = seed_mapping(make_device("relationship-owner-moved"), "default", own=501)
         device.site = site_a
         device.save(update_fields=["site"])
         child = self._iface(device, "Ethernet1.100", 720)
@@ -4816,7 +4839,7 @@ class TestRelationshipSyncObjectScope:
 
         from netbox_librenms_plugin.views.sync import interfaces as sync_interfaces
 
-        device = make_device("relationship-interface-moved")
+        device = seed_mapping(make_device("relationship-interface-moved"), "default", own=501)
         child = self._iface(device, "Ethernet1.100", 722)
         child.type = "virtual"
         child.description = "managed"
@@ -4861,7 +4884,7 @@ class TestRelationshipSyncObjectScope:
 
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
-        device = make_device("hidden-duplicate-parent-id")
+        device = seed_mapping(make_device("hidden-duplicate-parent-id"), "default", own=501)
         child = make_interface(device, "Ethernet1.100", iface_type="virtual")
         visible_parent = make_interface(device, "Ethernet1")
         hidden_duplicate = make_interface(device, "Ethernet2")
@@ -4914,6 +4937,7 @@ class TestRelationshipSyncObjectScope:
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
         _vc, (member1, member2) = make_virtual_chassis_members("hidden-duplicate-parent-name")
+        seed_mapping(member1, "default", own=501)
         child = make_interface(member1, "Ethernet1.100", iface_type="virtual")
         visible_parent = make_interface(member1, "Ethernet1")
         make_interface(member2, "Ethernet1")
@@ -4967,7 +4991,7 @@ def test_relinking_repairs_an_aggregate_edited_back_to_a_non_lag_type(settings):
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
 
     server_key = configure_default_librenms_server(settings)
-    device = make_device("lag-type-repair")
+    device = seed_mapping(make_device("lag-type-repair"), "default", own=501)
     member = make_interface(device, "Ethernet1")
     aggregate = make_interface(device, "Port-Channel1", iface_type="lag")
     seed_mapping(member, server_key, own=10, save=False)

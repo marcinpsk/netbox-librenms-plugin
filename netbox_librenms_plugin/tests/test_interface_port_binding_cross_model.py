@@ -123,7 +123,12 @@ class TestTheSyncWriter:
     ):
         configure_default_librenms_server(settings)
         if holder_type == "device":
-            holder = _bind(make_interface(make_device("foreign-port-owner"), "private-port-name"), PORT)
+            holder = _bind(
+                make_interface(
+                    seed_mapping(make_device("foreign-port-owner"), "default", own=501), "private-port-name"
+                ),
+                PORT,
+            )
         else:
             holder = _vm_interface("foreign-port-owner", PORT)
         if object_type == "device":
@@ -131,7 +136,9 @@ class TestTheSyncWriter:
             model = Interface
             owner_filter = {"device": owner}
         else:
-            owner = make_vm("requested-port-owner", make_cluster("requested-port-cluster"))
+            owner = seed_mapping(
+                make_vm("requested-port-owner", make_cluster("requested-port-cluster")), "default", own=501
+            )
             model = VMInterface
             owner_filter = {"virtual_machine": owner}
         existing = (
@@ -350,7 +357,10 @@ class TestTheCableFarEndCreate:
 def test_a_persistent_foreign_binding_skips_only_its_row(client, settings, object_type, holder_type):
     configure_default_librenms_server(settings)
     holder = (
-        _bind(make_interface(make_device("bulk-foreign-holder"), "private-holder-name"), PORT)
+        _bind(
+            make_interface(seed_mapping(make_device("bulk-foreign-holder"), "default", own=501), "private-holder-name"),
+            PORT,
+        )
         if holder_type == "device"
         else _vm_interface("bulk-foreign-holder", PORT)
     )
@@ -358,7 +368,7 @@ def test_a_persistent_foreign_binding_skips_only_its_row(client, settings, objec
         owner = make_device("bulk-conflict-owner", librenms_cf={SERVER_KEY: {"id": 71}})
         model, owner_filter = Interface, {"device": owner}
     else:
-        owner = make_vm("bulk-conflict-owner", make_cluster("bulk-conflict-cluster"))
+        owner = seed_mapping(make_vm("bulk-conflict-owner", make_cluster("bulk-conflict-cluster")), "default", own=501)
         model, owner_filter = VMInterface, {"virtual_machine": owner}
     client.force_login(make_superuser("bulk-conflict-user"))
     seed_ports(owner, [_port(PORT + 1, "clean-port"), _port(PORT, "conflicting-port")])
