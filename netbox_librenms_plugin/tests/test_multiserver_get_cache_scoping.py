@@ -201,21 +201,25 @@ class TestRemovedServerFailsClosed:
         from django.core.cache import cache
         from django.utils.module_loading import import_string
 
+        from netbox_librenms_plugin import source_cache
         from netbox_librenms_plugin.acquisition.registry import Resource
         from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_ip_snapshot, seed_source_snapshot
 
         view_class = import_string(view_path)
         device = make_device(
-            f"removed-{data_type}", librenms_cf={"removed": 22} if data_type == "ip_addresses" else None
+            f"removed-{data_type}",
+            librenms_cf={"removed": 22} if data_type in {"ip_addresses", "vlans"} else None,
         )
         if data_type == "ports":
             make_interface(device, "Ethernet4")
         view = view_class()
         request = _request("removed")
         if data_type == "vlans":
-            seed_source_snapshot(device, Resource.VLANS, "removed", source_id=22, vlans=payload)
+            snapshot = seed_source_snapshot(device, Resource.VLANS, "removed", source_id=22, vlans=payload)
+            assert source_cache.read(device, Resource.VLANS, "removed", user=request.user) == snapshot
         elif data_type == "ip_addresses":
-            seed_ip_snapshot(device, payload, server_key="removed")
+            snapshot = seed_ip_snapshot(device, payload, server_key="removed")
+            assert source_cache.read(device, Resource.IP_ADDRESSES, "removed", user=request.user) == snapshot
         else:
             cache.set(view.get_cache_key(device, data_type, "removed"), payload)
 
