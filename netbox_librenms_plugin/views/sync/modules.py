@@ -371,7 +371,7 @@ def _authorize_module_grant(page_device, server_key, action, token, *, user):
     try:
         page_device = Device.objects.select_related("virtual_chassis").get(pk=page_device.pk)
     except Device.DoesNotExist as exc:
-        raise GrantRefused(GrantRefusal.DESTINATION) from exc
+        raise GrantRefused(GrantRefusal.SNAPSHOT) from exc
     sync_device = _get_sync_device_for_inventory(page_device, server_key)
     if not Device.objects.filter(pk=sync_device.pk).exists():
         raise GrantRefused(GrantRefusal.SNAPSHOT)
