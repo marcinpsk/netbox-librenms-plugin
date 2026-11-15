@@ -23,7 +23,7 @@ from netbox_librenms_plugin.sync_cache import (
     schedule_request_cache_mutation,
 )
 from netbox_librenms_plugin.sync_query import page_query_url
-from netbox_librenms_plugin.transactions import saved_in_scope
+from netbox_librenms_plugin.transactions import atomic_with_events, saved_in_scope
 from netbox_librenms_plugin.utils import (
     acquire_advisory_transaction_lock,
     coerce_model_pk,
@@ -434,7 +434,7 @@ class SyncVLANsView(
         group = _VLANSyncOutcome()
         held = []
         try:
-            with transaction.atomic():
+            with atomic_with_events():
                 held = [m for m in members if self._write(request, m.operation, changeable_vlans, group)]
                 if len(held) != len(members):
                     raise _GroupRolledBack()
