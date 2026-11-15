@@ -1196,13 +1196,18 @@ def test_cache_only_source_can_authorize_a_permitted_module_write(ui, c8300):
     from extras.models import CustomField
 
     from netbox_librenms_plugin.librenms_api import librenms_id_cache_key
-    from netbox_librenms_plugin.server_mappings import read_mapping
+    from netbox_librenms_plugin.server_mappings import read_mapping, release_server
+    from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
 
     device, entities = c8300
     source_id = read_mapping(device).own_id(SERVER_KEY)
-    CustomField.objects.filter(name="librenms_id").delete()
-    device.custom_field_data = {}
+    assert source_id is not None
+    apply_mapping_change(device, release_server(device, SERVER_KEY, clear_preference=True))
     device.save()
+    CustomField.objects.filter(name="librenms_id").delete()
+    device.refresh_from_db()
+    assert not CustomField.objects.filter(name="librenms_id").exists()
+    assert read_mapping(device).own_id(SERVER_KEY) is None
     cache.set(librenms_id_cache_key(device, SERVER_KEY), source_id, timeout=60)
     action, fields = _install_form(ui, device, entities)
     post(ui, action, fields)
