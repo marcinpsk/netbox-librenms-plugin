@@ -53,7 +53,7 @@ def test_a_serial_update_a_module_move_and_a_chassis_unlink_do_not_deadlock(
     client, settings, librenms_server, monkeypatch, flushed_events
 ):
     """The update pauses before its serial claim while the move claims that serial and the unlink starts."""
-    from netbox_librenms_plugin.views.sync import modules as module_views
+    from netbox_librenms_plugin import module_writes
 
     configure_librenms_servers(
         settings,
@@ -117,7 +117,7 @@ def test_a_serial_update_a_module_move_and_a_chassis_unlink_do_not_deadlock(
     release_update, release_move = Event(), Event()
     thread_state = local()
     pids, statements, sqlstates, edges = {}, {}, [], []
-    real_assignment_lock = module_views.assignment_lock
+    real_assignment_lock = module_writes.assignment_lock
 
     def schedule_real_claim(serials, **kwargs):
         role = getattr(thread_state, "role", None)
@@ -133,7 +133,7 @@ def test_a_serial_update_a_module_move_and_a_chassis_unlink_do_not_deadlock(
             assert release_move.wait(8), "the module move was not released"
         return result
 
-    monkeypatch.setattr(module_views, "assignment_lock", schedule_real_claim)
+    monkeypatch.setattr(module_writes, "assignment_lock", schedule_real_claim)
 
     def post(role, url, fields):
         close_old_connections()

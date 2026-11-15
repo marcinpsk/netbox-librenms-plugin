@@ -399,7 +399,7 @@ def test_an_interface_that_the_row_sync_and_the_relationship_pass_write_sends_on
     from netbox_librenms_plugin.tests.view_test_helpers import messages_on
 
     configure_default_librenms_server(settings)
-    device = make_device("events-coalesced-sync")
+    device = seed_mapping(make_device("events-coalesced-sync"), "default", own=4293)
     aggregate = bound_interface(device, "Po1", 100, iface_type="lag")
     member = synced_interface(device, "eth1", 11, description="old")
     seed_ports(
