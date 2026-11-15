@@ -100,13 +100,19 @@ JSON value of the custom field by hand.
 4. **Save the row:**
 
     - Click **Save** on the row. Each row saves only its own server.
+    - Replacing a LibreNMS ID or replacing or clearing an OOB ID opens a confirmation. It names
+      the server and each interface whose port ID it clears. Confirm the change to save it.
+    - A host change clears that server's port IDs on all interfaces of the object. For a virtual
+      chassis, it clears the port IDs on every member. It keeps the other servers' port IDs.
+    - Change the LibreNMS ID and the OOB controller one at a time. Each change has its own confirmation.
     - The plugin refuses an ID that another NetBox device or virtual machine already holds on that
       server. It names that object only when you have permission to view it.
     - When another user changed the mapping after the page loaded, the plugin refuses the save.
       Reload the page and enter the values again.
 
-You need change permission on the object. A virtual chassis member shows the editor on the page of
-the member that holds the mapping. Use **Convert ID** to convert a legacy value (a bare integer)
+You need change permission on the object. A host change also needs view permission on every scope
+object, and view and change permission on each interface that it clears. A virtual chassis member
+shows the editor on the page of the member that holds the mapping. Use **Convert ID** to convert a legacy value (a bare integer)
 before you edit it. The editor does not repair a value with an invalid format.
 
 To remove the mapping for a server that is no longer configured, click **Remove** on its row in the
