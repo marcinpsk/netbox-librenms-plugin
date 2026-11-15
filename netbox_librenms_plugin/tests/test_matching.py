@@ -356,11 +356,16 @@ class TestTheDeadlineBoundsTheWholeRequest:
         result = matching.find_librenms_match(device, api, deadline=matching.Deadline(1))
 
         elapsed = time.perf_counter() - started
-        # A redirect is unreachable as soon as its status line and headers arrive: its body is never read.
-        assert isinstance(result, Unreachable if answer == "redirect-with-slow-body" else NotChecked)
+        # The redirect body is not read. Its same-origin target returns the server's ordinary 404.
+        assert isinstance(result, NoMatch if answer == "redirect-with-slow-body" else NotChecked)
         assert elapsed < 1.5
         # The probe reached the server, so the answer path named by the case ran.
-        assert _paths(librenms_server) == [IP_PATH]
+        paths = _paths(librenms_server)
+        if answer == "redirect-with-slow-body":
+            assert paths[0] == IP_PATH
+            assert "/api/v0/devices/elsewhere" in paths
+        else:
+            assert paths == [IP_PATH]
 
     def test_a_connection_that_is_never_accepted_is_not_checked_within_the_deadline(self, api):
         """A full accept queue drops the connection request, so the connect itself waits."""
@@ -655,12 +660,71 @@ def test_a_probe_that_never_ends_does_not_hold_the_process_open(monkeypatch):
 
 
 @pytest.mark.django_db
-def test_a_redirect_is_unreachable_and_is_not_followed(api, librenms_server):
+def test_a_cross_origin_redirect_is_unreachable_and_is_not_followed(api, librenms_server):
+    device = _device()
+    librenms_server.register_redirect(IP_PATH, "https://other.example.invalid/api/v0/devices/redirected")
+
+    result = matching.find_librenms_match(device, api)
+
+    assert isinstance(result, Unreachable)
+    assert _paths(librenms_server) == [IP_PATH]
+
+
+@pytest.mark.django_db
+def test_a_same_origin_redirect_can_supply_the_match(api, librenms_server):
     device = _device()
     librenms_server.register_redirect(IP_PATH, "/api/v0/devices/redirected")
     librenms_server.register("/api/v0/devices/redirected", _found(55))
 
     result = matching.find_librenms_match(device, api)
 
+    assert isinstance(result, Match)
+    assert result.librenms_id == 55
+    assert _paths(librenms_server) == [IP_PATH, "/api/v0/devices/redirected"]
+    tokens = [
+        {name.lower(): value for name, value in request["headers"].items()}["x-auth-token"]
+        for request in librenms_server.requests
+    ]
+    assert tokens[0] and tokens[0] == tokens[1]
+
+
+@pytest.mark.django_db
+def test_a_redirect_loop_stops_at_the_session_redirect_limit(api, librenms_server):
+    from requests import Session
+
+    librenms_server.register_redirect(IP_PATH, IP_PATH)
+
+    result = matching.find_librenms_match(_device(), api, deadline=matching.Deadline(5))
+
     assert isinstance(result, Unreachable)
-    assert _paths(librenms_server) == [IP_PATH]
+    assert _paths(librenms_server) == [IP_PATH] * (Session().max_redirects + 1)
+
+
+@pytest.mark.django_db
+def test_a_redirected_answer_still_has_the_probe_body_size_limit(api, librenms_server):
+    from netbox_librenms_plugin.librenms_api import MATCH_PROBE_MAX_BYTES
+
+    body = _found(55)
+    body["devices"][0]["description"] = "x" * (MATCH_PROBE_MAX_BYTES + 1)
+    librenms_server.register_redirect(IP_PATH, "/api/v0/devices/oversized")
+    librenms_server.register("/api/v0/devices/oversized", body)
+
+    result = matching.find_librenms_match(_device(), api)
+
+    assert isinstance(result, Unreachable)
+    assert _paths(librenms_server) == [IP_PATH, "/api/v0/devices/oversized"]
+
+
+def test_the_package_requires_an_urllib3_version_that_supports_probe_reads():
+    import tomllib
+    from pathlib import Path
+
+    from packaging.requirements import Requirement
+
+    metadata = tomllib.loads((Path(__file__).parents[2] / "pyproject.toml").read_text())
+    requirements = [Requirement(value) for value in metadata["project"]["dependencies"]]
+    urllib3 = [requirement for requirement in requirements if requirement.name == "urllib3"]
+
+    assert len(urllib3) == 1
+    assert "2.1.0" not in urllib3[0].specifier
+    assert "2.2.0" in urllib3[0].specifier

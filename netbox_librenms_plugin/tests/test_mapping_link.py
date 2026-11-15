@@ -879,3 +879,14 @@ def test_a_device_that_rejoins_its_chassis_before_the_lock_is_refused(server):
     assert rejoined
     assert mapping_summary(_fresh(master)) == {}
     assert "assumptions.chassis" in stale_paths(response, master.name)
+
+
+@pytest.mark.django_db
+def test_the_status_list_selects_the_sync_owner_on_the_active_server(linker, server):
+    master, member = _chassis_master("vc-server-owner", server, "198.18.10.11", 9760)
+    seed_mapping(member, "other", own=9761)
+
+    response = status_list(linker, "device", q="vc-server-owner", server_key="default")
+
+    assert response.status_code == 200
+    assert _status_rows(response)[master.pk].token

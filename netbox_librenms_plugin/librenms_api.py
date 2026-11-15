@@ -164,9 +164,40 @@ class _ProbeAnswer:
 
 
 def _keep_redirect_body_unread(response, **kwargs):
-    """Drop the redirect target, so requests does not read the body to prepare a redirect that it never follows."""
+    """Keep the target separately, so requests does not consume a redirect body."""
     if response.is_redirect:
-        del response.headers["location"]
+        response._probe_redirect_location = response.headers.pop("location")
+
+
+def _probe_response(session, url, headers, timeout, verify, ends_at):
+    """Follow redirects within the session's authentication scope, without reading their bodies."""
+    for _redirect in range(session.max_redirects + 1):
+        remaining = ends_at - time.monotonic()
+        if remaining <= 0:
+            return None
+        response = session.get(
+            url,
+            headers=headers,
+            timeout=min(timeout, remaining),
+            verify=verify,
+            allow_redirects=False,
+            stream=True,
+            hooks={"response": _keep_redirect_body_unread},
+        )
+        location = getattr(response, "_probe_redirect_location", None)
+        if location is None:
+            return response
+        try:
+            target = urllib.parse.urljoin(url, location)
+            permitted = not session.should_strip_auth(url, target)
+        except ValueError:
+            response.close()
+            return None
+        if not permitted:
+            return response
+        response.close()
+        url = target
+    return None
 
 
 def _read_body(response, ends_at):
@@ -191,15 +222,10 @@ def _match_probe(answer, slots, url, headers, timeout, verify, ends_at):
     """
     try:
         with _TokenScopedSession() as session:
-            response = session.get(
-                url,
-                headers=headers,
-                timeout=timeout,
-                verify=verify,
-                allow_redirects=False,
-                stream=True,
-                hooks={"response": _keep_redirect_body_unread},
-            )
+            response = _probe_response(session, url, headers, timeout, verify, ends_at)
+            if response is None:
+                answer.value = None, None
+                return
             try:
                 if 300 <= response.status_code < 400:
                     answer.value = response.status_code, None
