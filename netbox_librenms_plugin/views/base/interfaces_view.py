@@ -131,7 +131,7 @@ class BaseInterfaceTableView(
         }
         return self.render_sync_partial(request, obj, server_key, context)
 
-    def _failure_response(self, request, obj, interface_name_field, server_key, sync_device):
+    def _failure_response(self, request, obj, interface_name_field, server_key, sync_device, coordinator):
         """
         Record a failed refresh and render the tab, which has no snapshot now.
 
@@ -143,12 +143,13 @@ class BaseInterfaceTableView(
             interface_name_field (str): Name field of the LibreNMS ports.
             server_key (str): POST-scoped server key; the tab stays on this server.
             sync_device (Device | VirtualMachine): Object that owns the cache, the VC sync device for a member.
+            coordinator (SyncCacheConsistency): The state coordinator bound to the refresh plan.
 
         Returns:
             HttpResponse: The rendered partial.
 
         """
-        SyncCacheConsistency(obj).mark_refresh_failure(
+        coordinator.mark_refresh_failure(
             SyncTab.INTERFACES,
             server_key,
             actor_id=request_actor_id(request),
@@ -287,30 +288,32 @@ class BaseInterfaceTableView(
             )
 
         # Every Virtual Chassis member shares the snapshot of the VC sync device, so discovery runs on it.
-        sync_device = get_librenms_sync_device(obj, server_key=server_key) or obj
+        plan = source_cache.authorized_plan(request, obj, server_key=server_key, resources=[Resource.INTERFACES])
+        coordinator = SyncCacheConsistency.for_refresh(plan)
+        sync_device = plan.owner(Resource.INTERFACES)
         # Discovery may find the LibreNMS device by IP or hostname and store the mapping; acquisition
         # then reads that mapping and never writes.
         librenms_id, lookup_error = self.resolve_librenms_id(sync_device)
         if librenms_id is None:
             # A failed refresh must not leave an older snapshot to act on.
-            source_cache.delete(obj, Resource.INTERFACES, server_key)
+            source_cache.delete_planned(plan)
             messages.error(
                 request,
                 self.scoped_lookup_message(lookup_error) if lookup_error else "Device not found in LibreNMS.",
             )
-            return self._failure_response(request, obj, interface_name_field, server_key, sync_device)
+            return self._failure_response(request, obj, interface_name_field, server_key, sync_device, coordinator)
 
-        result = source_cache.refresh(obj, Resource.INTERFACES, server_key)
+        result = source_cache.refresh(request, plan)
         if result.error is not None:
             messages.error(request, f"Failed to fetch interfaces from LibreNMS: {result.error}")
-            return self._failure_response(request, obj, interface_name_field, server_key, sync_device)
+            return self._failure_response(request, obj, interface_name_field, server_key, sync_device, coordinator)
 
         # The host rows stay usable when only the OOB controller's ports are missing.
         oob_blocked = "oob" in result.blocked
         if oob_blocked:
             notice = source_cache.blocker_notice(result.blocked["oob"])
             logger.warning("Interfaces of %s refreshed without OOB rows: %s", sync_device, notice)
-        if SyncCacheConsistency(obj).mark_refresh_outcome(
+        if coordinator.mark_refresh_outcome(
             SyncTab.INTERFACES,
             server_key,
             actor_id=request_actor_id(request),
