@@ -16,6 +16,7 @@ from netbox_librenms_plugin.tests.conftest import (
     configure_default_librenms_server,
     make_device,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_source_snapshot
 from netbox_librenms_plugin.tests.view_test_helpers import (
     grant,
@@ -262,6 +263,7 @@ class TestVlanTabIpamScoping:
         device = make_device("vlan-tab-ipam-scope")
         group, _vlan = _site_group_with_vlan(device, "vlan-tab")
         view, request = self._view(_reader("vlan-tab-no-ipam"))
+        seed_mapping(device, server_key, own=63001)
         seed_source_snapshot(
             device, Resource.VLANS, server_key, vlans=[{"vlan_vlan": 100, "vlan_name": "vlan-tab-vlan"}]
         )
@@ -286,6 +288,7 @@ class TestVlanTabIpamScoping:
         device = make_device("vlan-tab-ipam-allowed")
         group, vlan = _site_group_with_vlan(device, "vlan-tab-allowed")
         view, request = self._view(_reader("vlan-tab-ipam", ipam=True))
+        seed_mapping(device, server_key, own=63001)
         seed_source_snapshot(
             device, Resource.VLANS, server_key, vlans=[{"vlan_vlan": 100, "vlan_name": "vlan-tab-allowed-vlan"}]
         )
@@ -320,6 +323,7 @@ class TestVlanTabIpamScoping:
         user = grant(user, "view", VLANGroup, constraints={"pk": group.pk})
         user = grant(user, "view", VLAN, constraints={"pk": vlan.pk})
         view, request = self._view(user)
+        seed_mapping(device, server_key, own=63001)
         seed_source_snapshot(
             device, Resource.VLANS, server_key, vlans=[{"vlan_vlan": 100, "vlan_name": "vlan-tab-constrained-vlan"}]
         )

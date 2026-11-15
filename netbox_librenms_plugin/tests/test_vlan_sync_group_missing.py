@@ -26,7 +26,9 @@ def _make_device(name):
     dt, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model="VLM-DT", slug="vlm-dt")
     role, _ = DeviceRole.objects.get_or_create(name="VLM-Role", slug="vlm-role")
     site, _ = Site.objects.get_or_create(name="VLM-Site", slug="vlm-site")
-    return Device.objects.create(name=name, device_type=dt, role=role, site=site, status="active")
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+
+    return seed_mapping(Device.objects.create(name=name, device_type=dt, role=role, site=site, status="active"), own=7)
 
 
 def _post_request(device_pk, vid, group_pk):
