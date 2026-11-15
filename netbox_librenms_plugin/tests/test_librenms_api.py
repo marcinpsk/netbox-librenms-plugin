@@ -5,6 +5,8 @@ This module provides 100% test coverage for netbox_librenms_plugin/librenms_api.
 with particular focus on HTTP method correctness to prevent regression bugs.
 """
 
+from netbox_librenms_plugin.acquisition.coordinator import plan_acquisition
+
 import inspect
 import re
 import time
@@ -1216,7 +1218,7 @@ class TestIPAddressAcquisitionAnswers:
         server.register(f"/api/v0/devices/{self.DEVICE_ID}/ports", {"status": "ok", "ports": []})
         server.register(f"/api/v0/devices/{self.DEVICE_ID}", {"status": "ok", "devices": [{"ip": ""}]})
         device = make_device("api-ip-answers", librenms_cf={"default": {"id": self.DEVICE_ID}})
-        return acquire(device, server_key="default", resources=[Resource.IP_ADDRESSES]).record(
+        return acquire(plan_acquisition(device, server_key="default", resources=[Resource.IP_ADDRESSES])).record(
             Resource.IP_ADDRESSES, "addresses"
         )
 
@@ -1798,7 +1800,9 @@ class TestVlanAcquisitionResponseShape:
         serve(live_librenms.server, self.PATH)
         device = make_device("vlan-shape", librenms_cf={"default": {"id": 7}})
 
-        record = acquire(device, server_key="default", resources=[Resource.VLANS]).record(Resource.VLANS, "vlans")
+        record = acquire(plan_acquisition(device, server_key="default", resources=[Resource.VLANS])).record(
+            Resource.VLANS, "vlans"
+        )
 
         assert record.outcome is Outcome.FAILED
         assert record.value is None

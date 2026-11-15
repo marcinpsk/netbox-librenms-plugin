@@ -1,8 +1,8 @@
 """
-Source acquisition runs without a request, session, user or shared cache; its own imports show it.
+Source acquisition runs without a request, session or user.
 
 The check reads the direct imports of acquisition/ only. A module it imports, such as librenms_api,
-can still import django.core.cache for its own reads.
+can still import django.core.cache. Acquisition reads cached identities through its shared reader.
 """
 
 import ast
@@ -61,3 +61,22 @@ def test_acquisition_imports_no_web_module(path):
 )
 def test_the_check_finds_a_web_import(source, found):
     assert _forbidden(source) == found
+
+
+def test_web_acquisition_uses_the_authorized_plan_adapter():
+    """Web callers cannot bypass the adapter that checks source owners before HTTP."""
+    forbidden = {
+        "netbox_librenms_plugin.acquisition.coordinator.acquire",
+        "netbox_librenms_plugin.acquisition.coordinator.plan_acquisition",
+    }
+    for path in (ACQUISITION.parent / "views").rglob("*.py"):
+        imports = set(_imported_modules(path.read_text()))
+        assert not imports & forbidden, str(path)
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                assert all(alias.name != "netbox_librenms_plugin.acquisition.coordinator" for alias in node.names), str(
+                    path
+                )
+            if isinstance(node, ast.ImportFrom) and node.module == "netbox_librenms_plugin.acquisition":
+                assert all(alias.name != "coordinator" for alias in node.names), str(path)

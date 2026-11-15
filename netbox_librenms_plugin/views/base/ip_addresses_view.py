@@ -792,13 +792,15 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
 
         # Discovery may find the LibreNMS device by IP or hostname and store the mapping; acquisition
         # then reads that mapping and never writes.
+        plan = source_cache.authorized_plan(request, obj, server_key=server_key, resources=[Resource.IP_ADDRESSES])
+        coordinator = SyncCacheConsistency.for_refresh(plan)
         librenms_id, lookup_error = self.resolve_librenms_id(obj)
         if librenms_id is None:
             # A failed refresh must not leave an older snapshot to act on.
-            source_cache.delete(obj, Resource.IP_ADDRESSES, server_key)
+            source_cache.delete_planned(plan)
             error_message = self.scoped_lookup_message(lookup_error) if lookup_error else "Device not found in LibreNMS"
         else:
-            result = source_cache.refresh(obj, Resource.IP_ADDRESSES, server_key)
+            result = source_cache.refresh(request, plan)
             snapshot = result.snapshot
             error_message = None
             if result.error:
@@ -807,7 +809,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
 
         if error_message is not None:
             messages.error(request, error_message)
-            SyncCacheConsistency(obj).mark_refresh_failure(
+            coordinator.mark_refresh_failure(
                 SyncTab.IP_ADDRESSES,
                 server_key,
                 actor_id=request_actor_id(request),
@@ -816,7 +818,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
                 request, obj, server_key, {"ip_sync": self._empty_context(request, obj, server_key, server_key)}
             )
 
-        if SyncCacheConsistency(obj).mark_refresh_outcome(
+        if coordinator.mark_refresh_outcome(
             SyncTab.IP_ADDRESSES,
             server_key,
             actor_id=request_actor_id(request),

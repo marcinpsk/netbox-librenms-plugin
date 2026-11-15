@@ -5,6 +5,8 @@ Its own file rather than an append to ``test_ip_address_render_boundaries.py``: 
 lower branch of the PR stack, so adding to it conflicts on every restack.
 """
 
+from netbox_librenms_plugin.acquisition.coordinator import plan_acquisition
+
 from copy import deepcopy
 
 import pytest
@@ -131,7 +133,7 @@ def _acquired(live_librenms, recording_name, *, ports=None, addresses=None, vrfs
             server.register(path, {"status": "ok", field: rows}, method="GET")
     device = make_device(f"ip-vrf-{recording_name}", librenms_cf={SERVER_KEY: {"id": device_id}})
     server.requests.clear()
-    snapshot = acquire(device, server_key=SERVER_KEY, resources=[Resource.IP_ADDRESSES])
+    snapshot = acquire(plan_acquisition(device, server_key=SERVER_KEY, resources=[Resource.IP_ADDRESSES]))
     assert source_cache.store(device, Resource.IP_ADDRESSES, snapshot)
     return device
 
@@ -272,7 +274,7 @@ class TestIpRowInterfaceNames:
         assert assessment.ports_by_id == {"9000": ports[0]}
         assert assessment.bound_ports_by_id == {"9001": ports[1]}
 
-    def test_a_failed_port_read_fails_the_refresh_and_a_render_does_not_retry_it(self, client, live_librenms):
+    def test_a_failed_port_read_fails_the_refresh_and_a_render_does_not_retry_it(self, client, live_librenms, caplog):
         """Without the ports the rows cannot be named, so no snapshot is stored and the render stays off LibreNMS."""
         device = make_device("ip-ports-fail", librenms_cf={SERVER_KEY: {"id": DEVICE_ID}})
         _serve(live_librenms, 2)
@@ -289,7 +291,9 @@ class TestIpRowInterfaceNames:
         context = _ip_view(_request())._prepare_context(_request(), device, SERVER_KEY)
 
         assert refreshed.status_code == 200
-        assert f"devices/{DEVICE_ID}/ports was not obtained" in refreshed.content.decode()
+        assert "Failed to fetch IP addresses from LibreNMS." in refreshed.content.decode()
+        assert f"devices/{DEVICE_ID}/ports was not obtained" not in refreshed.content.decode()
+        assert f"devices/{DEVICE_ID}/ports was not obtained (ports unavailable)" in caplog.text
         assert source_cache.read(device, Resource.IP_ADDRESSES, SERVER_KEY) is None
         assert context is None
         assert live_librenms.server.requests == []

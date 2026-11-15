@@ -451,6 +451,14 @@ class SyncCacheConsistency:
         # One instance serves a single request or post-commit callback, so the owner a server
         # key resolves to cannot change during its lifetime.
         self._shared_owners = {}
+        self._refresh_plan = None
+
+    @classmethod
+    def for_refresh(cls, plan):
+        """Bind refresh state and snapshot keys to the owners already selected by the acquisition plan."""
+        coordinator = cls(plan.subject)
+        coordinator._refresh_plan = plan
+        return coordinator
 
     def applicable_tabs(self):
         """Return the tabs supported by the synchronization subject's model."""
@@ -469,12 +477,17 @@ class SyncCacheConsistency:
         return self._shared_owners[server_key]
 
     def _primary_owner(self, tab, server_key):
+        if self._refresh_plan is not None:
+            if server_key != self._refresh_plan.server_key:
+                raise ValueError("Refresh state must use the acquisition plan's server.")
+            resource = TAB_SPECS[tab].resource
+            return self._refresh_plan.owner(resource)
         return self._shared_owner(server_key) if _shares_vc_owner(tab) else self.subject
 
     def _candidate_owners(self, tab, server_key):
         owners = {self.subject.pk: self.subject}
         if _shares_vc_owner(tab):
-            shared_owner = self._shared_owner(server_key)
+            shared_owner = self._primary_owner(tab, server_key)
             owners[shared_owner.pk] = shared_owner
         return tuple(owners.values())
 

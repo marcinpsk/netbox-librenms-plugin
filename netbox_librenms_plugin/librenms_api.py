@@ -16,6 +16,7 @@ from netbox_librenms_plugin.constants import (
     LIBRENMS_NO_VRFS_MESSAGE,
     LIBRENMS_PORTS_COLUMNS,
 )
+from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 from netbox_librenms_plugin.ip_addressing import primary_ips
 from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
@@ -74,13 +75,13 @@ def stored_librenms_id(obj, server_key):
         server_key (str): The LibreNMS server key.
 
     Returns:
-        object: The stored ID, the cached value as stored, or None.
+        int | None: The normalized stored or cached ID, or None.
 
     """
     librenms_id = read_mapping(obj).own_id(server_key)
     if librenms_id is not None:
         return librenms_id
-    return cache.get(librenms_id_cache_key(obj, server_key))
+    return coerce_librenms_id(cache.get(librenms_id_cache_key(obj, server_key)))
 
 
 def _validate_api_url(url):
