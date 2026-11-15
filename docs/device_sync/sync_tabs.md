@@ -95,4 +95,4 @@ the same source snapshot. Parent repair and OOB index offsets do not change the 
 
 Data-shape capture keeps the selected device as its subject. In a Virtual Chassis, structural sources
 can belong to the sync owner while IP addresses belong to the selected member. Port compression
-prunes only references that belong to the compressed device. Member addresses remain in the recording.
+prunes only references that belong to the compressed device. Addresses of other members remain in the recording.
