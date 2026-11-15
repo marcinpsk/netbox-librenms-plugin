@@ -1,11 +1,13 @@
 """Acquire the source snapshot of several resources for one synchronization subject."""
 
+from dataclasses import dataclass
 from uuid import uuid4
 
+from dcim.models import Device
 from django.utils import timezone
 from virtualization.models import VirtualMachine
 
-from netbox_librenms_plugin.acquisition.registry import RESOURCE_SPECS, OwnerPolicy
+from netbox_librenms_plugin.acquisition.registry import RESOURCE_SPECS, OwnerPolicy, Resource
 from netbox_librenms_plugin.acquisition.resources import ACQUIRERS
 from netbox_librenms_plugin.acquisition.snapshot import (
     MappingSource,
@@ -15,8 +17,8 @@ from netbox_librenms_plugin.acquisition.snapshot import (
     ResponseRecord,
     SourceSnapshot,
 )
-from netbox_librenms_plugin.librenms_api import build_librenms_api
-from netbox_librenms_plugin.server_mappings import MappingRole, read_mapping, require_server_key
+from netbox_librenms_plugin.librenms_api import build_librenms_api, stored_librenms_id
+from netbox_librenms_plugin.server_mappings import MappingRole, require_server_key
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
 
@@ -66,45 +68,65 @@ def resource_owner(subject, resource, server_key):
     return get_librenms_sync_device(subject, server_key=server_key) or subject
 
 
-def acquire(subject, *, server_key, resources):
-    """
-    Acquire the source snapshot of each resource from one configured LibreNMS server.
-
-    Acquisition needs no request, session or user, and it writes neither NetBox nor the cache.
-
-    Args:
-        subject (Device | VirtualMachine): The synchronization subject.
-        server_key (str): A configured LibreNMS server key.
-        resources (Iterable[Resource]): The resources to acquire.
-
-    Returns:
-        SourceSnapshot: Every response obtained, with the outcome of each request.
-
-    Raises:
-        ValueError: The server key is blank or names no configured server, or a resource has no
-            acquisition or does not apply to the subject.
-        SubjectNotMapped: A resource owner has no LibreNMS mapping on the server.
-
-    """
+def _server_api(server_key):
     require_server_key(server_key)
-    resources = tuple(resources)
     api = build_librenms_api(server_key)
     if api is None or api.server_key != server_key:
         raise ValueError(f"LibreNMS server {server_key!r} is not configured.")
+    return api
+
+
+@dataclass(frozen=True)
+class AcquisitionPlan:
+    """The subject, server and resolved owners of one acquisition, before any HTTP request."""
+
+    subject: Device | VirtualMachine
+    server_key: str
+    owners: tuple
+
+    def owner(self, resource):
+        """Return the owner resolved for one selected resource."""
+        return dict(self.owners)[resource]
+
+
+def plan_acquisition(subject, *, server_key, resources):
+    """Validate the selected resources and resolve each owner once, without discovery or HTTP."""
+    require_server_key(server_key)
+    if not isinstance(subject, (Device, VirtualMachine)):
+        raise ValueError("Source acquisition supports only devices and virtual machines.")
+    resources = tuple(resources)
     for resource in resources:
+        if not isinstance(resource, Resource):
+            raise ValueError("Resources must be Resource values.")
         if resource not in ACQUIRERS:
             raise ValueError(f"No acquisition exists for the {resource} resource.")
         if isinstance(subject, VirtualMachine) and not RESOURCE_SPECS[resource].supports_virtual_machine:
             raise ValueError(f"A virtual machine has no {resource} resource.")
+    return AcquisitionPlan(
+        subject, server_key, tuple((resource, resource_owner(subject, resource, server_key)) for resource in resources)
+    )
 
+
+def acquire(plan):
+    """
+    Acquire the planned owners' current stored or cached identities from one configured server.
+
+    The caller authorizes all planned owners before discovery or HTTP when acting for a user.
+    Acquisition needs no request, session or user. It reads the existing identity cache, but writes
+    neither NetBox nor the cache, and never discovers an identity or resolves an owner again.
+    """
+    if not isinstance(plan, AcquisitionPlan):
+        raise TypeError("Source acquisition needs an AcquisitionPlan.")
     started_at = timezone.now()
-    fetch = _Fetch(api)
+    fetch = _Fetch(_server_api(plan.server_key))
     sources = {}
-    for resource in resources:
-        owner = resource_owner(subject, resource, server_key)
-        librenms_id = read_mapping(owner).own_id(server_key)
+    for resource, planned_owner in plan.owners:
+        owner = type(planned_owner).objects.filter(pk=planned_owner.pk).first()
+        if owner is None:
+            raise SubjectNotMapped(planned_owner, plan.server_key)
+        librenms_id = stored_librenms_id(owner, plan.server_key)
         if librenms_id is None:
-            raise SubjectNotMapped(owner, server_key)
+            raise SubjectNotMapped(owner, plan.server_key)
         parts = ACQUIRERS[resource](fetch, librenms_id)
         sources[resource] = ResourceSource(
             resource=resource,
@@ -118,8 +140,8 @@ def acquire(subject, *, server_key, resources):
         )
     return SourceSnapshot(
         snapshot_id=uuid4().hex,
-        server_key=server_key,
-        subject=ObjectRef.of(subject),
+        server_key=plan.server_key,
+        subject=ObjectRef.of(plan.subject),
         started_at=started_at,
         finished_at=timezone.now(),
         resources=sources,

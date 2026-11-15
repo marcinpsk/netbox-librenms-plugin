@@ -189,7 +189,9 @@ class TestFreshFetchValidation:
         ],
         ids=["null-row", "no-port-id", "unhashable-port-id"],
     )
-    def test_an_unusable_row_fails_the_refresh_and_drops_the_older_snapshot(self, client, live_librenms, bad_row):
+    def test_an_unusable_row_fails_the_refresh_and_drops_the_older_snapshot(
+        self, client, live_librenms, bad_row, caplog
+    ):
         """One unusable row fails the whole refresh: no row is dropped silently and no older snapshot stays."""
         device = make_device("ip-render-bad-port", librenms_cf={SERVER_KEY: {"id": 4305}})
         seed_ip_snapshot(device, [ip_address_row("198.18.51.51", 9306)], [{"port_id": 9306, "ifName": "eth0"}])
@@ -206,7 +208,9 @@ class TestFreshFetchValidation:
         assert response.status_code == 200
         assert source_cache.read(device, Resource.IP_ADDRESSES, SERVER_KEY) is None
         (error,) = _messages(response, "error")
-        assert error.startswith("Failed to fetch IP addresses from LibreNMS: devices/4305/ip was not obtained")
+        assert error == "Failed to fetch IP addresses from LibreNMS."
+        assert "devices/4305/ip was not obtained" not in response.content.decode()
+        assert "Failed to fetch IP addresses from LibreNMS: devices/4305/ip was not obtained" in caplog.text
 
 
 @pytest.mark.django_db

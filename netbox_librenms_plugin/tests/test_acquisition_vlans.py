@@ -1,5 +1,7 @@
 """VLAN acquisition runs without a request and records what LibreNMS answered, over the local HTTP stub."""
 
+from netbox_librenms_plugin.acquisition.coordinator import plan_acquisition
+
 import pytest
 
 SERVER_KEY = "default"
@@ -21,7 +23,7 @@ def _acquire(device):
     from netbox_librenms_plugin.acquisition.coordinator import acquire
     from netbox_librenms_plugin.acquisition.registry import Resource
 
-    return acquire(device, server_key=SERVER_KEY, resources=[Resource.VLANS])
+    return acquire(plan_acquisition(device, server_key=SERVER_KEY, resources=[Resource.VLANS]))
 
 
 def _record(snapshot):
@@ -101,12 +103,12 @@ def test_acquisition_refuses_a_subject_it_cannot_acquire(live_librenms):
     device = _device("acq-vlan-refusals")
     for server_key in ("", "  ", "no-such-server"):
         with pytest.raises(ValueError):
-            acquire(device, server_key=server_key, resources=[Resource.VLANS])
+            acquire(plan_acquisition(device, server_key=server_key, resources=[Resource.VLANS]))
     with pytest.raises(ValueError, match="virtual machine"):
-        acquire(make_vm("acq-vlan-vm"), server_key=SERVER_KEY, resources=[Resource.VLANS])
+        acquire(plan_acquisition(make_vm("acq-vlan-vm"), server_key=SERVER_KEY, resources=[Resource.VLANS]))
     # Acquisition reads the mapping; it never discovers one.
     with pytest.raises(SubjectNotMapped):
-        acquire(make_device("acq-vlan-unmapped"), server_key=SERVER_KEY, resources=[Resource.VLANS])
+        acquire(plan_acquisition(make_device("acq-vlan-unmapped"), server_key=SERVER_KEY, resources=[Resource.VLANS]))
     assert live_librenms.server.requests == []
 
 
@@ -114,7 +116,7 @@ def test_acquisition_refuses_a_subject_it_cannot_acquire(live_librenms):
 def test_the_stored_snapshot_round_trips_and_follows_the_mapping(live_librenms):
     from netbox_librenms_plugin import source_cache
     from netbox_librenms_plugin.acquisition.registry import Resource
-    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping_row
 
     device = _device("acq-vlan-store")
     live_librenms.server.register(VLANS_PATH, {"status": "ok", "vlans": [_vlan(10)]})
@@ -124,8 +126,8 @@ def test_the_stored_snapshot_round_trips_and_follows_the_mapping(live_librenms):
     assert source_cache.read(device, Resource.VLANS, SERVER_KEY) == snapshot
     assert source_cache.remaining_ttl(device, Resource.VLANS, SERVER_KEY) > 0
 
-    # The mapping changes without a save, so no write signal clears the snapshot; the binding check does.
-    seed_mapping(device, SERVER_KEY, own=DEVICE_ID + 1, save=False)
+    # A concurrent database update sends no signal. The binding check must reject the old snapshot.
+    seed_stored_mapping_row(device, {SERVER_KEY: {"id": DEVICE_ID + 1}})
     assert source_cache.read(device, Resource.VLANS, SERVER_KEY) is None
     # The countdown follows the readable snapshot, not the raw entry that still holds its TTL.
     assert source_cache.remaining_ttl(device, Resource.VLANS, SERVER_KEY) is None

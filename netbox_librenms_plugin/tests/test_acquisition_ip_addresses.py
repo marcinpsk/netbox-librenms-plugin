@@ -1,5 +1,7 @@
 """IP address acquisition runs without a request and records what LibreNMS answered, over the local HTTP stub."""
 
+from netbox_librenms_plugin.acquisition.coordinator import plan_acquisition
+
 import pytest
 
 SERVER_KEY = "default"
@@ -38,7 +40,7 @@ def _acquire(subject):
     from netbox_librenms_plugin.acquisition.coordinator import acquire
     from netbox_librenms_plugin.acquisition.registry import Resource
 
-    return acquire(subject, server_key=SERVER_KEY, resources=[Resource.IP_ADDRESSES])
+    return acquire(plan_acquisition(subject, server_key=SERVER_KEY, resources=[Resource.IP_ADDRESSES]))
 
 
 def _record(snapshot, part):

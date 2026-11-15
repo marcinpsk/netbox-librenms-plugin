@@ -15,7 +15,8 @@ from netbox_librenms_plugin.acquisition.snapshot import (
     SourceRequest,
     SourceSnapshot,
 )
-from netbox_librenms_plugin.server_mappings import MappingRole, read_mapping
+from netbox_librenms_plugin.server_mappings import MappingRole
+from netbox_librenms_plugin.librenms_api import stored_librenms_id
 
 
 class Failed:
@@ -62,7 +63,7 @@ def build_source_snapshot(subject, resource, server_key="default", **parts):
                 owner=ObjectRef.of(owner),
                 host=MappingSource(
                     role=MappingRole.OWN,
-                    librenms_id=read_mapping(owner).own_id(server_key),
+                    librenms_id=stored_librenms_id(owner, server_key),
                     state=MappingState.RESOLVED,
                     parts=tuple((name, record.request.key) for name, record in records.items()),
                 ),
