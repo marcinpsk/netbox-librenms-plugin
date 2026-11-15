@@ -236,6 +236,7 @@ def read(subject, resource, server_key, *, user=None):
 
 def _binding_holds(snapshot, resource, owner):
     """Compare the acquired binding with the owner's current effective identity and source."""
+    prefetch_mappings([owner])
     host_id = stored_librenms_id(owner, snapshot.server_key)
     link = oob_link(read_mapping(owner), snapshot.server_key) if resource in OOB_ACQUIRERS else None
     current = SourceBinding(
