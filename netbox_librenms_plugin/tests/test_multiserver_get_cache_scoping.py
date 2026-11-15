@@ -4,6 +4,7 @@ import pytest
 
 from netbox_librenms_plugin.sync_cache import module_inventory_cache_payload
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip, make_superuser
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
 pytestmark = pytest.mark.django_db
 
@@ -85,7 +86,7 @@ class TestConfiguredServerCacheScoping:
         from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_source_snapshot
         from netbox_librenms_plugin.views.object_sync.devices import DeviceVLANTableView
 
-        device = make_device("multiserver-vlan")
+        device = seed_mapping(make_device("multiserver-vlan"), "production", own=22)
         view = DeviceVLANTableView()
         request = _request("production")
         seed_source_snapshot(device, Resource.VLANS, "production", vlans=[{"vlan_vlan": 120, "vlan_name": "DATA"}])
@@ -212,7 +213,7 @@ class TestRemovedServerFailsClosed:
         view = view_class()
         request = _request("removed")
         if data_type == "vlans":
-            seed_source_snapshot(device, Resource.VLANS, "removed", vlans=payload)
+            seed_source_snapshot(device, Resource.VLANS, "removed", source_id=22, vlans=payload)
         elif data_type == "ip_addresses":
             seed_ip_snapshot(device, payload, server_key="removed")
         else:
