@@ -543,6 +543,43 @@ class TestDependentVLANOperations:
         assert any(text.startswith("VLAN 200: ") and "add permission" in text for text in texts)
         assert any(text.startswith("VLAN 100: ") and "group failed" in text for text in texts)
 
+    def test_a_rolled_back_group_discards_only_its_queued_events(self, client, settings):
+        from uuid import uuid4
+
+        from netbox.context import current_request, events_queue
+
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, post
+        from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
+
+        permissions = [permission for permission in VLAN_PERMISSIONS if permission != ("add", VLAN)]
+        case = _DependentRename(client, settings, "rollback-events", permissions)
+        user = grant(case.user, "add", VLAN, constraints={"vid": 999})
+        request = make_request(
+            "post",
+            {
+                "server_key": "default",
+                "action": "create_vlans",
+                intent.FIELD: [case.rename, case.create],
+                "confirm_conflicts": "1",
+            },
+            user=user,
+        )
+        request.id = uuid4()
+        request_token = current_request.set(request)
+        queue_token = events_queue.set({})
+        try:
+            earlier = VLAN.objects.create(vid=400, name="earlier-success", status="active")
+            assert events_queue.get()
+
+            response = post(SyncVLANsView(), request, object_type="device", object_id=case.device.pk)
+
+            assert response.status_code == 302
+            assert case.names() == {100: "users"}
+            assert [event["object_id"] for event in events_queue.get().values()] == [earlier.pk]
+        finally:
+            events_queue.reset(queue_token)
+            current_request.reset(request_token)
+
     def test_an_unconfirmed_group_is_disclosed_whole_and_its_tokens_apply_it(self, client, settings):
         case = _DependentRename(client, settings, "disclosure")
         before = domain_state()
