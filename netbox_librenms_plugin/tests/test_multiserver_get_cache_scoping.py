@@ -212,7 +212,7 @@ class TestRemovedServerFailsClosed:
         view_class = import_string(view_path)
         device = make_device(
             f"removed-{data_type}",
-            librenms_cf={"removed": 22} if data_type in {"ip_addresses", "vlans"} else None,
+            librenms_cf={"removed": 22} if data_type in {"ip_addresses", "vlans", "ports"} else None,
         )
         if data_type == "ports":
             make_interface(device, "Ethernet4")
@@ -222,7 +222,8 @@ class TestRemovedServerFailsClosed:
             snapshot = seed_source_snapshot(device, Resource.VLANS, "removed", source_id=22, vlans=payload)
             assert source_cache.read(device, Resource.VLANS, "removed", user=request.user) == snapshot
         elif data_type == "ports":
-            seed_interfaces_snapshot(device, payload, server_key="removed", source_id=22)
+            snapshot = seed_interfaces_snapshot(device, payload["ports"], server_key="removed", source_id=22)
+            assert source_cache.read(device, Resource.INTERFACES, "removed", user=request.user) == snapshot
         elif data_type == "ip_addresses":
             snapshot = seed_ip_snapshot(device, payload, server_key="removed")
             assert source_cache.read(device, Resource.IP_ADDRESSES, "removed", user=request.user) == snapshot
