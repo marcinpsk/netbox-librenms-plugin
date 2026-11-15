@@ -124,6 +124,7 @@ def build_source_snapshot(subject, resource, server_key="default", *, oob=None, 
     The resource's real acquirer and the coordinator's OOB rule decide the parts and their records, so a
     seed holds what an acquisition of these answers holds. The snapshot follows the owner's current mapping.
     *oob* gives the OOB controller's parts when the owner links one with a valid id.
+    *source_id* overrides the host ID after owner selection, for stale-source tests.
     """
     owner = resource_owner(subject, resource, server_key)
     mapping = read_mapping(owner)
@@ -412,7 +413,9 @@ def seed_cables_snapshot(
     return snapshot
 
 
-def seed_modules_snapshot(subject, inventory, ports=(), transceivers=(), *, oob_inventory=None, server_key="default"):
+def seed_modules_snapshot(
+    subject, inventory, ports=(), transceivers=(), *, oob_inventory=None, server_key="default", source_id=None
+):
     """Store raw module source facts through the real acquirer and source transport."""
     for rows in (inventory, () if oob_inventory is None or isinstance(oob_inventory, Failed) else oob_inventory):
         if any(key.startswith("_") for row in rows for key in row):
@@ -421,6 +424,7 @@ def seed_modules_snapshot(subject, inventory, ports=(), transceivers=(), *, oob_
         subject,
         Resource.MODULES,
         server_key,
+        source_id=source_id,
         inventory=list(inventory),
         ports=list(ports),
         transceivers=list(transceivers),

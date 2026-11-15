@@ -519,3 +519,57 @@ def test_a_member_page_merges_transceivers_under_the_serial_rules_of_the_chassis
     )
 
     assert _read_inventory_indices(member) == [300]
+
+
+@pytest.mark.django_db
+def test_refresh_does_not_report_success_when_its_source_owner_is_deleted(client, live_librenms, monkeypatch):
+    from dcim.models import Device
+
+    from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members, map_device_to_librenms
+
+    _chassis, (subject, owner) = make_virtual_chassis_members("refresh-owner-deleted", count=2)
+    map_device_to_librenms(owner, HOST_ID, server_key="default")
+    client.force_login(make_superuser("refresh-owner-deleted-user"))
+    serve(live_librenms.server, inventory=INVENTORY, transceivers=[])
+    read = source_cache.read
+    deleted = []
+
+    def read_then_delete_owner(subject_, resource, server_key):
+        snapshot = read(subject_, resource, server_key)
+        if resource is Resource.MODULES and snapshot is not None and not deleted:
+            deleted.append(owner.pk)
+            Device.objects.filter(pk=owner.pk).delete()
+        return snapshot
+
+    monkeypatch.setattr(source_cache, "read", read_then_delete_owner)
+
+    response = refresh(client, subject)
+
+    assert deleted == [owner.pk]
+    assert response.status_code == 200
+    assert response.context["module_sync"]["table"] is None
+    assert not any("refreshed successfully" in str(message) for message in response.context["messages"])
+    assert not SyncCacheConsistency(subject).status("default")["modules"]["snapshot_available"]
+
+
+@pytest.mark.django_db
+def test_virtual_chassis_seed_keeps_an_explicit_stale_source_id():
+    from django.core.cache import cache
+    from netbox_librenms_plugin.tests.cache_test_helpers import seed_inventory
+    from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+    from netbox_librenms_plugin.server_mappings import read_mapping
+
+    owner = seed_mapping(make_device("seed-source-owner"), own=7)
+    page = make_device("seed-source-page")
+    make_virtual_chassis("seed-source-chassis", owner, page)
+    key = seed_inventory(page, INVENTORY, librenms_id=999)
+
+    snapshot = SourceSnapshot.from_payload(cache.get(key))
+    assert snapshot.resources[Resource.MODULES].host.librenms_id == 999
+    assert snapshot.resources[Resource.MODULES].owner.pk == owner.pk
+    owner.refresh_from_db()
+    page.refresh_from_db()
+    assert read_mapping(owner).own_id("default") == 7
+    assert read_mapping(page).own_id("default") is None
+    assert source_cache.read(page, Resource.MODULES, "default") is None

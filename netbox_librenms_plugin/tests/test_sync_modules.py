@@ -4299,6 +4299,7 @@ def test_an_install_waits_for_its_destination_owner_held_from_another_member_pag
             "entPhysicalSerialNum": "SN-CHASSIS-LOCK",
         },
     ]
+    seed_mapping(member, "default", own=4602)
     key = seed_inventory(member, stack_inventory(rows, [page, member]), librenms_id=4602)
     action, fields = rendered_module_form(render_module_tab(member), "install-module", 2)
     assert (action, fields["selected_device_id"]) == (

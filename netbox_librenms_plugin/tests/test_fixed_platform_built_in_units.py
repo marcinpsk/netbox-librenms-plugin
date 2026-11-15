@@ -504,32 +504,15 @@ class TestMarkBuiltIn:
         assert tab_rows(device)[SLOT_1]["module_bay"] == "Slot 1"
 
     def test_a_part_number_set_elsewhere_is_never_overwritten(self):
-        """A grant signed for a device type that already has a part number still writes nothing."""
-        from netbox_librenms_plugin.inventory_policy import load_inventory_policy
-        from netbox_librenms_plugin.module_grants import (
-            ACTION_MARK_BUILT_IN,
-            RENDER_ATTRIBUTED,
-            module_inventory_snapshot_digest,
-            sign_module_grant,
-        )
+        """A current grant reaches the part-number guard and cannot overwrite the existing value."""
+        from netbox_librenms_plugin.tests.view_test_helpers import message_texts
 
         device = ixr_device("ixr-signed-part-number", part_number="3HE00000AAAA01")
-        token = sign_module_grant(
-            page_device_id=device.pk,
-            device_id=device.pk,
-            server_key=SERVER_KEY,
-            action=ACTION_MARK_BUILT_IN,
-            ent_index=SLOT_1,
-            action_target={"device_type_id": device.device_type_id},
-            inventory_digest=module_inventory_snapshot_digest(ixr_inventory()),
-            policy_fingerprint=load_inventory_policy(device.pk).fingerprint,
-            render_mode=RENDER_ATTRIBUTED,
-        )
-        fields = {"server_key": SERVER_KEY, "selected_device_id": device.pk, "ent_index": SLOT_1}
         before = written(device)
 
-        mark(device, {**fields, "inventory_binding": token})
+        response = mark(device, signed_mark_query(device, SLOT_1))
 
+        assert any("already has a part number" in text for text in message_texts(response, "error"))
         assert written(device) == before
 
     def test_the_created_rule_is_the_rule_migration_0026_seeds(self):
