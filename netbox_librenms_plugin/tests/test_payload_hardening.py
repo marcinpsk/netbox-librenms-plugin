@@ -3,6 +3,7 @@
 import pytest
 
 from netbox_librenms_plugin.tests.conftest import make_device
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
 
 class TestIsListOfDicts:
@@ -66,17 +67,18 @@ class TestVlanCachedPayloadShape:
         assert cache.get(vlans_key) == bad
 
     def test_empty_cached_vlans_render_an_empty_table(self):
-        from django.contrib.auth.models import AnonymousUser
         from django.test import RequestFactory
 
         from netbox_librenms_plugin.acquisition.registry import Resource
         from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_source_snapshot
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
         device = make_device("vlan-empty-render")
         view = self._view()
         request = RequestFactory().get("/")
-        request.user = AnonymousUser()
+        request.user = make_user_with_perms("vlan-empty-render-user", [("view", type(device))])
         server_key = view.librenms_api.server_key
+        seed_mapping(device, server_key, own=501)
         seed_source_snapshot(device, Resource.VLANS, server_key, vlans=[])
 
         context = view.get_vlan_context(request, device, server_key=server_key)
