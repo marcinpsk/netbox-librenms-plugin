@@ -33,6 +33,7 @@ from netbox_librenms_plugin.mapping_owner import ensure_mapping_owner, mapping_o
 from netbox_librenms_plugin.matching import LookupInputs
 from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
+    ChassisChanged,
     IdentityOwned,
     assign_own,
     edit_server,
@@ -201,7 +202,10 @@ class _LifecycleWriter(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Lib
             return intent.Unavailable("server.configured")
         owned = False
         # The chassis and its members first, so the sync device that the link binds cannot change meanwhile.
-        lock_host_change_owner(model, identity.pk)
+        try:
+            lock_host_change_owner(model, identity.pk, retry_on_chassis_change=False)
+        except ChassisChanged:
+            return intent.Unavailable("assumptions.chassis")
         try:
             row, conflict = lock_librenms_id_assignment(
                 operation.effects.own_id, server_key, owner_queryset=changeable, owner_pk=identity.pk
@@ -396,7 +400,6 @@ class MappingLifecycleView(_LifecycleWriter):
     """Apply the confirmed lifecycle token of one device or VM."""
 
     confirmation_policy = LIFECYCLE_POLICY
-
 
     def post(self, request, object_type, pk):
         """Apply the one submitted lifecycle token of the object, and return to its sync page."""

@@ -1582,13 +1582,15 @@ def stored_entry_digest(obj, server: str) -> str:
     return _canonical_digest(stored.get(require_server_key(server)) if isinstance(stored, dict) else stored)
 
 
-def lock_device_chassis(pk):
+def lock_device_chassis(pk, *, retry_on_chassis_change=True):
     """
     Lock Device *pk* and its virtual chassis in the shared order, and return the locked chassis and members.
 
     The virtual chassis row is locked first, then the chassis members in pk order
     (``views/sync/interfaces.py`` uses the same order). The caller holds the transaction. A join of
-    the locked chassis waits for the commit: it locks the chassis row for key share.
+    the locked chassis waits for the commit: it locks the chassis row for key share. A Link passes
+    retry_on_chassis_change=False to refuse a changed lock cohort instead of retrying its
+    confirmation against a later observation.
 
     Returns:
         tuple: ``(chassis, members)``: the locked VirtualChassis, or None for a device outside a
@@ -1610,12 +1612,13 @@ def lock_device_chassis(pk):
     locked = list(Device.objects.select_for_update(of=("self",)).filter(pk__in=member_ids).order_by("pk"))
     row = next((device for device in locked if device.pk == pk), None)
     if row is not None and row.virtual_chassis_id != chassis_id:
-        raise recorded_conflict(ChassisChanged(CHASSIS_CHANGED_MESSAGE))
+        error = ChassisChanged(CHASSIS_CHANGED_MESSAGE)
+        raise recorded_conflict(error) if retry_on_chassis_change else error
     # A member that left the chassis before the lock is locked, but it is not a member now.
     return chassis, [device for device in locked if device.pk == pk or device.virtual_chassis_id == chassis_id]
 
 
-def lock_host_change_owner(model, pk):
+def lock_host_change_owner(model, pk, *, retry_on_chassis_change=True):
     """
     Lock the rows that own a host change scope in the shared order, and return the locked object.
 
@@ -1630,7 +1633,7 @@ def lock_host_change_owner(model, pk):
 
     if model is not Device:
         return model.objects.select_for_update(of=("self",)).filter(pk=pk).order_by().first()
-    _chassis, members = lock_device_chassis(pk)
+    _chassis, members = lock_device_chassis(pk, retry_on_chassis_change=retry_on_chassis_change)
     return next((device for device in members if device.pk == pk), None)
 
 
