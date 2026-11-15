@@ -230,7 +230,13 @@ class TestRemovedServerFailsClosed:
             snapshot = seed_ip_snapshot(device, payload, server_key="removed")
             assert source_cache.read(device, Resource.IP_ADDRESSES, "removed", user=request.user) == snapshot
         elif data_type == "links":
-            seed_cables_snapshot(device, server_key="removed")
+            snapshot = seed_cables_snapshot(
+                device,
+                [link_row(21, "", local_port="Ethernet4")],
+                [port_row(21, "Ethernet4", device_id=22)],
+                server_key="removed",
+            )
+            assert source_cache.read(device, Resource.CABLES, "removed", user=request.user) == snapshot
         else:
             cache.set(view.get_cache_key(device, data_type, "removed"), payload)
 
