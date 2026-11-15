@@ -1022,6 +1022,45 @@ def test_the_import_preload_leaves_a_malformed_serial_to_the_row_validation(seri
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("name", ["invalid\x00name", "invalid\ud800name"], ids=["nul", "surrogate"])
+def test_an_unused_unstorable_sysname_does_not_abort_the_import_list(live_librenms, name):
+    from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
+
+    existing = make_device("imp-valid-hostname")
+    row = _import_row(7281, existing.name)
+    row["sysName"] = name
+    live_librenms.server.register("/api/v0/devices", {"status": "ok", "devices": [row]})
+
+    rows = process_device_filters(
+        live_librenms.api,
+        {"hostname": existing.name},
+        vc_detection_enabled=False,
+        clear_cache=True,
+        show_disabled=True,
+        use_sysname=False,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["sysName"] == name
+    assert rows[0]["_validation"]["existing_device"] == existing
+
+
+@pytest.mark.django_db
+def test_preloaded_serial_matches_keep_the_related_device_types():
+    from netbox_librenms_plugin.import_utils.device_operations import preload_import_objects
+
+    device = make_device("imp-related-type", serial="PRELOAD-TYPE-SERIAL")
+    loaded = preload_import_objects([_import_row(7282, "imp-different-name", serial=device.serial)], SERVER_KEY)
+    match = loaded[(type(device), device.pk)]
+
+    with CaptureQueriesContext(connection) as queries:
+        assert match.device_type == device.device_type
+        assert match.virtual_chassis is None
+
+    assert len(queries) == 0
+
+
+@pytest.mark.django_db
 def test_the_import_preload_runs_a_fixed_number_of_queries():
     from netbox_librenms_plugin.import_utils.device_operations import preload_import_objects
 

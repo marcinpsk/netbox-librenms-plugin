@@ -929,7 +929,7 @@ def _detect_serial_match_role(existing_by_serial, existing_link, hostname, seria
     }
 
 
-def _storable_serial(value) -> bool:
+def _storable_text(value) -> bool:
     """Return whether *value* is a JSON scalar whose text a PostgreSQL text column can hold: no NUL, valid UTF-8."""
     if not isinstance(value, (str, int, float)):
         return False
@@ -976,9 +976,10 @@ def preload_import_objects(
     for row in libre_devices:
         names.update(name for name in _name_candidates(row) if name)
         names.update(variant["name"] for variant in import_name_variants(row).values() if variant["name"])
+    names = {name for name in names if _storable_text(name)}
     # The validator and the cached-row refresh resolve the LibreNMS text, so the preload resolves it too.
     # A serial that no stored row can hold is an issue of its row in the validator, so the preload leaves it out.
-    serials = [row["serial"] for row in libre_devices if _storable_serial(row.get("serial"))]
+    serials = [row["serial"] for row in libre_devices if _storable_text(row.get("serial"))]
     try:
         serial_resolutions = resolve_devices(serials, rules=serial_rules) if serials else {}
     except RuleConfigurationError:
@@ -1011,6 +1012,7 @@ def preload_import_objects(
         )
         queryset = model.objects.all()
         if model is Device:
+            queryset = queryset.select_related("device_type", "virtual_chassis__master__device_type")
             match |= Q(oob_ip__in=ips) | Q(pk__in=serial_pks)
         for offset in range(0, len(identities), PRELOAD_IDENTITY_CHUNK):
             match |= identity_q(
