@@ -169,7 +169,7 @@ def test_an_adjusted_name_that_the_group_already_holds_is_reported_by_name(clien
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("change", ["rule deleted", "rule added", "name not posted"])
+@pytest.mark.parametrize("change", ["rule deleted", "rule added", "name not posted", "source renamed"])
 def test_a_create_refuses_a_name_that_the_page_did_not_show(client, vlan_librenms, change):
     """A rule change between the page and the create never saves a name that the user did not see."""
     from ipam.models import VLAN
@@ -184,6 +184,10 @@ def test_a_create_refuses_a_name_that_the_page_did_not_show(client, vlan_librenm
         rule.delete()
     elif change == "rule added":
         _rule(juniper)
+    elif change == "source renamed":
+        # A later refresh stores a new snapshot of the same source binding before this page submits.
+        vlan_librenms([{"vlan_vlan": 300, "vlan_name": "db+300"}])
+        _refresh(client, device)
     _sync(client, device, {300: None if change == "name not posted" else shown})
 
     assert not VLAN.objects.filter(vid=300).exists()
