@@ -4,6 +4,7 @@ import re
 from collections import defaultdict
 
 from netbox_librenms_plugin.acquisition.registry import Resource
+from netbox_librenms_plugin.acquisition.snapshot import Outcome
 from netbox_librenms_plugin.acquisition.resources import (
     Blocker,
     NEIGHBOUR_PORTS_PREFIX,
@@ -302,8 +303,15 @@ def assess(snapshot, *, subject, interface_name_field="ifName", include_serial=T
     source = snapshot.resources[resource]
     state = cable_source_state(snapshot)
     blocked = state.blocked_scopes
+    sensors = snapshot.record(resource, "sensors") if source.host is not None else None
     if not include_serial:
         blocked.pop("serial", None)
+    elif sensors is not None and sensors.outcome is Outcome.NOT_REQUESTED:
+        # The shared snapshot came from a refresher who cannot view serial ports, so this reader must refresh.
+        path = sensors.request.path
+        blocked["serial"] = (
+            Blocker(path, f"{path} was not requested by the last refresh; refresh to load serial cables"),
+        )
     links = _mapping_rows(snapshot, source.host, "host", blocked, interface_name_field)
     links.extend(_mapping_rows(snapshot, source.oob, "oob", blocked, interface_name_field))
     if include_serial and state.serial is not None and state.serial.ready:

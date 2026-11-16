@@ -214,7 +214,7 @@ def test_failed_neighbour_ports_block_a_hostname_only_link_to_that_neighbour(cli
 
 
 @pytest.mark.django_db
-def test_low_privilege_refresh_makes_no_sensor_request_and_removes_old_serial_rows(client, live_librenms):
+def test_low_privilege_refresh_removes_old_serial_rows_and_tells_a_serial_reader_to_refresh(client, live_librenms):
     from dcim.models import ConsoleServerPort, Device
     from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
@@ -248,8 +248,11 @@ def test_low_privilege_refresh_makes_no_sensor_request_and_removes_old_serial_ro
 
     assert response.status_code == 200
     assert all(r["path"] != "/api/v0/resources/sensors" for r in live_librenms.server.requests[before:])
+    assert not response.context["cable_sync"]["blockers"]
     client.force_login(admin)
-    assert _rows(_fragment(client, device)) == []
+    fragment = _fragment(client, device)
+    assert _rows(fragment) == []
+    assert [blocker.path for blocker in fragment.context["cable_sync"]["blockers"]] == ["resources/sensors"]
 
 
 @pytest.mark.django_db
