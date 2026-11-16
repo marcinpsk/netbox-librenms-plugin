@@ -5,6 +5,7 @@ from functools import partial
 from threading import Event, local
 from time import monotonic, sleep
 
+import pytest
 from dcim.models import Module
 from django.contrib.auth import get_user_model
 from django.db import DatabaseError, close_old_connections, connection
@@ -29,6 +30,7 @@ from netbox_librenms_plugin.tests.link_intent_helpers import lifecycle_url, offe
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_mapped_modules
 from netbox_librenms_plugin.tests.view_test_helpers import render_module_tab, rendered_module_form
+from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
 
 
 def _blocked_by_or_finished(role, blocker, future, *, pids, statements, edges):
@@ -48,6 +50,7 @@ def _blocked_by_or_finished(role, blocker, future, *, pids, statements, edges):
     raise AssertionError(f"{role} neither finished nor waited for {blocker}: {statements}")
 
 
+@pytest.mark.skipif(not netbox_relocates_module_subtree(), reason="NetBox moves a module from 4.7.")
 @transactional_db_with_all_apps()
 def test_a_serial_update_a_module_move_and_a_chassis_unlink_do_not_deadlock(
     client, settings, librenms_server, monkeypatch, flushed_events
