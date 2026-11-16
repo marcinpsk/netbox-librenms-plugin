@@ -311,7 +311,7 @@ def test_each_neighbour_request_uses_only_the_remaining_budget(live_librenms, mo
 
     monkeypatch.setattr(HTTPAdapter, "send", record_timeout)
 
-    snapshot = _acquire(_device("acq-cable-remaining-budget", oob={"id": OOB_ID, "type": "idrac"}))
+    snapshot = _acquire(_device("acq-cable-remaining-budget", oob=OOB_ID))
 
     assert snapshot.record(Resource.CABLES, f"neighbour_ports:{NEIGHBOUR_ID + 1}", MappingRole.OOB).obtained
     assert timeouts == [5.0]
