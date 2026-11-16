@@ -164,6 +164,27 @@ def test_failed_oob_ports_block_oob_rows_and_keep_host_rows(client, live_librenm
 
 
 @pytest.mark.django_db
+def test_an_oob_only_owner_refreshes_without_discovering_an_own_id(client, live_librenms):
+    """An OOB mapping covers the owner, so the refresh never looks the host up by name and never stores an own ID."""
+    from netbox_librenms_plugin.server_mappings import read_mapping
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+
+    device = seed_mapping(make_device("cable-snapshot-oob-only"), SERVER_KEY, oob=OOB_ID, oob_type="idrac")
+    client.force_login(make_superuser("cable-snapshot-oob-only-user"))
+    _serve(live_librenms.server, device_id=OOB_ID, links=[_link(9)], ports=[_port(9, "oob9")])
+    lookup = f"/api/v0/devices/{device.name}"
+    live_librenms.server.register(lookup, {"status": "ok", "devices": [{"device_id": HOST_ID}]})
+    _serve(live_librenms.server)
+
+    response = _refresh(client, device)
+
+    assert [row["local_port_id"] for row in _rows(response)] == [9]
+    assert lookup not in [request["path"] for request in live_librenms.server.requests]
+    device.refresh_from_db()
+    assert read_mapping(device).own_id(SERVER_KEY) is None
+
+
+@pytest.mark.django_db
 def test_failed_neighbour_ports_block_only_that_neighbours_rows(client, live_librenms):
     device = _device("cable-snapshot-neighbours")
     client.force_login(make_superuser("cable-snapshot-neighbours-user"))

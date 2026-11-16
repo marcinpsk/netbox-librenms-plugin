@@ -36,6 +36,7 @@ from netbox_librenms_plugin.constants import (
     is_supported_interface_name_field,
 )
 from netbox_librenms_plugin.interface_rules import interface_rules_for_request, row_rule_block
+from netbox_librenms_plugin.librenms_api import stored_librenms_id
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
@@ -2138,8 +2139,12 @@ class BaseCableTableView(
             plan = source_cache.authorized_plan(request, obj, server_key=server_key, resources=[Resource.CABLES])
             coordinator = SyncCacheConsistency.for_refresh(plan)
             owner = plan.owner(Resource.CABLES)
-            librenms_id, lookup_error = self.resolve_librenms_id(owner)
-            if lookup_error is not None or (librenms_id is None and not read_mapping(owner).has_oob(server_key)):
+            has_oob = read_mapping(owner).has_oob(server_key)
+            # The OOB mapping covers the owner, so no host lookup may abort the refresh or store an own ID.
+            librenms_id, lookup_error = (
+                (stored_librenms_id(owner, server_key), None) if has_oob else self.resolve_librenms_id(owner)
+            )
+            if lookup_error is not None or (librenms_id is None and not has_oob):
                 source_cache.delete_planned(plan)
                 self._cable_refresh_error = (
                     self.scoped_lookup_message(lookup_error) if lookup_error else "Device not found in LibreNMS."
