@@ -660,7 +660,7 @@ class TestRemotePortAliasesAreFetched:
         from netbox_librenms_plugin.acquisition.registry import Resource
 
         snapshot = acquire(plan_acquisition(device, server_key=server_key, resources=[Resource.CABLES]))
-        assessed = assess_cables(snapshot, subject=device)
+        assessed = assess_cables(snapshot, subject=device, include_serial=False)
 
         assert assessed["links"] == []
         assert {blocker.path for blocker in assessed["blockers"]} == {"devices/9/ports"}
@@ -769,7 +769,7 @@ class TestProtocolDuplicates:
         live_librenms.server.register("/api/v0/devices/8/ports", {"status": "ok", "ports": []})
 
         snapshot = acquire(plan_acquisition(subject, server_key="default", resources=[Resource.CABLES]))
-        assessed = assess_cables(snapshot, subject=subject)
+        assessed = assess_cables(snapshot, subject=subject, include_serial=False)
 
         assert snapshot.record(Resource.CABLES, "links").outcome is Outcome.FAILED
         assert assessed["links"] == []
