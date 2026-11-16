@@ -51,6 +51,34 @@ def test_selected_grouped_vlan_requires_confirmation_before_rename(client, setti
 
 
 @pytest.mark.django_db
+def test_a_confirmed_rename_out_of_the_change_scope_is_rolled_back(client, settings):
+    """A confirmed rename must not move a VLAN out of a name-constrained change grant."""
+    from core.models import ObjectChange
+    from dcim.models import Device
+    from django.contrib.contenttypes.models import ContentType
+    from ipam.models import VLAN, VLANGroup
+
+    from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+
+    configure_default_librenms_server(settings)
+    device, _group, existing = _grouped_rename("rename-scope", 102, "managed-old", "other")
+    user = make_user_with_perms(
+        "vlan-rename-scope-user", [("view", Device), ("view", VLANGroup), ("view", VLAN), ("add", VLAN)]
+    )
+    client.force_login(grant(user, "change", VLAN, constraints={"name__startswith": "managed-"}))
+
+    response = sync(client, device, [tab_tokens(client, device)[102]], confirm=True)
+
+    existing.refresh_from_db()
+    assert existing.name == "managed-old"
+    assert not ObjectChange.objects.filter(
+        changed_object_type=ContentType.objects.get_for_model(VLAN),
+        changed_object_id=existing.pk,
+    ).exists()
+    assert any(text.startswith("VLAN 102: ") for text in message_texts(response))
+
+
+@pytest.mark.django_db
 def test_confirmed_grouped_vlan_rename_applies_the_disclosed_name(client, settings):
     """A valid confirmation must rename only the VLAN named by its signed operation."""
     from core.models import ObjectChange
