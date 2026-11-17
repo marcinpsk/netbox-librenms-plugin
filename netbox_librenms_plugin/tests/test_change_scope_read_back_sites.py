@@ -6,7 +6,7 @@ from uuid import uuid4
 import pytest
 from django.contrib import messages
 
-from netbox_librenms_plugin.tests.cache_test_helpers import seed_inventory
+from netbox_librenms_plugin.tests.cache_test_helpers import seed_module_rows
 from netbox_librenms_plugin.tests.conftest import (
     install_module,
     make_device,
@@ -159,8 +159,7 @@ class TestModuleComponentAdoption:
         installed = install_module(device, "Slot 1", "RB-REPLACE-OLD")
         new_type = _template_type("RB-REPLACE-NEW", "Gi1/0/1")
         standalone = make_interface(device, "Gi1/0/1")
-        view = ReplaceModuleView()
-        seed_inventory(view, device, [_row(new_type.model, "Slot 1")], librenms_id=81)
+        seed_module_rows(device, [_row(new_type.model, "Slot 1")], librenms_id=81)
         _action, fields = rendered_modal_form(device, ENT_INDEX, "replace-module")
         user = make_user_with_perms(
             "rb-replace-user",
@@ -247,7 +246,7 @@ class TestUpdateModuleInterface:
     """The Update Interface action binds the row's port and adopts the standalone template interfaces."""
 
     @staticmethod
-    def _update(tag, live_librenms, **row_identity):
+    def _update(tag, live_librenms, port_id=None):
         from dcim.models import Device, Interface, InterfaceTemplate, Module
 
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
@@ -258,11 +257,11 @@ class TestUpdateModuleInterface:
         # Added after the install, so the interface stays standalone and the module may adopt it.
         InterfaceTemplate.objects.create(module_type=module.module_type, name="Gi0/1", type="1000base-t")
         standalone = make_interface(device, "Gi0/1")
-        seed_inventory(
-            UpdateModuleInterfaceView(),
+        seed_module_rows(
             device,
-            [_row(module.module_type.model, "Slot 1", **row_identity)],
+            [_row(module.module_type.model, "Slot 1")],
             librenms_id=82,
+            bound_ports=[(ENT_INDEX, port_id, "Gi0/1")] if port_id is not None else (),
         )
         _action, fields = rendered_module_form(render_module_tab(device), "update-module-interface", ENT_INDEX)
         user = make_user_with_perms(f"{tag}-user", [("view", Device), ("view", Module)])
@@ -272,9 +271,7 @@ class TestUpdateModuleInterface:
         return request, queued, standalone, stored_mapping_for_test(standalone)
 
     def test_a_bind_out_of_the_change_scope_is_rolled_back(self, live_librenms):
-        request, queued, interface, mapping = self._update(
-            "rb-bind", live_librenms, _librenms_port_id=8201, _librenms_ifname="Gi0/1"
-        )
+        request, queued, interface, mapping = self._update("rb-bind", live_librenms, port_id=8201)
 
         assert interface.module_id is None
         assert mapping is None or "default" not in mapping
@@ -296,8 +293,8 @@ class TestUpdateModuleInterface:
         InterfaceTemplate.objects.create(module_type=module.module_type, name="Gi0/2", type="1000base-t")
         bound = Interface.objects.create(device=device, module=module, name="Gi0/1", type="1000base-t")
         standalone = make_interface(device, "Gi0/2")
-        row = _row(module.module_type.model, "Slot 1", _librenms_port_id=8401, _librenms_ifname="Gi0/1")
-        seed_inventory(UpdateModuleInterfaceView(), device, [row], librenms_id=84)
+        rows = [_row(module.module_type.model, "Slot 1")]
+        seed_module_rows(device, rows, librenms_id=84, bound_ports=[(ENT_INDEX, 8401, "Gi0/1")])
         _action, fields = rendered_module_form(render_module_tab(device), "update-module-interface", ENT_INDEX)
         user = make_user_with_perms("rb-bind-adopt-user", [("view", Device), ("view", Module)])
         user = grant(user, "change", Interface, constraints=[{"module__isnull": True}, {"name": "Gi0/1"}])
@@ -330,12 +327,7 @@ def test_a_serial_update_out_of_the_change_scope_is_refused(live_librenms):
     device = make_device_with_module_bays("rb-serial", ["Slot 1"])
     seed_mapping(device, "default", own=83)
     module = install_module(device, "Slot 1", "RB-SERIAL-CARD", serial="OLD-1")
-    seed_inventory(
-        UpdateModuleSerialView(),
-        device,
-        [_row(module.module_type.model, "Slot 1", entPhysicalSerialNum="NEW-1")],
-        librenms_id=83,
-    )
+    seed_module_rows(device, [_row(module.module_type.model, "Slot 1", entPhysicalSerialNum="NEW-1")], librenms_id=83)
     _action, fields = rendered_module_form(render_module_tab(device), "update-module-serial", ENT_INDEX)
     user = make_user_with_perms("rb-serial-user", [("view", Device)])
     user = grant(user, "change", Module, constraints={"serial__startswith": "OLD-"})
