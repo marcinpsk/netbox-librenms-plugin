@@ -527,6 +527,41 @@ def test_an_oob_link_refuses_a_master_that_lost_the_chassis_before_the_lock(clie
     assert mapping_summary(_fresh(successor)) == {}
 
 
+@pytest.mark.django_db
+def test_a_legacy_conversion_refuses_a_master_that_lost_the_master_role_during_the_lookup(client, servers, monkeypatch):
+    from dcim.models import VirtualChassis
+
+    from netbox_librenms_plugin.server_mappings import ContainerStatus, read_mapping
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_legacy
+    from netbox_librenms_plugin.views.sync.device_fields import ConvertLegacyLibreNMSIdView
+
+    chassis, (master, successor) = _chassis("owner-convert-legacy")
+    master.serial = "OWNER-CONVERT-SERIAL"
+    master.save()
+    seed_legacy(master, 7135)
+    servers.primary.device_info_response(device_id=7135, hostname=master.name, serial=master.serial)
+    lookup = ConvertLegacyLibreNMSIdView.get_live_device_info
+
+    def look_up_then_move_the_master(view, librenms_id):
+        answer = lookup(view, librenms_id)
+        # A concurrent chassis edit commits after the owner check and before the write locks.
+        VirtualChassis.objects.filter(pk=chassis.pk).update(master=successor)
+        return answer
+
+    monkeypatch.setattr(ConvertLegacyLibreNMSIdView, "get_live_device_info", look_up_then_move_the_master)
+    client.force_login(make_superuser("owner-convert-legacy"))
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:convert_legacy_librenms_id", args=[master.pk]),
+        {"object_type": "device", "server_key": PRIMARY},
+    )
+
+    assert response.status_code == 302
+    assert _errors(response) == [MISPLACED_MESSAGE]
+    assert read_mapping(_fresh(master)).container is ContainerStatus.LEGACY
+    assert mapping_summary(_fresh(successor)) == {}
+
+
 def _paths(server):
     return [request["path"] for request in server.requests]
 
