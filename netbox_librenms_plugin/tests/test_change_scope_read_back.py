@@ -27,7 +27,12 @@ from netbox_librenms_plugin.tests.conftest import (
 from netbox_librenms_plugin.tests.interface_sync_post_helpers import sync_port
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, seed_ip_snapshot
-from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, make_user_with_perms
+from netbox_librenms_plugin.tests.view_test_helpers import (
+    grant,
+    make_request,
+    make_user_with_perms,
+    submit_ip_selection,
+)
 from netbox_librenms_plugin.transactions import outside_change_scope, update_existing_row
 
 SERVER_KEY = "default"
@@ -385,14 +390,8 @@ def test_an_existing_interface_that_the_ip_tab_writes_out_of_the_change_scope_is
     )
     client.force_login(grant(user, "change", Interface, constraints={"description": ""}))
 
-    response = client.post(
-        _ip_sync_url(device),
-        {
-            "server_key": SERVER_KEY,
-            "create-missing-interfaces-toggle": "on",
-            "select": ["198.18.73.31/24"],
-            "vrf_198.18.73.31/24": "",
-        },
+    response = submit_ip_selection(
+        client, device, ["198.18.73.31/24"], server_key=SERVER_KEY, **{"create-missing-interfaces-toggle": "on"}
     )
 
     assert response.status_code == 302
