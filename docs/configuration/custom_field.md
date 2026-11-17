@@ -119,16 +119,18 @@ before you edit it. The editor does not repair a value with an invalid format.
 
 The master of a virtual chassis holds all the mappings of the chassis: the LibreNMS ID and the OOB
 controller of each server, a legacy value, and the preferred server. Leave `librenms_id` empty on
-the other members. The sync page of each member shows and edits the mappings of the master.
+the other members. The sync page of each member shows and edits the mappings of the master. When
+the master has no LibreNMS ID, the sync page of each member shows the match of the master, and
+**Link** stores the ID on the master.
 
 - When the chassis has no master, the sync page of each member shows an error, and no sync or
-  discovery runs. Set the master of the virtual chassis.
+  match runs. Set the master of the virtual chassis.
 - When a member that is not the master holds mapping data, the sync page of each member names that
-  member and the master, and no sync or discovery runs. Click **Move to master** to move the data.
+  member and the master, and no sync or match runs. Click **Move to master** to move the data.
   The move needs change permission on the master and on each member that holds data. It moves
   nothing when the master and a member hold different values for the same server or different
   preferred servers: correct one of the two values first.
-- When the master has no primary IP and no LibreNMS ID, the plugin looks up the chassis in
+- When the master has no primary IP and no LibreNMS ID, the plugin matches the chassis in
   LibreNMS only by the name of the master. It does not use the primary IP of another member.
 
 To remove the mapping for a server that is no longer configured, click **Remove** on its row in the
