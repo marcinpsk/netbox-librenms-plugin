@@ -590,15 +590,15 @@ def test_an_oob_link_refuses_a_member_that_left_the_chassis_after_the_chassis_lo
         ip="",
     )
     servers.primary.vc_inventory_callable(7135, [], {})
-    lock = actions.lock_owner_chassis
+    lock = actions.lock_host_change_owner
 
-    def lock_then_move_the_member(model, pk):
-        chassis_id = lock(model, pk)
-        # The member leaves the chassis after its chassis is read and before the owner checks.
+    def lock_then_move_the_member(model, pk, **options):
+        locked = lock(model, pk, **options)
+        # The member leaves the chassis after its host scope is read and before the owner checks.
         Device.objects.filter(pk=member.pk).update(virtual_chassis=None, vc_position=None)
-        return chassis_id
+        return locked
 
-    monkeypatch.setattr(actions, "lock_owner_chassis", lock_then_move_the_member)
+    monkeypatch.setattr(actions, "lock_host_change_owner", lock_then_move_the_member)
     client.force_login(make_superuser("owner-oob-member-left"))
 
     response = client.post(
