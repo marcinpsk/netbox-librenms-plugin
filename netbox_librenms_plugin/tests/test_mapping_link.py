@@ -33,6 +33,7 @@ from netbox_librenms_plugin.tests.link_intent_helpers import (
     page_link,
     page_token,
     register_match,
+    rendered_link_form,
     stale_paths,
     status_list,
     sync_page,
@@ -763,13 +764,6 @@ def test_two_links_of_one_id_never_make_two_owners(server):
     )
 
 
-def client_post_link_form(client, proposal):
-    """POST the Link form that a sync page *proposal* renders, to the route that the form names."""
-    return client.post(
-        proposal["action_url"], {"server_key": proposal["server_key"], "confirmation_intent": proposal["token"]}
-    )
-
-
 def _chassis_master(tag, server, address, librenms_id):
     """Return the master of a new two-member chassis, which matches *librenms_id*, and the other member."""
     master, member = make_device(f"{tag}-master"), make_device(f"{tag}-member")
@@ -791,16 +785,46 @@ class TestLinkOfAChassisMember:
 
         assert mapping_summary(_fresh(master)) == {"default": {"own": 9700}}
 
-    def test_a_link_on_a_member_page_writes_to_the_master(self, linker, server):
-        master, member = _chassis_master("vc-member-page", server, "198.18.10.12", 9701)
+    @pytest.mark.parametrize("page", ["master", "member"])
+    def test_the_rendered_link_form_of_a_chassis_page_writes_to_the_master(self, linker, server, page):
+        master, member = _chassis_master(f"vc-{page}-page", server, "198.18.10.12", 9701)
 
-        proposal = page_link(linker, member)
-        response = client_post_link_form(linker, proposal)
+        form = rendered_link_form(linker, master if page == "master" else member)
+        assert form is not None, "the page renders no Link form"
+        action, fields = form
+        response = linker.post(action, fields)
 
         assert response.status_code == 302
-        assert proposal["action_url"] == lifecycle_url(master)
+        assert action == lifecycle_url(master)
         assert mapping_summary(_fresh(master)) == {"default": {"own": 9701}}
         assert mapping_summary(_fresh(member)) == {}
+
+    def test_a_member_page_offers_no_add_device_for_a_master_without_a_match(self, linker, server):
+        master, member = make_device("vc-no-match-master"), make_device("vc-no-match-member")
+        chassis = make_virtual_chassis("vc-no-match-vc", master, member)
+        chassis.master = master
+        chassis.save()
+        give_primary_ip(_fresh(master), "198.18.10.15/24")
+
+        html = sync_page(linker, _fresh(member)).content.decode()
+
+        assert sync_page(linker, _fresh(master)).context["show_add_device"] is True
+        assert 'data-bs-target="#add-device-modal"' not in html
+        assert 'id="add-device-modal"' not in html
+
+    def test_a_chassis_without_a_master_renders_no_link_form(self, linker, server):
+        master, member = _chassis_master("vc-no-master-form", server, "198.18.10.16", 9703)
+        VirtualChassis.objects.filter(pk=master.virtual_chassis_id).update(master=None)
+
+        assert rendered_link_form(linker, _fresh(member)) is None
+        assert rendered_link_form(linker, _fresh(master)) is None
+
+    def test_a_chassis_with_a_misplaced_mapping_renders_no_link_form(self, linker, server):
+        master, member = _chassis_master("vc-misplaced-form", server, "198.18.10.17", 9704)
+        seed_mapping(member, "other", own=9705)
+
+        assert rendered_link_form(linker, _fresh(member)) is None
+        assert rendered_link_form(linker, _fresh(master)) is None
 
     def test_a_link_on_a_chassis_without_a_master_refuses_without_a_write(self, linker, server):
         master, member = _chassis_master("vc-no-master", server, "198.18.10.13", 9702)
