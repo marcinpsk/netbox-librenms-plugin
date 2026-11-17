@@ -234,15 +234,7 @@ def test_a_primary_ip_out_of_the_device_change_scope_is_rolled_back(client, live
     row_id = "198.18.73.11/24"
     client.force_login(_ip_writer("rb-primary", device_change={"primary_ip4__isnull": True}))
 
-    response = client.post(
-        _ip_sync_url(device),
-        {
-            "server_key": SERVER_KEY,
-            "select": [row_id],
-            f"vrf_{row_id}": "",
-            "set-primary-ip-toggle": "true",
-        },
-    )
+    response = submit_ip_selection(client, device, [row_id], server_key=SERVER_KEY, **{"set-primary-ip-toggle": "true"})
 
     assert response.status_code == 302
     device.refresh_from_db()
@@ -266,8 +258,14 @@ def test_a_confirmed_ip_change_out_of_the_ip_change_scope_is_rolled_back(client,
     _seed_ip_rows(device, [("198.18.73.12", 9312, target.name)])
     row_id = "198.18.73.12/24"
     client.force_login(_ip_writer("rb-confirmed-ip", ip_change={"assigned_object_id": current.pk}))
-    form = {"server_key": SERVER_KEY, "select": row_id, f"vrf_{row_id}": str(blue.pk)}
-    conflict = client.post(_ip_sync_url(device), form, HTTP_HX_REQUEST="true").context["conflicts"][0]
+    conflict = submit_ip_selection(
+        client,
+        device,
+        [row_id],
+        server_key=SERVER_KEY,
+        vrfs={row_id: str(blue.pk)},
+        headers={"HTTP_HX_REQUEST": "true"},
+    ).context["conflicts"][0]
 
     response = client.post(
         _ip_sync_url(device),
