@@ -718,9 +718,9 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         return address.visible, host.visible
 
     @staticmethod
-    def _require_saved_in_scope(ip_obj, user, action):
-        """Refuse the row when the written address is outside the *action* or the view scope of *user*."""
-        for scope_action in (action, "view"):
+    def _require_saved_in_scope(ip_obj, user, *actions):
+        """Refuse the row when the written address is outside the *actions* or the view scope of *user*."""
+        for scope_action in (*actions, "view"):
             if not saved_in_scope(ip_obj, user, scope_action):
                 raise ValueError(f"The result would be outside your {scope_action} scope.")
 
@@ -1196,7 +1196,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                             interface=interface,
                             vrf=vrf,
                         )
-                        self._require_saved_in_scope(ip_obj, request.user, "change")
+                        # update_existing_row read the change scope back.
+                        self._require_saved_in_scope(ip_obj, request.user)
                         row_results.append(("updated", display_address))
                         row_mutations.add(row_id)
                     else:
