@@ -221,13 +221,13 @@ class BaseLibreNMSSyncView(
             self.librenms_id = self.stored_librenms_id(librenms_lookup_device)
         self._link_assessment = None
         if self.librenms_id is None and not unresolved and not migrated_context["migrated_to_marker"]:
-            # A VC member page shows the match only for its own binding; the sync member's page links the chassis.
-            if type(librenms_lookup_device) is type(obj) and librenms_lookup_device.pk == obj.pk:
-                self._link_assessment = read_link_assessment(
-                    obj,
-                    self.librenms_api,
-                    context_for(request.user, obj, self.librenms_api.server_key) if self._can_link(obj) else None,
-                )
+            # A chassis member page matches and links the chassis master, which holds the chassis mappings.
+            owner = librenms_lookup_device
+            self._link_assessment = read_link_assessment(
+                owner,
+                self.librenms_api,
+                context_for(request.user, owner, self.librenms_api.server_key) if self._can_link(owner) else None,
+            )
 
         context = self.get_context_data(request, obj)
 
@@ -247,8 +247,8 @@ class BaseLibreNMSSyncView(
         """Return whether the user may link *obj*: plugin write, and change on the object."""
         return self.has_write_permission() and self.restricted_queryset(type(obj), "change").filter(pk=obj.pk).exists()
 
-    def _link_context(self, request, obj):
-        """Return the match that the page proposes for an object without a stored link, or None."""
+    def _link_context(self, request, owner):
+        """Return the match that the page proposes for the mapping *owner* without a stored link, or None."""
         assessment = getattr(self, "_link_assessment", None)
         if assessment is None:
             return None
@@ -269,7 +269,7 @@ class BaseLibreNMSSyncView(
             "token": assessment.offer.token if assessment.offer is not None else None,
             "action_url": reverse(
                 "plugins:netbox_librenms_plugin:mapping_lifecycle",
-                kwargs={"object_type": obj._meta.model_name, "pk": obj.pk},
+                kwargs={"object_type": owner._meta.model_name, "pk": owner.pk},
             ),
         }
 
@@ -494,7 +494,7 @@ class BaseLibreNMSSyncView(
             _lookup_is_vm or self._legacy_id_serial_confirmed(_lookup_device, librenms_info["librenms_serial"])
         )
         device_info_unavailable = librenms_info.get("device_info_unavailable", False)
-        link = self._link_context(request, obj)
+        link = self._link_context(request, _lookup_device)
         # A device that LibreNMS already has is linked, not added; an unanswered lookup proposes neither.
         show_add_device = (
             not librenms_info["found_in_librenms"]

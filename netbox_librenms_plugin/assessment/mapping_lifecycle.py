@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from netbox_librenms_plugin import confirmation_intent as intent
+from netbox_librenms_plugin.mapping_owner import mapping_ownership
 from netbox_librenms_plugin.matching import (
     CANDIDATE_PAIRS,
     Candidate,
@@ -29,7 +30,6 @@ from netbox_librenms_plugin.server_mappings import (
     read_mapping,
     stored_entry_digest,
 )
-from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
 # The stored forms on which a link can write an own ID; matching proposes nothing on any other.
 _LINKABLE = frozenset({ContainerStatus.ABSENT, ContainerStatus.SCOPED})
@@ -85,10 +85,10 @@ class LinkInputs:
 
 @dataclass(frozen=True)
 class LinkChassis:
-    """The virtual chassis of a Device, and whether the Device is its sync device on the server."""
+    """The virtual chassis of a Device, and whether the Device is its mapping owner: the master."""
 
     pk: int
-    sync_device: bool
+    owner: bool
 
 
 @dataclass(frozen=True)
@@ -150,13 +150,13 @@ def bound_inputs(inputs, matched_by):
     )
 
 
-def _chassis(obj, server_key):
-    """Return the chassis of *obj* and whether *obj* is its sync device on the server; None outside a chassis."""
+def _chassis(obj):
+    """Return the chassis of *obj* and whether *obj* is its mapping owner; None outside a chassis."""
     chassis_id = getattr(obj, "virtual_chassis_id", None)
     if chassis_id is None:
         return None
-    sync_device = get_librenms_sync_device(obj, server_key=server_key)
-    return LinkChassis(chassis_id, sync_device is not None and sync_device.pk == obj.pk)
+    owner = mapping_ownership(obj).owner
+    return LinkChassis(chassis_id, owner is not None and owner.pk == obj.pk)
 
 
 def build_link(obj, server_key, *, choices, inputs, owned):
@@ -164,7 +164,7 @@ def build_link(obj, server_key, *, choices, inputs, owned):
     Return the link operation of *obj* for the confirmed *choices*, from the state that the caller read.
 
     The assessment and the rebuild both call this, so an operation compares equal only when the
-    stored mapping, the ownership of the ID, the chassis sync device and the lookup inputs are the same.
+    stored mapping, the ownership of the ID, the chassis owner and the lookup inputs are the same.
 
     Args:
         obj (Device | VirtualMachine): The object, as the caller read it.
@@ -183,7 +183,7 @@ def build_link(obj, server_key, *, choices, inputs, owned):
             own_id=mapping.own_id(server_key),
             migrated=mapping.migrated_to(server_key) is not None,
             owned=owned,
-            chassis=_chassis(obj, server_key),
+            chassis=_chassis(obj),
             inputs=bound_inputs(inputs, choices.matched_by),
         ),
         effects=LinkEffects(choices.librenms_id),
@@ -251,9 +251,9 @@ def read_link_assessment(obj, server, context, *, deadline=None):
         inputs=result.inputs,
         owned=False,
     )
-    # Only the chassis sync device links a chassis; another member can get its link while the probe runs.
+    # Only the chassis master links a chassis; another member can get mapping data while the probe runs.
     chassis = operation.assumptions.chassis
-    offered = context is not None and (chassis is None or chassis.sync_device)
+    offered = context is not None and (chassis is None or chassis.owner)
     return LinkAssessment(
         LinkState.MATCH,
         server_key,

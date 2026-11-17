@@ -6,10 +6,12 @@ Each test mints its token through the page that offers it, posts it over HTTP, a
 
 import netaddr
 import pytest
-from dcim.models import Device
+from dcim.models import Device, VirtualChassis
 from django.test import Client
 from django.urls import reverse
 from virtualization.models import VirtualMachine
+
+from netbox_librenms_plugin.mapping_owner import MISPLACED_MESSAGE, NO_MASTER_MESSAGE
 
 from netbox_librenms_plugin.tests.claim_race_helpers import run_librenms_id_claim_race
 from netbox_librenms_plugin.tests.conftest import (
@@ -22,6 +24,7 @@ from netbox_librenms_plugin.tests.conftest import (
 )
 from netbox_librenms_plugin.tests.link_intent_helpers import (
     give_primary_ip,
+    lifecycle_url,
     link,
     link_selected,
     message_texts,
@@ -736,6 +739,13 @@ def test_two_links_of_one_id_never_make_two_owners(server):
     )
 
 
+def client_post_link_form(client, proposal):
+    """POST the Link form that a sync page *proposal* renders, to the route that the form names."""
+    return client.post(
+        proposal["action_url"], {"server_key": proposal["server_key"], "confirmation_intent": proposal["token"]}
+    )
+
+
 def _chassis_master(tag, server, address, librenms_id):
     """Return the master of a new two-member chassis, which matches *librenms_id*, and the other member."""
     master, member = make_device(f"{tag}-master"), make_device(f"{tag}-member")
@@ -750,14 +760,37 @@ def _chassis_master(tag, server, address, librenms_id):
 
 @pytest.mark.django_db
 class TestLinkOfAChassisMember:
-    def test_the_chassis_sync_device_links(self, linker, server):
+    def test_the_chassis_master_links(self, linker, server):
         master, _member = _chassis_master("vc-link", server, "198.18.10.1", 9700)
 
         link(linker, master, [page_token(linker, master)])
 
         assert mapping_summary(_fresh(master)) == {"default": {"own": 9700}}
 
-    def test_a_member_linked_after_the_offer_makes_the_link_stale(self, linker, server):
+    def test_a_link_on_a_member_page_writes_to_the_master(self, linker, server):
+        master, member = _chassis_master("vc-member-page", server, "198.18.10.12", 9701)
+
+        proposal = page_link(linker, member)
+        response = client_post_link_form(linker, proposal)
+
+        assert response.status_code == 302
+        assert proposal["action_url"] == lifecycle_url(master)
+        assert mapping_summary(_fresh(master)) == {"default": {"own": 9701}}
+        assert mapping_summary(_fresh(member)) == {}
+
+    def test_a_link_on_a_chassis_without_a_master_refuses_without_a_write(self, linker, server):
+        master, member = _chassis_master("vc-no-master", server, "198.18.10.13", 9702)
+        token = page_token(linker, master)
+        VirtualChassis.objects.filter(pk=master.virtual_chassis_id).update(master=None)
+        before = domain_state()
+
+        response = link(linker, master, [token])
+
+        assert domain_state() == before
+        assert NO_MASTER_MESSAGE in message_texts(response)
+        assert sync_page(linker, member).context["chassis_owner_problem"]["problem"] == "no_master"
+
+    def test_a_member_that_holds_mapping_data_after_the_offer_refuses_the_link(self, linker, server):
         master, member = _chassis_master("vc-other-linked", server, "198.18.10.2", 9710)
         token = page_token(linker, master)
         seed_mapping(member, "default", own=9711)
@@ -766,9 +799,10 @@ class TestLinkOfAChassisMember:
         response = link(linker, master, [token])
 
         assert domain_state() == before
-        assert "assumptions.chassis.sync_device" in stale_paths(response, master.name)
+        assert MISPLACED_MESSAGE in message_texts(response)
+        assert sync_page(linker, master).context["chassis_owner_problem"]["problem"] == "misplaced"
 
-    def test_a_device_that_joins_a_linked_chassis_after_the_offer_is_stale(self, linker, server):
+    def test_a_device_that_joins_a_linked_chassis_after_the_offer_is_refused(self, linker, server):
         device = _matched("device", "vc-joiner", server, "198.18.10.3", 9720)
         token = page_token(linker, device)
         _master, member = _chassis_master("vc-joined", server, "198.18.10.4", 9721)
@@ -780,7 +814,7 @@ class TestLinkOfAChassisMember:
         response = link(linker, device, [token])
 
         assert domain_state() == before
-        assert "assumptions.chassis" in stale_paths(response, device.name)
+        assert MISPLACED_MESSAGE in message_texts(response)
 
 
 @transactional_db_with_all_apps()
@@ -818,13 +852,17 @@ def test_a_member_link_that_commits_while_the_link_waits_makes_it_stale(server):
 
     assert mapping_summary(_fresh(master)) == {}
     assert mapping_summary(_fresh(member)) == {"default": {"own": 9731}}
-    assert "assumptions.chassis.sync_device" in stale_paths(response, master.name)
+    assert "assumptions.chassis.owner" in stale_paths(response, master.name)
 
 
 @transactional_db_with_all_apps()
-def test_a_member_linked_while_the_page_probes_gets_the_match_without_a_link_offer(server):
+def test_a_member_linked_while_the_page_probes_gets_no_link_offer_and_the_page_refuses(server):
     """The page chose the master before its probe; the probe answers after another member got a link."""
     from django.db import connection as server_connection
+
+    from netbox_librenms_plugin.assessment.mapping_lifecycle import read_link_assessment
+    from netbox_librenms_plugin.confirmation_intent import context_for
+    from netbox_librenms_plugin.librenms_api import build_librenms_api
 
     master, member = _chassis_master("vc-probe-race", server, "198.18.10.7", 9740)
     record = {"device_id": 9740, "hostname": master.name, "sysName": master.name}
@@ -837,13 +875,19 @@ def test_a_member_linked_while_the_page_probes_gets_the_match_without_a_link_off
         return 200, {"status": "ok", "devices": [record]}
 
     server.register("/api/v0/devices/198.18.10.7", link_the_member_then_answer)
+    user = make_user_with_perms("vc-probe-race-writer", PERMISSIONS)
     client = Client()
-    client.force_login(make_user_with_perms("vc-probe-race-writer", PERMISSIONS))
+    client.force_login(user)
 
-    link_proposal = page_link(client, master)
+    assessment = read_link_assessment(master, build_librenms_api("default"), context_for(user, master, "default"))
+    seed_mapping_row(_fresh(member), Device())
+    response = client.get(reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[master.pk]))
 
-    assert (link_proposal["state"], link_proposal["librenms_id"]) == ("match", 9740)
-    assert link_proposal["token"] is None
+    assert (assessment.state.value, assessment.match.librenms_id, assessment.offer) == ("match", 9740, None)
+    # The page load makes the member a holder again, so the chassis has no owner and the page refuses.
+    assert response.status_code == 302
+    assert MISPLACED_MESSAGE in message_texts(response)
+    assert mapping_summary(_fresh(master)) == {}
     assert mapping_summary(_fresh(member)) == {"default": {"own": 9741}}
 
 
@@ -882,11 +926,23 @@ def test_a_device_that_rejoins_its_chassis_before_the_lock_is_refused(server):
 
 
 @pytest.mark.django_db
-def test_the_status_list_selects_the_sync_owner_on_the_active_server(linker, server):
+def test_the_status_list_offers_the_link_of_a_chassis_on_its_master_only(linker, server):
     master, member = _chassis_master("vc-server-owner", server, "198.18.10.11", 9760)
+    register_match(server, "vc-server-owner-member", 9762, hostname=member.name)
+
+    rows = _status_rows(status_list(linker, "device", q="vc-server-owner", server_key="default"))
+
+    assert rows[master.pk].token
+    assert member.pk not in rows
+
+
+@pytest.mark.django_db
+def test_the_status_list_offers_no_link_in_a_chassis_with_misplaced_mappings(linker, server):
+    master, member = _chassis_master("vc-misplaced-owner", server, "198.18.10.14", 9763)
     seed_mapping(member, "other", own=9761)
 
-    response = status_list(linker, "device", q="vc-server-owner", server_key="default")
+    response = status_list(linker, "device", q="vc-misplaced-owner", server_key="default")
 
-    assert response.status_code == 200
-    assert _status_rows(response)[master.pk].token
+    assert _status_rows(response) == {}
+    assert 'data-owner-problem="misplaced"' in response.content.decode()
+    assert mapping_summary(_fresh(master)) == {}
