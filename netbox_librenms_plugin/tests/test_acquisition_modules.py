@@ -784,8 +784,12 @@ def test_a_stored_source_cannot_survive_a_changed_effective_binding(live_librenm
     elif change == "oob-link":
         seed_mapping(subject, "default", oob=OOB_ID)
     else:
+        from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping_row
+
+        # The subject joins a chassis whose master holds the link, as a move to the master leaves it.
         owner = seed_mapping(make_device("cache-binding-new-owner"), "default", own=HOST_ID)
         make_virtual_chassis("cache-binding-new-chassis", owner, subject)
+        seed_mapping_row(subject, type(subject)())
     assert source_cache.read(subject, Resource.MODULES, "default") is None
     assert not source_cache.store(subject, Resource.MODULES, snapshot)
 

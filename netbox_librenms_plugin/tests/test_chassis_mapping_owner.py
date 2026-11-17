@@ -15,7 +15,7 @@ from django.urls import reverse
 from django.contrib import messages
 from django.utils.html import escape
 
-from netbox_librenms_plugin.mapping_owner import MISPLACED_MESSAGE, NO_MASTER_MESSAGE, NOT_OWNER_MESSAGE
+from netbox_librenms_plugin.mapping_owner import MISPLACED_MESSAGE, NO_MASTER_MESSAGE
 from netbox_librenms_plugin.models import LibreNMSSettings
 from netbox_librenms_plugin.tests.conftest import (
     configure_librenms_servers,
@@ -224,7 +224,7 @@ def test_misplaced_ids_block_discovery_on_the_master(client, servers):
 
 
 @pytest.mark.django_db
-def test_discovery_never_stores_an_id_on_a_member_that_is_not_the_master(client, servers):
+def test_a_member_refresh_never_looks_up_or_stores_an_id_on_the_member(client, servers):
     _vc, (master, member) = _chassis("owner-member-discovery")
     seed_mapping(master, PRIMARY, own=7022)
     member.primary_ip4 = ip_on(member, "198.18.71.2/24", "mgmt0")
@@ -240,7 +240,8 @@ def test_discovery_never_stores_an_id_on_a_member_that_is_not_the_master(client,
 
     assert mapping_summary(_fresh(member)) == {}
     assert response.status_code == 200
-    assert escape(NOT_OWNER_MESSAGE) in response.content.decode()
+    # The refresh reads the stored link of the master; it never matches the member's own address.
+    assert "/api/v0/devices/198.18.71.2" not in [request["path"] for request in _requests(servers)]
 
 
 @transactional_db_with_all_apps()
