@@ -24,9 +24,11 @@ from netbox_librenms_plugin.tests.conftest import (
     make_interface,
     transactional_db_with_all_apps,
 )
+from netbox_librenms_plugin.tests.interface_sync_post_helpers import sync_port
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, seed_ip_snapshot
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, make_user_with_perms
-from netbox_librenms_plugin.transactions import update_existing_row
+from netbox_librenms_plugin.transactions import outside_change_scope, update_existing_row
 
 SERVER_KEY = "default"
 MANAGED = {"name__startswith": "managed-"}
@@ -186,34 +188,21 @@ def _ip_sync_url(device):
     )
 
 
-def _seed_ip_rows(device, rows):
-    """Write the IP snapshot that the sync view reads."""
-    from django.core.cache import cache
-
-    from netbox_librenms_plugin.sync_cache import TAB_SPECS, SyncTab, sync_snapshot_key
-
-    cache.set(
-        sync_snapshot_key(device, TAB_SPECS[SyncTab.IP_ADDRESSES].source.data_type, SERVER_KEY),
-        {
-            "ip_addresses": rows,
-            "mgmt_ip": "",
-            "ports_by_id": {
-                row["port_id"]: {"port_id": row["port_id"], "ifName": row["interface_name"]} for row in rows
-            },
-            "interface_name_field": "ifName",
-        },
-        timeout=300,
+def _seed_ip_rows(device, rows, *, mgmt_ip=None):
+    """Store the IP snapshot of *rows* ``(address, port_id, interface name)``; *mgmt_ip* is the device record's IP."""
+    seed_ip_snapshot(
+        device,
+        [ip_address_row(address, port_id) for address, port_id, _ in rows],
+        [sync_port(port_id, name) for _, port_id, name in rows],
+        device={} if mgmt_ip is None else {"ip": mgmt_ip},
+        server_key=SERVER_KEY,
     )
 
 
-def _ip_row(address, port_id, interface_name):
-    return {
-        "ip_address": address,
-        "prefix_length": 24,
-        "ip_with_mask": f"{address}/24",
-        "port_id": port_id,
-        "interface_name": interface_name,
-    }
+def _assert_read_back_refusal(response, row):
+    """Assert that the one error of *response* is the read-back refusal of *row*, so the write ran."""
+    (error,) = _errors(response)
+    assert str(outside_change_scope(row)) in error
 
 
 def _ip_writer(tag, *, device_change=None, ip_change=None):
@@ -236,19 +225,16 @@ def test_a_primary_ip_out_of_the_device_change_scope_is_rolled_back(client, live
     device = make_device("rb-primary", librenms_cf={SERVER_KEY: {"id": 7311}})
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
     seed_mapping(interface, SERVER_KEY, own=9311)
-    live_librenms.server.register(
-        "/api/v0/devices/7311", {"status": "ok", "devices": [{"device_id": 7311, "ip": "198.18.73.11"}]}
-    )
-    row = _ip_row("198.18.73.11", 9311, interface.name)
-    _seed_ip_rows(device, [row])
+    _seed_ip_rows(device, [("198.18.73.11", 9311, interface.name)], mgmt_ip="198.18.73.11")
+    row_id = "198.18.73.11/24"
     client.force_login(_ip_writer("rb-primary", device_change={"primary_ip4__isnull": True}))
 
     response = client.post(
         _ip_sync_url(device),
         {
             "server_key": SERVER_KEY,
-            "select": [row["ip_with_mask"]],
-            f"vrf_{row['ip_with_mask']}": "",
+            "select": [row_id],
+            f"vrf_{row_id}": "",
             "set-primary-ip-toggle": "true",
         },
     )
@@ -256,10 +242,10 @@ def test_a_primary_ip_out_of_the_device_change_scope_is_rolled_back(client, live
     assert response.status_code == 302
     device.refresh_from_db()
     assert device.primary_ip4_id is None
-    assert not IPAddress.objects.filter(address=row["ip_with_mask"]).exists()
+    assert not IPAddress.objects.filter(address=row_id).exists()
     assert _changes(device) == []
     assert flushed_events == []
-    assert len(_errors(response)) == 1
+    _assert_read_back_refusal(response, device)
 
 
 @pytest.mark.django_db
@@ -272,22 +258,22 @@ def test_a_confirmed_ip_change_out_of_the_ip_change_scope_is_rolled_back(client,
     seed_mapping(target, SERVER_KEY, own=9312)
     current = make_interface(device, "Ethernet2", iface_type="1000base-t")
     address = IPAddress.objects.create(address="198.18.73.12/24", vrf=blue, assigned_object=current)
-    row = _ip_row("198.18.73.12", 9312, target.name)
-    _seed_ip_rows(device, [row])
+    _seed_ip_rows(device, [("198.18.73.12", 9312, target.name)])
+    row_id = "198.18.73.12/24"
     client.force_login(_ip_writer("rb-confirmed-ip", ip_change={"assigned_object_id": current.pk}))
-    form = {"server_key": SERVER_KEY, "select": row["ip_with_mask"], f"vrf_{row['ip_with_mask']}": str(blue.pk)}
+    form = {"server_key": SERVER_KEY, "select": row_id, f"vrf_{row_id}": str(blue.pk)}
     conflict = client.post(_ip_sync_url(device), form, HTTP_HX_REQUEST="true").context["conflicts"][0]
 
     response = client.post(
         _ip_sync_url(device),
-        {"server_key": SERVER_KEY, "force_conflict": row["ip_with_mask"], "conflict_intent": conflict["intent"]},
+        {"server_key": SERVER_KEY, "force_conflict": row_id, "conflict_intent": conflict["intent"]},
     )
 
     assert response.status_code == 302
     address.refresh_from_db()
     assert address.assigned_object == current
     assert _changes(address) == []
-    assert len(_errors(response)) == 1
+    _assert_read_back_refusal(response, address)
 
 
 # ---------------------------------------------------------------------------
@@ -368,28 +354,24 @@ def test_a_device_type_mapping_out_of_the_mapping_change_scope_is_rolled_back(cl
 @pytest.mark.django_db
 def test_an_existing_interface_that_the_ip_tab_writes_out_of_the_change_scope_is_rolled_back(client, settings):
     from dcim.models import Device, Interface
-    from django.core.cache import cache
     from ipam.models import IPAddress
 
-    from netbox_librenms_plugin.sync_cache import TAB_SPECS, SyncTab, sync_snapshot_key
-    from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server
-    from netbox_librenms_plugin.tests.interface_sync_post_helpers import sync_port
+    from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server, make_virtual_chassis_members
+    from netbox_librenms_plugin.tests.interface_sync_post_helpers import bound_interface
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
 
     configure_default_librenms_server(settings)
-    device = make_device("rb-ip-interface", librenms_cf={SERVER_KEY: {"id": 7331}})
-    interface = make_interface(device, "eth0")
-    cache.set(
-        sync_snapshot_key(device, TAB_SPECS[SyncTab.IP_ADDRESSES].source.data_type, SERVER_KEY),
-        {
-            # No interface name in the row: the address finds its interface through the port.
-            "ip_addresses": [
-                {"ip_address": "198.18.73.31", "prefix_length": 24, "ip_with_mask": "198.18.73.31/24", "port_id": 9331}
-            ],
-            "mgmt_ip": "",
-            "ports_by_id": {9331: sync_port(9331, "eth0", alias="uplink")},
-            "interface_name_field": "ifName",
-        },
-        timeout=300,
+    # Member 3 has the same name on another port: the name match is ambiguous, so the create-missing
+    # writer finds member 2 from the port name and writes its existing interface.
+    _chassis, (device, member, sibling) = make_virtual_chassis_members("rb-ip-interface", count=3)
+    seed_stored_mapping(device, {SERVER_KEY: {"id": 7331}}, save=True)
+    bound_interface(sibling, "eth2/1", 7900)
+    interface = make_interface(member, "eth2/1", iface_type="1000base-t")
+    seed_ip_snapshot(
+        device,
+        [ip_address_row("198.18.73.31", 9331)],
+        [sync_port(9331, "eth2/1", alias="uplink")],
+        server_key=SERVER_KEY,
     )
     user = make_user_with_perms(
         "rb-ip-interface-user",
@@ -412,7 +394,7 @@ def test_an_existing_interface_that_the_ip_tab_writes_out_of_the_change_scope_is
     assert interface.description == ""
     assert not IPAddress.objects.filter(address="198.18.73.31/24").exists()
     assert _changes(interface) == []
-    assert len(_errors(response)) == 1
+    _assert_read_back_refusal(response, interface)
 
 
 # ---------------------------------------------------------------------------
