@@ -488,3 +488,40 @@ def test_an_import_link_stores_the_id_on_the_chassis_master(client, servers):
 
     assert response.status_code == 200
     assert mapping_summary(_fresh(master)) == {PRIMARY: {"own": 7101}}
+
+
+@pytest.mark.django_db
+def test_an_oob_link_refuses_a_master_that_lost_the_chassis_before_the_lock(client, servers, monkeypatch):
+    from dcim.models import VirtualChassis
+
+    from netbox_librenms_plugin.views.imports import actions
+
+    chassis, (master, member, successor) = _chassis("owner-import-oob", count=3)
+    seed_mapping(master, PRIMARY, own=7130)
+    member.serial = "OWNER-OOB-SERIAL"
+    member.save()
+    servers.primary.device_info_response(
+        device_id=7131, hostname="owner-oob-controller", hardware="Test chassis", serial=member.serial, ip=""
+    )
+    servers.primary.vc_inventory_callable(7131, [], {})
+    resolve = actions.mapping_owner
+
+    def resolve_then_move_the_master(device):
+        owner = resolve(device)
+        # A concurrent chassis edit commits after the owner read and before the write locks.
+        VirtualChassis.objects.filter(pk=chassis.pk).update(master=successor)
+        return owner
+
+    monkeypatch.setattr(actions, "mapping_owner", resolve_then_move_the_master)
+    client.force_login(make_superuser("owner-import-oob"))
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:device_add_as_oob", args=[7131]),
+        {"server_key": PRIMARY, "existing_device_id": member.pk},
+        HTTP_HX_REQUEST="true",
+    )
+
+    assert escape(MISPLACED_MESSAGE) in response.content.decode()
+    assert mapping_summary(_fresh(master)) == {PRIMARY: {"own": 7130}}
+    assert mapping_summary(_fresh(member)) == {}
+    assert mapping_summary(_fresh(successor)) == {}
