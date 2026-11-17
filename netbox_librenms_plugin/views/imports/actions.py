@@ -3282,6 +3282,7 @@ class AddAsOOBView(
             matched_is_master = hold_matched and VirtualChassis.objects.filter(master_id=existing_device.pk).exists()
             if serial_match:
                 assignment_lock([libre_device.get("serial")], model=Device, rules=serial_rules)
+            chassis_id = lock_owner_chassis(Device, sync_device.pk)
             if hold_matched and not matched_is_master:
                 _hold_device_row(existing_device.pk)
             try:
@@ -3309,6 +3310,8 @@ class AddAsOOBView(
                     f"LibreNMS device #{librenms_id} is already assigned to {object_label} "
                     f"'{conflict_name}'; refresh and retry."
                 )
+            # The owner was read before the locks; a master change since then refuses the link.
+            ensure_locked_mapping_owner(sync_device, chassis_id)
             if matched_is_master:
                 _hold_device_row(existing_device.pk)
             if serial_match:
