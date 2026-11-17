@@ -128,7 +128,7 @@ def build_source_snapshot(subject, resource, server_key="default", *, oob=None, 
     *oob* gives the OOB controller's parts when the owner links one with a valid id.
     *source_id* overrides the host ID after owner selection, for stale-source tests.
     """
-    owner = resource_owner(subject, resource, server_key)
+    owner = resource_owner(subject, resource)
     mapping = read_mapping(owner)
     librenms_id = source_id if source_id is not None else stored_librenms_id(owner, server_key)
     fetch = _seeded_fetch(ACQUIRERS[resource], librenms_id, parts, resource, server_key)
@@ -285,7 +285,7 @@ def stored_identity(subject, resource, server_key):
     """Return the effective identity of the source owner for a deliberate stale-source seed."""
     from netbox_librenms_plugin.librenms_api import stored_librenms_id
 
-    return stored_librenms_id(resource_owner(subject, resource, server_key), server_key)
+    return stored_librenms_id(resource_owner(subject, resource), server_key)
 
 
 def port_row(
@@ -378,7 +378,7 @@ def seed_cables_snapshot(
     from netbox_librenms_plugin.acquisition import responses
     from netbox_librenms_plugin.acquisition.coordinator import _resource_source
 
-    owner = resource_owner(subject, Resource.CABLES, server_key)
+    owner = resource_owner(subject, Resource.CABLES)
     mapping = read_mapping(owner)
     host_id = mapping.own_id(server_key)
     values = {
@@ -562,13 +562,15 @@ def seed_mapped_modules(
     oob_inventory=None,
     oob_id=None,
 ):
-    """Map the subject and seed explicit module endpoint facts."""
+    """Map the mapping owner of the subject (it, or its chassis master) and seed explicit module endpoint facts."""
+    from netbox_librenms_plugin.mapping_owner import mapping_owner
     from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
-    seed_mapping(subject, server_key, own=librenms_id)
+    owner = mapping_owner(subject)
+    seed_mapping(owner, server_key, own=librenms_id)
     if oob_id is not None:
-        seed_mapping(subject, server_key, oob=oob_id)
-    subject.__dict__.pop("cf", None)
+        seed_mapping(owner, server_key, oob=oob_id)
+    owner.__dict__.pop("cf", None)
     return seed_modules_snapshot(
         subject, inventory, ports, transceivers, server_key=server_key, oob_inventory=oob_inventory
     )

@@ -422,23 +422,21 @@ class TestSaveVlanGroupOverridesBranches:
         assert response.status_code == 400
         assert response.json() == {"status": "error", "message": "No device ID provided"}
 
-    def test_an_unresolvable_chassis_falls_back_to_the_posted_device(self, client, configure_librenms):
-        """A chassis with no resolvable sync member stores the overrides under the posted device."""
+    def test_a_chassis_without_a_master_refuses_the_overrides(self, client, configure_librenms):
+        """A chassis without a master has no mapping owner, so no member stores the overrides in its place."""
         from django.core.cache import cache
+        from netbox_librenms_plugin.mapping_owner import NO_MASTER_MESSAGE
         from netbox_librenms_plugin.tests.conftest import make_superuser, make_virtual_chassis_members
-        from netbox_librenms_plugin.server_selection import get_librenms_sync_device
         from netbox_librenms_plugin.librenms_api import librenms_id_cache_key
         from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_interfaces_snapshot
         from netbox_librenms_plugin.views.object_sync.devices import SaveVlanGroupOverridesView
 
-        _chassis, (device, _sibling) = make_virtual_chassis_members("vlan-overrides-vc")
-        device.vc_position = None
-        device.save(update_fields=["vc_position"])
-        assert get_librenms_sync_device(device, server_key=SERVER_KEY) is None
-
+        chassis, (device, _sibling) = make_virtual_chassis_members("vlan-overrides-vc")
         cache.set(librenms_id_cache_key(device, SERVER_KEY), 501, 300)
         view = SaveVlanGroupOverridesView()
         seed_interfaces_snapshot(device, [], server_key=SERVER_KEY)
+        chassis.master = None
+        chassis.save()
         client.force_login(make_superuser("vlan-overrides-vc-user"))
 
         response = _json_post(
@@ -447,6 +445,6 @@ class TestSaveVlanGroupOverridesBranches:
             {"device_id": device.pk, "server_key": SERVER_KEY, "vid_group_map": {"942": "23"}},
         )
 
-        assert response.status_code == 200
-        assert response.json() == {"status": "success"}
-        assert cache.get(view.get_vlan_overrides_key(device, SERVER_KEY)) == {"942": "23"}
+        assert response.status_code == 409
+        assert response.json() == {"error": NO_MASTER_MESSAGE}
+        assert cache.get(view.get_vlan_overrides_key(device, SERVER_KEY)) is None

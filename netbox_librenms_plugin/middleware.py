@@ -1,4 +1,4 @@
-"""Show a lock conflict or a broken stored rule that escapes a plugin view as one answer, not as a 500 page."""
+"""Answer a lock conflict, a broken stored rule or a missing chassis owner in a plugin view, not with a 500 page."""
 
 import json
 import logging
@@ -8,6 +8,7 @@ from django.http import JsonResponse
 from django.shortcuts import render
 from utilities.api import is_api_request
 
+from netbox_librenms_plugin.mapping_owner import MappingOwnerError
 from netbox_librenms_plugin.models import RuleConfigurationError
 from netbox_librenms_plugin.transactions import (
     FOLLOW_UP_FAILED_MESSAGE,
@@ -108,3 +109,25 @@ class RuleConfigurationErrorMiddleware:
                 request, "netbox_librenms_plugin/rule_configuration_error.html", {"rule_error": shown}, status=409
             )
         return _answer(request, shown.public_message)
+
+
+class MappingOwnerMiddleware:
+    """
+    Map a request that needs the mapping owner of a virtual chassis, and finds none, to a refusal answer.
+
+    The refusal is the same JSON, toast or message answer as a lock conflict. The work raised before
+    its write, or its transaction rolls back, so nothing was changed.
+    """
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        return self.get_response(request)
+
+    def process_exception(self, request, exception):
+        """Return the refusal for a missing chassis owner in a plugin view, or None to let the exception propagate."""
+        if not isinstance(exception, MappingOwnerError) or is_api_request(request) or not _is_plugin_view(request):
+            return None
+        logger.info("Refused %s: %s", request.path, exception)
+        return _answer(request, str(exception))

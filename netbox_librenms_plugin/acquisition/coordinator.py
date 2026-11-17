@@ -30,8 +30,8 @@ from netbox_librenms_plugin.librenms_api import (
     build_librenms_api,
     stored_librenms_id,
 )
+from netbox_librenms_plugin.mapping_owner import mapping_owner
 from netbox_librenms_plugin.server_mappings import MappingRole, read_mapping, require_server_key
-from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
 
 INVALID_OOB_REASON = "The linked OOB controller has no valid LibreNMS id."
@@ -167,11 +167,19 @@ def _resource_source(fetch, resource, owner, server_key, *, include_serial=False
     )
 
 
-def resource_owner(subject, resource, server_key):
-    """Return the object a resource is acquired for: the subject, or its Virtual Chassis sync owner."""
+def resource_owner(subject, resource):
+    """
+    Return the object a resource is acquired for: the subject, or the master of its virtual chassis.
+
+    Raises:
+        MappingOwnerError: The virtual chassis of the subject has no mapping owner, so no resource
+            of any member is acquired.
+
+    """
+    owner = mapping_owner(subject)
     if RESOURCE_SPECS[resource].owner_policy is OwnerPolicy.SUBJECT:
         return subject
-    return get_librenms_sync_device(subject, server_key=server_key) or subject
+    return owner
 
 
 def _server_api(server_key):
@@ -222,7 +230,7 @@ def plan_acquisition(subject, *, server_key, resources):
         if isinstance(subject, VirtualMachine) and not RESOURCE_SPECS[resource].supports_virtual_machine:
             raise ValueError(f"A virtual machine has no {resource} resource.")
     return AcquisitionPlan(
-        subject, server_key, tuple((resource, resource_owner(subject, resource, server_key)) for resource in resources)
+        subject, server_key, tuple((resource, resource_owner(subject, resource)) for resource in resources)
     )
 
 

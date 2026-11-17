@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import StrEnum
+from functools import cached_property
 from uuid import uuid4
 
 from django.conf import settings
@@ -22,8 +23,8 @@ import netbox_librenms_plugin
 from netbox_librenms_plugin.acquisition.registry import RESOURCE_SPECS, OwnerPolicy, Resource
 from netbox_librenms_plugin.librenms_api import configured_cache_timeout
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
+from netbox_librenms_plugin.mapping_owner import MappingOwnerError, mapping_ownership
 from netbox_librenms_plugin.server_mappings import mapped_device_servers, require_server_key
-from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
 logger = logging.getLogger(__name__)
 
@@ -313,9 +314,6 @@ class SyncCacheConsistency:
 
     def __init__(self, subject):
         self.subject = subject
-        # One instance serves a single request or post-commit callback, so the owner a server
-        # key resolves to cannot change during its lifetime.
-        self._shared_owners = {}
         self._refresh_plan = None
 
     @classmethod
@@ -332,27 +330,31 @@ class SyncCacheConsistency:
             tab for tab, spec in TAB_SPECS.items() if not is_virtual_machine or spec.source.supports_virtual_machine
         )
 
-    def _shared_owner(self, server_key):
-        if self.subject._meta.model_name != "device":
-            return self.subject
-        if server_key not in self._shared_owners:
-            self._shared_owners[server_key] = (
-                get_librenms_sync_device(self.subject, server_key=server_key) or self.subject
-            )
-        return self._shared_owners[server_key]
+    @cached_property
+    def _ownership(self):
+        # One instance serves a single request or post-commit callback, so the owner cannot change during its lifetime.
+        return mapping_ownership(self.subject)
 
-    def _primary_owner(self, tab, server_key):
+    def _owner(self, tab, server_key):
+        """Return the object whose keys hold the tab's snapshot, or None for a shared tab of a chassis with no owner."""
         if self._refresh_plan is not None:
             if server_key != self._refresh_plan.server_key:
                 raise ValueError("Refresh state must use the acquisition plan's server.")
             resource = TAB_SPECS[tab].resource
             return self._refresh_plan.owner(resource)
-        return self._shared_owner(server_key) if _shares_vc_owner(tab) else self.subject
+        if not _shares_vc_owner(tab) or self.subject._meta.model_name != "device":
+            return self.subject
+        return self._ownership.owner
+
+    def _primary_owner(self, tab, server_key):
+        owner = self._owner(tab, server_key)
+        if owner is None:
+            raise MappingOwnerError(self._ownership)
+        return owner
 
     def _candidate_owners(self, tab, server_key):
         owners = {self.subject.pk: self.subject}
-        if _shares_vc_owner(tab):
-            shared_owner = self._primary_owner(tab, server_key)
+        if _shares_vc_owner(tab) and (shared_owner := self._owner(tab, server_key)) is not None:
             owners[shared_owner.pk] = shared_owner
         return tuple(owners.values())
 
@@ -497,13 +499,12 @@ class SyncCacheConsistency:
             server_key: The server namespace being cleaned.
 
         Returns:
-            set: The owner identity, plus its virtual-chassis members for a shared tab.
+            set: The owner identities, plus the virtual-chassis members for a shared tab.
         """
-        owner = self._primary_owner(tab, server_key)
-        keys = {sync_subject_key(owner)}
+        keys = {sync_subject_key(owner) for owner in self._candidate_owners(tab, server_key)}
         if not _shares_vc_owner(tab):
             return keys
-        virtual_chassis = getattr(owner, "virtual_chassis", None)
+        virtual_chassis = getattr(self.subject, "virtual_chassis", None)
         if virtual_chassis is not None:
             keys |= {sync_subject_key(member) for member in virtual_chassis.members.all()}
         return keys
@@ -531,7 +532,8 @@ class SyncCacheConsistency:
                 # snapshot alone; the sibling's own unshared tabs are still cleared.
                 if self._claimed_owner_keys(tab, server_key) & claimed:
                     continue
-                if not self._delete_tab_values(tab, server_key):
+                if not self._delete_tab_values(tab, server_key) or self._owner(tab, server_key) is None:
+                    # A chassis with no owner has no shared state to publish.
                     continue
                 self._set_state(
                     tab,

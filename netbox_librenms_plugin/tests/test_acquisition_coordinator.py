@@ -44,8 +44,8 @@ def test_one_call_acquires_several_resources_and_makes_each_request_once(live_li
 
 
 @pytest.mark.django_db
-def test_a_virtual_chassis_member_acquires_its_own_ip_addresses(live_librenms):
-    from netbox_librenms_plugin.acquisition.coordinator import acquire
+def test_the_ip_addresses_of_a_virtual_chassis_come_from_the_master_alone(live_librenms):
+    from netbox_librenms_plugin.acquisition.coordinator import SubjectNotMapped, acquire
     from netbox_librenms_plugin.acquisition.registry import Resource
     from netbox_librenms_plugin.acquisition.snapshot import ObjectRef
     from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
@@ -53,15 +53,15 @@ def test_a_virtual_chassis_member_acquires_its_own_ip_addresses(live_librenms):
 
     _vc, (master, member) = make_virtual_chassis_members("coord-vc")
     seed_mapping(master, SERVER_KEY, own=601)
-    seed_mapping(member, SERVER_KEY, own=602)
-    _serve_ip_and_vlans(live_librenms.server, 602)
+    _serve_ip_and_vlans(live_librenms.server, 601)
 
-    snapshot = acquire(plan_acquisition(member, server_key=SERVER_KEY, resources=[Resource.IP_ADDRESSES]))
+    snapshot = acquire(plan_acquisition(master, server_key=SERVER_KEY, resources=[Resource.IP_ADDRESSES]))
+    # A member holds no LibreNMS identity of its own, so it has no IP address source.
+    with pytest.raises(SubjectNotMapped):
+        acquire(plan_acquisition(member, server_key=SERVER_KEY, resources=[Resource.IP_ADDRESSES]))
 
-    # IP addresses belong to the subject, not to the VC sync owner.
-    assert snapshot.resources[Resource.IP_ADDRESSES].owner == ObjectRef.of(member)
-    assert "/api/v0/devices/602/ip" in _paths(live_librenms.server)
-    assert "/api/v0/devices/601/ip" not in _paths(live_librenms.server)
+    assert snapshot.resources[Resource.IP_ADDRESSES].owner == ObjectRef.of(master)
+    assert _paths(live_librenms.server).count("/api/v0/devices/601/ip") == 1
 
 
 @pytest.mark.django_db

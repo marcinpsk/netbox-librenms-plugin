@@ -145,7 +145,8 @@ class TestSyncPageRouting:
         librenms_server,
     ):
         _vc, members = make_virtual_chassis_members("sync-stale", count=2)
-        viewed, mapped = members
+        # The master holds the mapping of the chassis.
+        mapped, viewed = members
         seed_mapping(mapped, SERVER_KEY, own=6604)
 
         response = logged_in_client.get(_sync_url(viewed), {"server_key": "retired"})
@@ -178,10 +179,11 @@ class TestSyncPageRouting:
         ("viewed_mapping", "delegation_shown"),
         [("absent", True), ("zero", True), ("preference-only", False), ("malformed-entry", False)],
     )
-    def test_the_delegation_notice_follows_the_viewed_members_own_mapping(
+    def test_the_delegation_notice_shows_only_while_the_master_holds_every_mapping(
         self, logged_in_client, librenms_server, viewed_mapping, delegation_shown
     ):
-        _vc, members = make_virtual_chassis_members(f"sync-vc-notice-{delegation_shown}", count=2)
+        """Any stored mapping data on a member that is not the master replaces the notice with the move card."""
+        _vc, members = make_virtual_chassis_members(f"sync-vc-notice-{viewed_mapping}", count=2)
         linked, viewed = members
         seed_mapping(linked, SERVER_KEY, own=6609)
         if viewed_mapping == "preference-only":
@@ -194,12 +196,12 @@ class TestSyncPageRouting:
         response = logged_in_client.get(_sync_url(viewed))
 
         assert response.status_code == 200
-        assert response.context["librenms_sync_device"] == linked
-        assert response.context["object_has_recorded_mapping"] is (not delegation_shown)
+        assert (response.context.get("chassis_owner_problem") is None) is delegation_shown
+        assert (response.context.get("librenms_sync_device") == linked) is delegation_shown
         notice = "LibreNMS sync for this virtual chassis is managed by"
         assert (notice in response.content.decode()) is delegation_shown
 
-    def test_vc_member_with_own_mapping_remains_the_lookup_device(self, logged_in_client, librenms_server):
+    def test_vc_member_with_own_mapping_is_misplaced_and_looks_up_nothing(self, logged_in_client, librenms_server):
         _vc, members = make_virtual_chassis_members("sync-vc-own", count=2)
         viewed = members[1]
         seed_mapping(viewed, SERVER_KEY, own=6606)
@@ -207,8 +209,10 @@ class TestSyncPageRouting:
 
         response = logged_in_client.get(_sync_url(viewed))
 
-        assert response.context["lookup_device_pk"] == viewed.pk
-        assert response.context["librenms_device_id"] == 6606
+        assert response.context["chassis_owner_problem"]["problem"] == "misplaced"
+        assert response.context["lookup_device_pk"] is None
+        assert response.context["has_librenms_id"] is False
+        assert librenms_server.requests == []
 
     def test_vc_context_reports_the_linked_members_primary_ip(self, logged_in_client, librenms_server):
         _vc, members = make_virtual_chassis_members("sync-vc-ip", count=2)
@@ -387,15 +391,11 @@ class TestSyncPageRouting:
         assert response.context["librenms_id_serial_confirmed"] is True
         assert response.context["serial_matches"] is False
 
-    def test_a_serial_that_cannot_be_compared_shows_the_reason_and_no_sync(
+    def test_a_master_outside_the_chassis_shows_the_owner_problem_and_no_serial_sync(
         self, logged_in_client, settings, librenms_server
     ):
-        from html import unescape
 
         from dcim.models import Device, VirtualChassis
-        from django.utils.html import escape
-
-        from netbox_librenms_plugin.serial_identity import UNAVAILABLE_MASTER_LINK
 
         _configure_servers(settings, librenms_server, SERVER_KEY)
         chassis, (viewed,) = make_virtual_chassis_members("sync-stray-master", count=1)
@@ -415,9 +415,9 @@ class TestSyncPageRouting:
         assert "does not match NetBox serial" not in content
         sync_serial_url = reverse("plugins:netbox_librenms_plugin:update_device_serial", kwargs={"pk": viewed.pk})
         assert sync_serial_url not in content
-        assert escape(UNAVAILABLE_MASTER_LINK) in content
-        # The reason is page text, not only a tooltip: a keyboard user cannot hover the icon.
-        assert UNAVAILABLE_MASTER_LINK in unescape(re.sub(r"<[^>]*>", " ", content))
+        # The chassis has no mapping owner, so the page reads nothing from LibreNMS.
+        assert response.context["chassis_owner_problem"]["problem"] == "no_master"
+        assert librenms_server.requests == []
 
     def test_a_device_that_shares_the_legacy_id_serial_gets_no_convert_offer(
         self, logged_in_client, settings, librenms_server

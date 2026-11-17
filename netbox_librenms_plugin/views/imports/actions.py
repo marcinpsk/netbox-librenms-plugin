@@ -138,11 +138,8 @@ from netbox_librenms_plugin.server_mappings import (
     promote_to_host,
     read_mapping,
 )
-from netbox_librenms_plugin.server_selection import (
-    get_librenms_sync_device,
-    librenms_link_owner,
-    parse_configured_server_key,
-)
+from netbox_librenms_plugin.mapping_owner import mapping_owner
+from netbox_librenms_plugin.server_selection import parse_configured_server_key
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
 from netbox_librenms_plugin.transactions import (
     atomic_with_events,
@@ -3190,11 +3187,11 @@ class AddAsOOBView(
 
         server_key = self.librenms_api.server_key
 
-        # The offer's device is its OOB target: the owner of the LibreNMS links of the matched device
-        # (librenms_link_owner), because every reader looks for the OOB link and the OOB IP there. The lock,
-        # guards, IP set and save below target it; the check under the lock reads the owner again.
+        # The offer's device is its OOB target: the mapping owner of the matched device, the master of a
+        # virtual chassis, because every reader looks for the OOB link and the OOB IP there. The lock, guards,
+        # IP set and save below target it; the check under the lock reads the owner again.
         sync_device = oob_candidate["device"]
-        if sync_device.pk != librenms_link_owner(existing_device, server_key).pk:
+        if sync_device.pk != mapping_owner(existing_device).pk:
             return _htmx_error_response("Device ID mismatch: existing_device_id does not match OOB candidate")
         # The sync device is DERIVED (a VC sibling of the scoped existing_device), and the block
         # below locks and saves it. Authorize it too, or a grant covering only the selected member
@@ -3269,7 +3266,7 @@ class AddAsOOBView(
                 if (existing_device.name or "").lower() != (validation.get("resolved_name") or "").lower():
                     return _htmx_error_response(_HOSTNAME_MATCH_LOST)
             elif matched_by == "oob_ip":
-                if not row_at_oob_target_ip(existing_device, libre_device, server_key):
+                if not row_at_oob_target_ip(existing_device, libre_device):
                     return _htmx_error_response(_IP_MATCH_LOST)
             else:
                 matched, ambiguous = resolve_device_by_host_ip(oob_ip_str)
@@ -4110,23 +4107,16 @@ class MergeNetBoxDevicesView(
             transaction.set_rollback(True)
             return _htmx_error_response("Cannot merge because the database operation failed. Please retry.")
 
-        # LibreNMS treats a Virtual Chassis as one logical device, so the host/OOB link lives on the
-        # single sync member (get_librenms_sync_device) — which may differ from the winner/donor the
-        # user selected when a candidate matched a NON-sync VC member by serial/hostname. Merge the
-        # link state on the sync devices: writing it to a non-sync member would either split-brain a
-        # VC that already has a linked member, or leave the donor's real link (on its sync sibling)
-        # uncleared where every reader still resolves and finds it. For non-VC devices these resolve
-        # back to the same rows, so the common path is unchanged. The oob_ip transfer and the
-        # candidate-match check deliberately stay on the user-selected winner/donor: oob_ip is a
-        # per-device FK on those rows, not a VC link.
+        # The host/OOB link of a virtual chassis lives on its master, which can differ from the
+        # winner/donor the user selected. Merge the link state on the mapping owners. For non-VC
+        # devices these are the same rows. The oob_ip transfer and the candidate-match check stay
+        # on the user-selected winner/donor: oob_ip is a per-device FK on those rows, not a VC link.
         # A refused winner save rolls back the donor save, and its event.
         with atomic_with_events():
             # Lock the selected winner/donor AND every current member of their virtual chassis, in
-            # deterministic pk order to avoid deadlocks, BEFORE resolving the sync device:
-            # get_librenms_sync_device scans every VC member's librenms_id custom field, so resolving
-            # it from unlocked rows would let a concurrent VC edit (a member joining/leaving, or the
-            # id moving between members) shift the sync member to a row we never locked — splitting
-            # the link across the VC. Non-VC merges add no members, so they lock the same two rows.
+            # deterministic pk order to avoid deadlocks, BEFORE resolving the mapping owners: the
+            # owner rule reads every member's librenms_id custom field, so a read from unlocked rows
+            # could see a mapping that a concurrent edit moves. Non-VC merges lock the same two rows.
             serial_rules = SerialRules.load()
             assignment_lock([libre_device.get("serial")], model=Device, rules=serial_rules)
             try:
@@ -4157,10 +4147,10 @@ class MergeNetBoxDevicesView(
             ):
                 return _htmx_error_response(_SERIAL_MATCH_LOST)
 
-            # Resolve the sync devices from the now-locked, current state.
+            # Resolve the mapping owners from the now-locked, current state.
             try:
-                winner_sync = get_librenms_sync_device(winner, server_key=server_key) or winner
-                donor_sync = get_librenms_sync_device(donor, server_key=server_key) or donor
+                winner_sync = mapping_owner(winner)
+                donor_sync = mapping_owner(donor)
             except DatabaseError as exc:
                 if classify_conflict(exc):
                     raise

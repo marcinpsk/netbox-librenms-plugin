@@ -49,7 +49,7 @@ from netbox_librenms_plugin.server_mappings import (
     read_mapping,
     resolve_device_port,
 )
-from netbox_librenms_plugin.server_selection import get_librenms_sync_device
+from netbox_librenms_plugin.mapping_owner import mapping_owner
 from netbox_librenms_plugin.sync_cache import (
     SyncCacheConsistency,
     SyncTab,
@@ -269,23 +269,24 @@ class BaseCableTableView(
         """Return whether the request user may view one current NetBox object."""
         return self._viewable_queryset(type(obj)).filter(pk=obj.pk).exists()
 
-    def _viewable_sync_device(self, obj, server_key):
+    def _viewable_sync_device(self, obj):
         """
-        Return the chassis sync owner only when the request may view it.
+        Return the mapping owner of *obj* only when the request may view it.
 
-        A chassis with no resolvable sync member falls back to the page object, which the caller
-        already resolved through a restricted queryset. A member that resolves but is out of the
-        request's scope returns None instead, so the page cannot act under a hidden owner.
+        The owner is *obj* itself, or the master of its virtual chassis. A master that is out of the
+        request's scope returns None, so the page cannot act under a hidden owner.
 
         Args:
             obj: The page object (Device or VirtualMachine) the tab was opened on.
-            server_key (str): LibreNMS server key scoping the sync-member lookup.
 
         Returns:
-            Device | None: The viewable sync owner, or None when it is out of scope.
+            Device | VirtualMachine | None: The viewable owner, or None when it is out of scope.
+
+        Raises:
+            MappingOwnerError: The virtual chassis of *obj* has no mapping owner.
 
         """
-        sync_device = get_librenms_sync_device(obj, server_key=server_key) or obj
+        sync_device = mapping_owner(obj)
         if not self._object_is_viewable(sync_device):
             return None
         return sync_device
@@ -739,7 +740,7 @@ class BaseCableTableView(
                 if server_key is None:
                     server_key = self.librenms_api.server_key
                 if sync_device is None:
-                    sync_device = self._viewable_sync_device(obj, server_key)
+                    sync_device = self._viewable_sync_device(obj)
                 if sync_device is None:
                     return None
                 csp = (
@@ -1915,9 +1916,8 @@ class BaseCableTableView(
             server_key = self._render_server_key()
         # Resolve the serial sync device once for the whole loop (loop-invariant) instead of
         # per serial row. Reuse the device the caller (_prepare_context) already resolved to
-        # avoid a second get_librenms_sync_device() VC-members query per request; falls back to
-        # resolving here when called without one.
-        serial_sync_device = sync_device or self._viewable_sync_device(obj, server_key)
+        # avoid a second owner query per request; falls back to resolving here when called without one.
+        serial_sync_device = sync_device or self._viewable_sync_device(obj)
         serial_links_present = any(link.get("_source") == SERIAL_INVENTORY_SOURCE for link in links_data)
         serial_ports = (
             list(self._viewable_queryset(ConsoleServerPort).filter(device=serial_sync_device).select_related("cable"))
@@ -2130,7 +2130,7 @@ class BaseCableTableView(
         server_key = server_key or self._render_server_key()
         if server_key is None:
             return None
-        owner = self._viewable_sync_device(obj, server_key)
+        owner = self._viewable_sync_device(obj)
         if owner is None:
             return None
         interface_name_field = get_interface_name_field(request, obj)
@@ -2390,7 +2390,7 @@ class SingleCableVerifyView(BaseCableTableView):
             # key matches what _prepare_context wrote. When the VC has no
             # resolvable sync device, return an empty row rather than crashing.
             if selected_device.virtual_chassis:
-                primary_device = self._viewable_sync_device(selected_device, server_key)
+                primary_device = self._viewable_sync_device(selected_device)
                 if primary_device is None:
                     return JsonResponse({"status": "success", "formatted_row": formatted_row})
             else:
@@ -2625,7 +2625,7 @@ class CableRemotePickerView(BaseCableTableView):
 
     def _cache_state(self, obj, server_key):
         """Return the cache key and assessed rows of the current bound snapshot."""
-        owner = self._viewable_sync_device(obj, server_key)
+        owner = self._viewable_sync_device(obj)
         cache_key = source_cache.snapshot_key(obj, Resource.CABLES, server_key)
         if owner is None:
             return cache_key, None

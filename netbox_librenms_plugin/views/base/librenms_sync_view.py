@@ -35,11 +35,11 @@ from netbox_librenms_plugin.serial_identity import (
     stored_form_differs,
 )
 from netbox_librenms_plugin.server_mappings import ContainerStatus, mapped_device_servers, read_mapping
+from netbox_librenms_plugin.mapping_owner import OwnerProblem
 from netbox_librenms_plugin.server_selection import (
     ServerSelectionState,
     build_configured_server_options,
     build_server_mappings,
-    get_librenms_sync_device,
     resolve_object_server,
 )
 from netbox_librenms_plugin.sync_cache import (
@@ -192,16 +192,8 @@ class BaseLibreNMSSyncView(
                     },
                 )
 
-        # For Virtual Chassis members, always delegate to get_librenms_sync_device() so
-        # self._librenms_lookup_device and self.librenms_id are consistent with the
-        # helper-based VC status computed in get_context_data().  A legacy bare-int mapping
-        # on the viewed member must not shadow an explicit per-server mapping on another
-        # member — get_librenms_sync_device() applies the full priority order.
-        librenms_lookup_device = obj
-        if not unresolved and hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-            sync_device = get_librenms_sync_device(obj, server_key=self.librenms_api.server_key)
-            if sync_device:
-                librenms_lookup_device = sync_device
+        # The mapping owner: the page object, or the master of its virtual chassis.
+        librenms_lookup_device = selection.mapping_owner
 
         # Store for use in get_context_data (badge generation needs the same object)
         self._librenms_lookup_device = librenms_lookup_device
@@ -247,13 +239,10 @@ class BaseLibreNMSSyncView(
         owner = selection.mapping_owner
         return self.restricted_queryset(type(owner), "change").filter(pk=owner.pk).exists()
 
-    def _mapping_editor(self, selection, obj):
-        """Return the server mapping editor of *obj*, or None when the user may not edit its mapping on this page."""
+    def _mapping_editor(self, selection):
+        """Return the editor of the mapping owner's mapping, or None when the user may not edit it on this page."""
         owner = selection.mapping_owner if selection is not None else None
-        if owner is not None and read_mapping(obj).has_recorded_state:
-            owner = obj
-        # A VC member edits the mapping on the page of the device that owns it.
-        if owner is None or type(owner) is not type(obj) or owner.pk != obj.pk or not self.has_write_permission():
+        if owner is None or not self.has_write_permission():
             return None
         # A fresh read: discovery on this request can store an own ID through another instance of the row.
         owner = self.restricted_queryset(type(owner), "change").filter(pk=owner.pk).first()
@@ -283,6 +272,39 @@ class BaseLibreNMSSyncView(
             "object_type": owner._meta.model_name,
         }
 
+    def _chassis_owner_problem(self, ownership, obj):
+        """Return the card of a chassis with no mapping owner; it names only the members that the user may view."""
+        from dcim.models import Device, VirtualChassis
+
+        user = self.request.user
+
+        def shown(device):
+            if visible_object_label(device, user) is None:
+                return None
+            url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": device.pk})
+            return {"name": device.name, "url": url}
+
+        holders = [shown(holder) for holder in ownership.holders]
+        master = shown(ownership.master) if ownership.master is not None else None
+        involved = {device.pk for device in (ownership.master, *ownership.holders) if device is not None}
+        can_move = (
+            ownership.problem is OwnerProblem.MISPLACED
+            and self.has_write_permission()
+            and master is not None
+            and None not in holders
+            and self.restricted_queryset(Device, "change").filter(pk__in=involved).count() == len(involved)
+        )
+        chassis_visible = VirtualChassis.objects.restrict(user, "view").filter(pk=obj.virtual_chassis_id).exists()
+        return {
+            "problem": ownership.problem.value,
+            "master": master,
+            "holders": [holder for holder in holders if holder is not None],
+            "hidden_holders": holders.count(None),
+            "can_move": can_move,
+            "move_url": reverse("plugins:netbox_librenms_plugin:move_chassis_mappings", kwargs={"pk": obj.pk}),
+            "chassis_url": obj.virtual_chassis.get_absolute_url() if chassis_visible else None,
+        }
+
     def _render_server_selection_blocked(self, request, obj, selection):
         """Render the object page shell without constructing or querying an API client."""
         from netbox_librenms_plugin.utils import build_migrated_context
@@ -291,11 +313,15 @@ class BaseLibreNMSSyncView(
         applicable_tab_names = {tab.value for tab in applicable_tabs}
         requested_tab = request.GET.get("tab") or SyncTab.INTERFACES.value
         active_sync_tab = requested_tab if requested_tab in applicable_tab_names else SyncTab.INTERFACES.value
+        # None for a chassis with no mapping owner: the page then shows the owner problem card.
         mapping_owner = selection.mapping_owner
         self._librenms_lookup_device = mapping_owner
         self._server_key_unresolved = True
         self._scoped_render_server_key = selection.active_key
         self.librenms_id = None
+        chassis_owner_problem = None
+        if selection.state == ServerSelectionState.OWNER_PROBLEM:
+            chassis_owner_problem = self._chassis_owner_problem(selection.ownership, obj)
         return render(
             request,
             self.template_name,
@@ -313,15 +339,16 @@ class BaseLibreNMSSyncView(
                 "server_selection_preferred_key": selection.preferred_key,
                 "server_selection_has_usable_mapping": selection.has_usable_mapping,
                 "can_manage_server_preference": self._can_manage_server_preference(selection),
-                "mapping_editor": self._mapping_editor(selection, obj),
+                "mapping_editor": self._mapping_editor(selection),
+                "chassis_owner_problem": chassis_owner_problem,
                 "server_selection_blocked": True,
                 "has_librenms_id": False,
                 "found_in_librenms": False,
                 "librenms_device_details": {},
                 "platform_info": {},
                 "has_write_permission": self.has_write_permission(),
-                "lookup_device_pk": mapping_owner.pk,
-                "lookup_device_model_name": mapping_owner._meta.model_name,
+                "lookup_device_pk": mapping_owner.pk if mapping_owner is not None else None,
+                "lookup_device_model_name": mapping_owner._meta.model_name if mapping_owner is not None else None,
                 "object_model_name": obj._meta.model_name,
                 **build_migrated_context(obj, selection.active_key),
             },
@@ -365,40 +392,25 @@ class BaseLibreNMSSyncView(
         # Skip the VC-status block on an unresolved ?server_key: get() failed closed (librenms_id
         # None, client left on the default server), so resolving the linkage here against the
         # default server would leak a mapping for a server the page is otherwise reporting as gone.
-        if (
-            not getattr(self, "_server_key_unresolved", False)
-            and hasattr(obj, "virtual_chassis")
-            and obj.virtual_chassis
-        ):
-            # Use helper function to determine the sync device
-            librenms_sync_device = get_librenms_sync_device(obj, server_key=self.librenms_api.server_key)
-
-            # Determine sync device status
-            sync_device_has_librenms_id = False
-            sync_device_has_primary_ip = False
-
+        if not getattr(self, "_server_key_unresolved", False) and getattr(obj, "virtual_chassis_id", None):
+            # The chassis master that get() resolved: it holds every mapping of the chassis.
+            librenms_sync_device = self._librenms_lookup_device
             visible_sync_device = None
-            if librenms_sync_device:
-                sync_device_has_librenms_id = (
-                    read_mapping(librenms_sync_device).own_id(self.librenms_api.server_key) is not None
-                )
-                sync_device_has_primary_ip = bool(primary_ips(librenms_sync_device))
-                if visible_object_label(librenms_sync_device, request.user) is not None:
-                    visible_sync_device = {
-                        "name": str(librenms_sync_device),
-                        "url": librenms_sync_device.get_absolute_url(),
-                    }
-
+            if visible_object_label(librenms_sync_device, request.user) is not None:
+                visible_sync_device = {
+                    "name": str(librenms_sync_device),
+                    "url": librenms_sync_device.get_absolute_url(),
+                }
             context.update(
                 {
                     "is_vc_member": True,
-                    # The page object's own mapping, not the sync owner's.
-                    "object_has_recorded_mapping": read_mapping(obj).has_recorded_state,
-                    "sync_device_has_primary_ip": sync_device_has_primary_ip,
+                    "sync_device_has_primary_ip": bool(primary_ips(librenms_sync_device)),
                     "librenms_sync_device": librenms_sync_device,
                     # Only this value may name the sync device in the page.
                     "visible_sync_device": visible_sync_device,
-                    "sync_device_has_librenms_id": sync_device_has_librenms_id,
+                    "sync_device_has_librenms_id": (
+                        read_mapping(librenms_sync_device).own_id(self.librenms_api.server_key) is not None
+                    ),
                 }
             )
 
@@ -493,7 +505,7 @@ class BaseLibreNMSSyncView(
                 "server_selection_active_name": selection.active_display_name if selection is not None else None,
                 "server_selection_preferred_key": selection.preferred_key if selection is not None else None,
                 "can_manage_server_preference": self._can_manage_server_preference(selection),
-                "mapping_editor": self._mapping_editor(selection, obj),
+                "mapping_editor": self._mapping_editor(selection),
                 "librenms_id_is_legacy": librenms_id_is_legacy,
                 "librenms_id_serial_confirmed": librenms_id_serial_confirmed,
                 # Lookup device may differ from object (e.g. VC master vs member).
@@ -505,10 +517,8 @@ class BaseLibreNMSSyncView(
                 "object_model_name": obj._meta.model_name,
                 # Build migrated mode from obj (the viewed device), NOT a re-resolved sync/lookup
                 # device, so the full page and the HTMX tab partials — which also pass obj — stay
-                # consistent. The merge stamps the _migrated_to marker on whichever device holds the
-                # LibreNMS link (get_librenms_sync_device): that IS obj for a non-VC device or the
-                # link-holding VC member (the common case); for a non-sync VC member the marker lands
-                # on the sync sibling, whose sync page is where its migrated controls surface.
+                # consistent. The merge stamps the _migrated_to marker on the mapping owner: obj for
+                # a non-VC device, else the chassis master, whose sync page shows the migrated controls.
                 # Use the resolved render key (not the lazy librenms_api property, which re-derives
                 # the global default and mis-namespaces the marker on the stale-?server_key path).
                 **self._build_migrated_context(obj, self._scoped_render_server_key or self.active_server_key),

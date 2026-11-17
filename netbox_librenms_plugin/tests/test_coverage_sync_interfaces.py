@@ -697,7 +697,8 @@ class TestInterfaceContextOOBRows:
         from dcim.models import VirtualChassis
 
         master = seed_mapping(make_device("oob-collision-scope-master"), "default", own=501)
-        member = seed_mapping(make_device("oob-collision-scope-member"), "default", own=501)
+        # The master holds the mapping of the chassis.
+        member = make_device("oob-collision-scope-member")
         chassis = VirtualChassis.objects.create(name="oob-collision-scope", master=master)
         for device, position in ((master, 1), (member, 2)):
             device.virtual_chassis = chassis
@@ -2770,7 +2771,8 @@ class TestSyncInterfacesViewPost:
         from dcim.models import Device, Interface, VirtualChassis
 
         master = seed_mapping(make_device("oob-sync-scope-master"), "default", own=501)
-        member = seed_mapping(make_device("oob-sync-scope-member"), "default", own=501)
+        # The master holds the mapping of the chassis.
+        member = make_device("oob-sync-scope-member")
         chassis = VirtualChassis.objects.create(name="oob-sync-scope", master=master)
         for device, position in ((master, 1), (member, 2)):
             device.virtual_chassis = chassis
@@ -4499,7 +4501,8 @@ class TestSyncInterfaceLagViewRealDB:
         from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis
 
         member1 = seed_mapping(make_device("vc-lag-m1"), "default", own=501)
-        member2 = seed_mapping(make_device("vc-lag-m2"), "default", own=501)
+        # The master member1 holds the mapping of the chassis.
+        member2 = make_device("vc-lag-m2")
         make_virtual_chassis("VC-LAG", member1, member2)
         local = self._iface(member1, "Gi0/1", 40)
         aggregate = self._iface(member2, "Po1", 50)

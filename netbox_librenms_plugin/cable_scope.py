@@ -5,8 +5,8 @@ from django.contrib.contenttypes.models import ContentType
 
 from netbox_librenms_plugin.breakout_cables import is_channel
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
+from netbox_librenms_plugin.mapping_owner import chassis_ownerships
 from netbox_librenms_plugin.server_mappings import MappingRole, identity_q, prefetch_mappings, read_mapping
-from netbox_librenms_plugin.server_selection import chassis_sync_devices
 
 
 def remote_name_candidates(hostname):
@@ -84,10 +84,13 @@ def cable_port_owner_ids(*terminations, server_key):
     identities = set()
     owners = prefetch_mappings(Device.objects.filter(pk__in=owner_ids).order_by("pk"))
     # One member load serves every chassis of the owners.
-    sync_by_chassis = chassis_sync_devices(owners, server_key=server_key)
+    ownerships = chassis_ownerships(owners)
     for owner in owners:
-        source_owner = sync_by_chassis.get(owner.virtual_chassis_id) or owner
-        for candidate in (owner, source_owner):
+        candidates = [owner]
+        # A chassis with no mapping owner adds only the identities of the device itself.
+        if owner.virtual_chassis_id is not None and ownerships[owner.virtual_chassis_id].owner is not None:
+            candidates.append(ownerships[owner.virtual_chassis_id].owner)
+        for candidate in candidates:
             mapping = read_mapping(candidate)
             identities.update(
                 device_id
