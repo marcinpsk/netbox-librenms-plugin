@@ -381,9 +381,9 @@ def test_split_mappings_move_to_the_master_and_the_member_page_then_works_on_the
     assert {mapping.server_key for mapping in page.context["all_server_mappings"]} == {PRIMARY, SECONDARY, RETIRED}
     html = page.content.decode()
     preferred_url = reverse("plugins:netbox_librenms_plugin:set_preferred_server", args=[master.pk])
-    remove_url = reverse("plugins:netbox_librenms_plugin:remove_server_mapping", args=[master.pk])
+    unlink_url = reverse("plugins:netbox_librenms_plugin:mapping_lifecycle", args=["device", master.pk])
     assert f'action="{preferred_url}"' in html
-    assert f'action="{remove_url}"' in html
+    assert f'href="{unlink_url}?action=unlink&amp;server_key={RETIRED}&amp;active_server_key={SECONDARY}"' in html
     forms = _editor_forms(client, member, server_key=SECONDARY)
     edit_url = reverse("plugins:netbox_librenms_plugin:edit_server_mapping", args=[master.pk])
     assert {action for action, _fields in forms.values()} == {edit_url}
@@ -398,8 +398,10 @@ def test_split_mappings_move_to_the_master_and_the_member_page_then_works_on_the
     from netbox_librenms_plugin.confirmation_intent import FIELD
 
     client.post(context["action_url"], {"server_key": context["server_key"], FIELD: [context["token"]]})
-    # The Remove control unlinks the stale server from the master.
-    client.post(remove_url, {"server_key": RETIRED, "object_type": "device"})
+    # The Unlink control unlinks the stale server from the master, through its confirmation.
+    unlink = client.get(unlink_url, {"action": "unlink", "server_key": RETIRED})
+    assert unlink.status_code == 200, message_texts(unlink)
+    client.post(unlink.context["action_url"], {"server_key": RETIRED, FIELD: [unlink.context["token"]]})
     client.post(preferred_url, {"server_key": SECONDARY, "object_type": "device"})
 
     assert mapping_summary(_fresh(master)) == {
