@@ -201,7 +201,7 @@ class _LifecycleWriter(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Lib
         if server_key not in LibreNMSAPI.get_available_servers():
             return intent.Unavailable("server.configured")
         owned = False
-        # The chassis and its members first, so the sync device that the link binds cannot change meanwhile.
+        # The chassis and its members first, so the mapping owner that the link binds cannot change meanwhile.
         try:
             lock_host_change_owner(model, identity.pk, retry_on_chassis_change=False)
         except ChassisChanged:
