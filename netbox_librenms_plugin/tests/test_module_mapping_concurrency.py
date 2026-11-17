@@ -65,7 +65,10 @@ def test_a_serial_update_a_module_move_and_a_chassis_unlink_do_not_deadlock(
     lower = make_device_with_module_bays("module-mapping-lower", ["Source"], serial="LOWER-CHASSIS")
     higher = make_device_with_module_bays("module-mapping-higher", ["Serial"], serial="HIGHER-CHASSIS")
     assert lower.pk < higher.pk
-    make_virtual_chassis("module-mapping-chassis", lower, higher)
+    chassis = make_virtual_chassis("module-mapping-chassis", lower, higher)
+    # The master holds the chassis mappings, and the unlink acts on it.
+    chassis.master = higher
+    chassis.save()
     destination = make_module_bay(higher, "Destination")
     updated = install_module(higher, "Serial", "MODULE-MAPPING-CARD", serial="OLD-SERIAL")
     ports = [make_interface(device, "Ethernet1") for device in (lower, higher)]
