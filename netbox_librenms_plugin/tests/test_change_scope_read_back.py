@@ -222,7 +222,7 @@ def _ip_writer(tag, *, device_change=None, ip_change=None):
 def test_a_primary_ip_out_of_the_device_change_scope_is_rolled_back(client, live_librenms, flushed_events):
     from ipam.models import IPAddress
 
-    device = make_device("rb-primary", librenms_cf={SERVER_KEY: {"id": 7311}})
+    device = seed_mapping(make_device("rb-primary"), SERVER_KEY, own=7311)
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
     seed_mapping(interface, SERVER_KEY, own=9311)
     _seed_ip_rows(device, [("198.18.73.11", 9311, interface.name)], mgmt_ip="198.18.73.11")
@@ -253,7 +253,7 @@ def test_a_confirmed_ip_change_out_of_the_ip_change_scope_is_rolled_back(client,
     from ipam.models import VRF, IPAddress
 
     blue = VRF.objects.create(name="rb-blue")
-    device = make_device("rb-confirmed-ip", librenms_cf={SERVER_KEY: {"id": 7312}})
+    device = seed_mapping(make_device("rb-confirmed-ip"), SERVER_KEY, own=7312)
     target = make_interface(device, "Ethernet1", iface_type="1000base-t")
     seed_mapping(target, SERVER_KEY, own=9312)
     current = make_interface(device, "Ethernet2", iface_type="1000base-t")
