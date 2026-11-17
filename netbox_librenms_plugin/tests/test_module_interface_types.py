@@ -48,8 +48,8 @@ def _seed_module_tab(device, module, *, inventory_row=None, librenms_id=179):
     )
 
 
-def _render_module_tab(device, user):
-    """Render the real module table from its seeded cache."""
+def _render_module_tab(device, user, *, table_expected=True):
+    """Render the real module table from its seeded cache; a denied device view renders no table."""
     from netbox_librenms_plugin.tests.view_test_helpers import make_request
     from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
@@ -63,7 +63,11 @@ def _render_module_tab(device, user):
     view.setup(request, pk=device.pk)
     view.cache_only = True
     context = view.get_context_data(request, device)
-    return context["table"].as_html(request) if context["table"] is not None else ""
+    if not table_expected:
+        assert context["table"] is None
+        return ""
+    assert context["table"] is not None, "the module tab rendered no table"
+    return context["table"].as_html(request)
 
 
 class TestModuleTemplateInterfaceSpecs:
@@ -270,7 +274,7 @@ class TestModuleInterfaceTypeTab:
         )
         key = _seed_module_tab(device, module)
         try:
-            content = _render_module_tab(device, user)
+            content = _render_module_tab(device, user, table_expected=missing_view != "device")
         finally:
             cache.delete(key)
         button = re.search(r'<button[^>]*data-action="review-interface-types"[^>]*>', content)
