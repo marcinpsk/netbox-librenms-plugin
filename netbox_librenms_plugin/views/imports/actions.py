@@ -4195,11 +4195,10 @@ class MergeNetBoxDevicesView(
             serial_rules = SerialRules.load()
             assignment_lock([libre_device.get("serial")], model=Device, rules=serial_rules)
             try:
+                # The chassis rows decide the mapping owners: share-lock them before the member rows.
+                chassis_ids = {lock_owner_chassis(Device, pk) for pk in sorted({winner.pk, donor.pk})} - {None}
                 lock_pks = {winner.pk, donor.pk}
-                for candidate in (winner, donor):
-                    vc = getattr(candidate, "virtual_chassis", None)
-                    if vc:
-                        lock_pks.update(vc.members.values_list("pk", flat=True))
+                lock_pks.update(Device.objects.filter(virtual_chassis_id__in=chassis_ids).values_list("pk", flat=True))
                 lock_pks = sorted(lock_pks)
                 locked = list(Device.objects.select_for_update().filter(pk__in=lock_pks).order_by("pk"))
             except DatabaseError as exc:
@@ -4213,6 +4212,9 @@ class MergeNetBoxDevicesView(
             locked_by_pk = {d.pk: d for d in locked}
             winner = locked_by_pk[winner.pk]
             donor = locked_by_pk[donor.pk]
+            # A device that changed chassis before its row lock is outside the locked chassis rows.
+            if {winner.virtual_chassis_id, donor.virtual_chassis_id} - {None} != chassis_ids:
+                return _htmx_error_response("Virtual chassis membership changed during the merge; please retry.")
             hostname_match_pk = winner.pk if serial_peer_pk == donor.pk else donor.pk
             if serial_peer_pk not in (winner.pk, donor.pk) or not is_sole_holder(
                 locked_by_pk[serial_peer_pk],
