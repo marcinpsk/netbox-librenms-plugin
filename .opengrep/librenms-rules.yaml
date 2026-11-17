@@ -1933,6 +1933,42 @@ rules:
       - metavariable-regex:
           metavariable: $ACTION
           regex: ^["'](add|change)["']$
+  - id: change-scope-write-needs-read-back
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This code saves a row that it read through a change scope, and does not read the saved row
+      back. Call transactions.saved_in_scope(row, user, "change") after the save, inside the write's
+      transaction, and roll the write back on a miss, as NetBox's edit views do. Or write the row
+      through transactions.update_existing_row, which reads it back.
+    metadata:
+      category: security
+    paths:
+      exclude:
+        - "**/tests/**"
+        - "**/migrations/**"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $ROW = <... $VIEW.restricted_queryset($MODEL, "change") ...>
+              ...
+              $ROW.save(...)
+          - pattern: |
+              $ROW = <... $MANAGER.restrict($USER, "change") ...>
+              ...
+              $ROW.save(...)
+      - pattern-not-inside: |
+          def $F(...):
+            ...
+            if <... saved_in_scope(...) ...>:
+              ...
+            ...
+      - pattern-not-inside: |
+          def $F(...):
+            ...
+            if <... $SELF._refuse_rows_outside_change_scope(...) ...>:
+              ...
+            ...
   - id: sync-script-reads-page-server-key
     languages: [javascript]
     severity: ERROR
