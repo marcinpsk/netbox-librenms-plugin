@@ -48,9 +48,24 @@ def _requirements(snapshot):
             _require(record, optional_status=record.request == stack_request)
 
 
+def _without_vlans(record):
+    """Return a ports answer's rows without the VLAN rows that `with=vlans` adds."""
+    return [{name: value for name, value in row.items() if name != "vlans"} for row in record.value]
+
+
+def _require_same_ports(kept, record):
+    """Refuse two ports reads under one route key that disagree on more than their VLAN rows."""
+    if kept.request != record.request and kept.obtained and record.obtained:
+        if _without_vlans(kept) != _without_vlans(record):
+            raise RuntimeError(
+                f"Capture failed for {record.request.path!r}: the ports changed between two reads; retry the capture"
+            )
+
+
 def _export_responses(snapshot):
     """Export real HTTP answers and keep the VLAN-bearing ports answer for each path."""
     exported = {}
+    kept = {}
     host_id = snapshot.resources[Resource.INTERFACES].host.librenms_id
     sensors_request = responses.sensors(host_id).request
     stack_request = responses.port_stack(host_id).request
@@ -65,8 +80,11 @@ def _export_responses(snapshot):
         if record.obtained:
             _require(record, optional_status=record.request == stack_request)
         key = record.request.route_key
+        if key in kept:
+            _require_same_ports(kept[key], record)
         if key not in exported or dict(record.request.params).get("with") == "vlans":
             exported[key] = wrap_response(status, record.body)
+            kept[key] = record
     # A filtered query that answered [] uses obtained /all rows in production too.
     for part in ("inventory_root", "inventory_children"):
         record = snapshot.record(Resource.MODULES, part)
