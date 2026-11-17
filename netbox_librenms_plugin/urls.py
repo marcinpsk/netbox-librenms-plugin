@@ -105,6 +105,7 @@ from .views import (
     LocationMappingView,
     MappingLifecycleView,
     MarkBuiltInView,
+    MoveChassisMappingsView,
     MergeNetBoxDevicesView,
     ModuleBayMappingBulkDeleteView,
     ModuleBayMappingBulkExportYAMLView,
@@ -552,6 +553,11 @@ urlpatterns = [
         "devices/<int:pk>/edit-server-mapping/",
         EditServerMappingView.as_view(),
         name="edit_server_mapping",
+    ),
+    path(
+        "devices/<int:pk>/move-chassis-mappings/",
+        MoveChassisMappingsView.as_view(),
+        name="move_chassis_mappings",
     ),
     path(
         "devices/<int:pk>/preferred-server/",

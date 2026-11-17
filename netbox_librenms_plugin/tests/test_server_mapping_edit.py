@@ -509,44 +509,50 @@ def test_an_edit_survives_the_page_load_after_the_redirect(client, servers, type
 
 
 @pytest.mark.django_db
-def test_a_vc_member_edits_its_own_mapping_when_another_member_serves_the_active_server(client, servers):
-    """The page's global owner is member one, but member two holds the own ID of the active server."""
+def test_the_editor_of_a_member_page_edits_the_mapping_of_the_master(client, servers):
+    """The master holds every server of the chassis, so the member page edits the master's mapping."""
     _chassis, (first, second) = make_virtual_chassis_members("edit-vc")
     seed_mapping(first, "primary", own=14200, save=False)
-    seed_mapping(first, "secondary", oob=14201, oob_type="ilo")
-    seed_mapping(second, "secondary", own=14202)
+    seed_mapping(first, "secondary", oob=14201, oob_type="ilo", save=False)
+    seed_mapping(first, "secondary", own=14202)
     client.force_login(make_superuser("edit-vc-writer"))
 
-    response = client.get(_sync_url(first), {"server_key": "secondary"})
+    response = client.get(_sync_url(second), {"server_key": "secondary"})
     assert response.status_code == 200
     parser = _EditorForms()
     parser.feed(response.content.decode())
     forms = {form["fields"]["server_key"]: form for form in parser.forms.values()}
     action, fields = forms["primary"]["action"], forms["primary"]["fields"]
+    assert action == reverse("plugins:netbox_librenms_plugin:edit_server_mapping", args=[first.pk])
 
     response = _apply_confirmation(client, client.post(action, {**fields, "own_id": "14203"}))
 
     assert response.status_code == 302
     first.refresh_from_db()
     second.refresh_from_db()
-    assert mapping_summary(first) == {"primary": {"own": 14203}, "secondary": {"oob": 14201, "oob_type": "ilo"}}
-    assert mapping_summary(second) == {"secondary": {"own": 14202}}
+    assert mapping_summary(first) == {
+        "primary": {"own": 14203},
+        "secondary": {"own": 14202, "oob": 14201, "oob_type": "ilo"},
+    }
+    assert mapping_summary(second) == {}
 
 
 @pytest.mark.django_db
-def test_each_chassis_mapping_owner_gets_its_editor_on_its_own_page(client, servers):
-    _chassis, (first, second) = make_virtual_chassis_members("edit-each-owner")
-    seed_mapping(first, "primary", own=14300)
-    seed_mapping(second, "secondary", own=14301)
-    client.force_login(make_superuser("edit-each-owner-writer"))
+@pytest.mark.parametrize("viewed", [0, 1], ids=["master", "member"])
+def test_a_chassis_split_across_members_shows_no_editor_on_any_member_page(client, servers, viewed):
+    """A member that is not the master holds a mapping, so no member page edits until the data moves to the master."""
+    _chassis, members = make_virtual_chassis_members(f"edit-each-owner-{viewed}")
+    seed_mapping(members[0], "primary", own=14300)
+    seed_mapping(members[1], "secondary", own=14301)
+    client.force_login(make_superuser(f"edit-each-owner-writer-{viewed}"))
 
-    response = client.get(_sync_url(second), {"server_key": "secondary"})
+    response = client.get(_sync_url(members[viewed]), {"server_key": "secondary"})
 
     assert response.status_code == 200
+    assert response.context["chassis_owner_problem"]["problem"] == "misplaced"
     parser = _EditorForms()
     parser.feed(response.content.decode())
-    forms = {form["fields"]["server_key"]: form for form in parser.forms.values()}
-    assert forms["secondary"]["fields"]["own_id"] == "14301"
+    assert not parser.forms
 
 
 @pytest.mark.django_db

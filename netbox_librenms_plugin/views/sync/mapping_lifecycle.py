@@ -25,6 +25,7 @@ from netbox_librenms_plugin.assessment.mapping_lifecycle import (
 )
 from netbox_librenms_plugin.import_utils.disclosure import visible_object_label
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+from netbox_librenms_plugin.mapping_owner import ensure_mapping_owner
 from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
     IdentityOwned,
@@ -314,7 +315,8 @@ def _success_text(operation, row, cleared, server_name):
     return f"'{row.name}' on {server_name}: {change}, and cleared {ports}."
 
 
-def _tab(data):
+def posted_tab(data):
+    """Return the sync tab that *data* names, or None when it names no tab."""
     tab = data.get("tab")
     return tab if isinstance(tab, str) and tab in {sync_tab.value for sync_tab in SyncTab} else None
 
@@ -329,8 +331,8 @@ class MappingLifecycleView(_LifecycleWriter):
         model = self._model(object_type)
         if error := self.require_all_permissions("POST"):
             return error
-        obj = self.restrict_object_or_404(model, "change", pk=pk)
-        tab = _tab(request.POST)
+        obj = ensure_mapping_owner(self.restrict_object_or_404(model, "change", pk=pk))
+        tab = posted_tab(request.POST)
         posted = request.POST.getlist("server_key")
         try:
             server_key = require_server_key(posted[0] if len(posted) == 1 else "")

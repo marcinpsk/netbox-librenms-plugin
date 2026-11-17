@@ -32,6 +32,13 @@ def _two_member_vc(name, cf_first=None, cf_second=None):
     return first, second
 
 
+def _set_master(member):
+    """Make *member* the master of its virtual chassis."""
+    chassis = member.virtual_chassis
+    chassis.master = member
+    chassis.save()
+
+
 # =============================================================================
 # TestDeviceTypeMatching - 5 tests
 # =============================================================================
@@ -490,92 +497,88 @@ class TestVirtualChassisHelpers:
 
         assert result == second
 
-    def test_get_librenms_sync_device_no_vc(self):
-        """Device without VC returns itself."""
+    def test_a_standalone_device_owns_its_own_mapping(self):
+        """A device outside a virtual chassis is its own mapping owner: the same instance."""
         from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.server_selection import get_librenms_sync_device
+        from netbox_librenms_plugin.mapping_owner import mapping_owner
 
         device = make_device("utils-standalone-sync")
 
-        result = get_librenms_sync_device(device)
-
-        assert result == device
+        assert mapping_owner(device) is device
 
     @pytest.mark.django_db
-    def test_get_librenms_sync_device_with_librenms_id(self):
-        """VC member with librenms_id is returned (real VC; the member without one iterated first)."""
-        from netbox_librenms_plugin.server_selection import get_librenms_sync_device
+    def test_the_master_owns_the_mappings_of_the_chassis(self):
+        """The master owns the chassis mapping, from the page of every member."""
+        from netbox_librenms_plugin.mapping_owner import mapping_owner
 
-        without_id, with_id = _two_member_vc("sync-withid")
-        seed_mapping(with_id, own=123)
-        assert get_librenms_sync_device(without_id) == with_id
+        master, member = _two_member_vc("sync-withid")
+        _set_master(master)
+        seed_mapping(master, own=123)
 
-    @pytest.mark.django_db
-    def test_get_librenms_sync_device_dict_preferred_over_legacy_bare_int(self):
-        """In a partially migrated VC, a per-server dict member is preferred over a legacy bare-int."""
-        from netbox_librenms_plugin.server_selection import get_librenms_sync_device
-
-        # member_a (legacy bare-int) iterated first — the function should still prefer member_b (dict).
-        member_a, member_b = _two_member_vc("sync-dictpref", 42, {"default": 42})
-        assert get_librenms_sync_device(member_a, server_key="default") == member_b
+        assert mapping_owner(member) == master
+        assert mapping_owner(master) is master
 
     @pytest.mark.django_db
-    def test_get_librenms_sync_device_host_id_preferred_over_oob_only(self):
-        """A member holding the real host id wins over an OOB-only member, even iterated first."""
-        from netbox_librenms_plugin.server_selection import get_librenms_sync_device
+    @pytest.mark.parametrize(
+        "stored",
+        [42, {"default": 42}, {"default": {"oob": {"id": 7, "type": "drac"}}}, {"_preferred_server": "default"}],
+        ids=["legacy", "own-id", "oob-only", "preference-only"],
+    )
+    def test_any_mapping_data_on_a_member_that_is_not_the_master_is_misplaced(self, stored):
+        """A legacy value, an own ID, an OOB entry or a preference on another member leaves no owner."""
+        from netbox_librenms_plugin.mapping_owner import (
+            MappingOwnerError,
+            OwnerProblem,
+            mapping_owner,
+            mapping_ownership,
+        )
 
-        member_a, member_b = _two_member_vc("sync-hostpref")
-        seed_mapping(member_a, oob=7, oob_type="drac")  # OOB-only, first
-        seed_mapping(member_b, own=42)  # real host id
-        assert get_librenms_sync_device(member_a, server_key="default") == member_b
+        master, member = _two_member_vc("sync-misplaced", {"default": 41}, stored)
+        _set_master(master)
 
-    @pytest.mark.django_db
-    def test_get_librenms_sync_device_oob_only_resolves_when_no_host_id(self):
-        """When no member has a host id, an OOB-only mapping still resolves the sync device."""
-        from netbox_librenms_plugin.server_selection import get_librenms_sync_device
-
-        member_a, member_b = _two_member_vc("sync-oobonly")
-        seed_mapping(member_b, oob=7, oob_type="drac")
-        assert get_librenms_sync_device(member_a, server_key="default") == member_b
-
-    @pytest.mark.django_db
-    def test_get_librenms_sync_device_legacy_fallback_when_no_dict(self):
-        """When no member has a per-server dict, fall back to legacy bare-int."""
-        from netbox_librenms_plugin.server_selection import get_librenms_sync_device
-
-        # member_b (no id) iterated first, member_a (legacy bare-int) second → member_a wins.
-        member_b, member_a = _two_member_vc("sync-legacy", None, 42)
-        assert get_librenms_sync_device(member_b, server_key="default") == member_a
+        ownership = mapping_ownership(master)
+        assert ownership.problem is OwnerProblem.MISPLACED
+        assert ownership.master == master
+        assert ownership.holders == (member,)
+        with pytest.raises(MappingOwnerError):
+            mapping_owner(member)
 
     @pytest.mark.django_db
-    def test_get_librenms_sync_device_dict_for_different_server_falls_through(self):
-        """Per-server dict with a different key does not match; legacy bare-int resolves instead."""
-        from netbox_librenms_plugin.server_selection import get_librenms_sync_device
+    def test_a_chassis_without_a_master_has_no_owner(self):
+        """No member owns the mapping of a chassis without a master, also the member that holds it."""
+        from netbox_librenms_plugin.mapping_owner import (
+            MappingOwnerError,
+            OwnerProblem,
+            mapping_owner,
+            mapping_ownership,
+        )
 
-        # member_a: legacy bare-int (universal); member_b: dict only for "production".
-        member_a, member_b = _two_member_vc("sync-diffserver", 42, {"production": 99})
-        assert get_librenms_sync_device(member_a, server_key="default") == member_a
+        without_id, with_id = _two_member_vc("sync-no-master", None, {"default": 42})
 
-    def test_get_librenms_sync_device_fallback_to_member_with_ip(self):
-        """Priority 3: no dict member, master has no IP, another member has primary IP → that member."""
+        assert mapping_ownership(without_id).problem is OwnerProblem.NO_MASTER
+        for member in (without_id, with_id):
+            with pytest.raises(MappingOwnerError):
+                mapping_owner(member)
+
+    def test_the_master_owns_the_mapping_without_a_primary_ip(self):
+        """Another member's primary IP never makes it the owner."""
         from netbox_librenms_plugin.tests.conftest import ip_on
-        from netbox_librenms_plugin.server_selection import get_librenms_sync_device
+        from netbox_librenms_plugin.mapping_owner import mapping_owner
 
         master, member_with_ip = _two_member_vc("sync-primary-ip")
+        _set_master(master)
         address = ip_on(member_with_ip, "198.18.20.1/24", "management")
         member_with_ip.primary_ip4 = address
         member_with_ip.save(update_fields=["primary_ip4"])
 
-        result = get_librenms_sync_device(master, server_key="prod")
+        assert mapping_owner(member_with_ip) == master
 
-        assert result == member_with_ip
-
-    def test_get_librenms_sync_device_fallback_lowest_vc_position(self):
-        """Priority 4: no IPs anywhere → return member with lowest vc_position."""
+    def test_the_master_owns_the_mapping_at_any_vc_position(self):
+        """The lowest VC position never makes a member the owner."""
         from dcim.models import VirtualChassis
 
         from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.server_selection import get_librenms_sync_device
+        from netbox_librenms_plugin.mapping_owner import mapping_owner
 
         vc = VirtualChassis.objects.create(name="sync-lowest-position")
         members = {}
@@ -585,10 +588,9 @@ class TestVirtualChassisHelpers:
             member.vc_position = position
             member.save()
             members[position] = member
+        _set_master(members[3])
 
-        result = get_librenms_sync_device(members[2], server_key="prod")
-
-        assert result == members[1]
+        assert mapping_owner(members[1]) == members[3]
 
     def test_get_module_adoptable_interface_names_rewrites_for_vc_member(self):
         from dcim.models import InterfaceTemplate, Module
@@ -614,18 +616,21 @@ class TestVirtualChassisHelpers:
 
         assert result == (["TenGigabitEthernet3/1/1"], False)
 
-    def test_zero_id_is_not_a_valid_librenms_id(self):
+    def test_a_zero_id_on_another_member_is_misplaced_data(self):
         """
         LibreNMS uses MySQL auto-increment IDs starting at 1; device_id=0 cannot exist.
-        A member whose resolved ID is 0 must be skipped so a real ID is preferred.
+
+        A zero ID is still stored data, so on a member that is not the master it leaves the chassis with no owner.
         """
-        from netbox_librenms_plugin.server_selection import get_librenms_sync_device
+        from netbox_librenms_plugin.mapping_owner import OwnerProblem, mapping_ownership
 
-        member_zero, member_real = _two_member_vc("sync-zero-id", {"default": 0}, {"default": 5})
+        master, member_zero = _two_member_vc("sync-zero-id", {"default": 5}, {"default": 0})
+        _set_master(master)
 
-        result = get_librenms_sync_device(member_zero, server_key="default")
+        ownership = mapping_ownership(master)
 
-        assert result == member_real
+        assert ownership.problem is OwnerProblem.MISPLACED
+        assert ownership.holders == (member_zero,)
 
     @staticmethod
     def _three_member_vc(name):

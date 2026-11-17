@@ -823,9 +823,13 @@ class TestSingleCableVerifyServerKey:
         role, _ = DeviceRole.objects.get_or_create(name="SkRole", slug="skrole")
         site, _ = Site.objects.get_or_create(name="SkSite", slug="sksite")
         vc = VirtualChassis.objects.create(name=f"SkVC-{tag}")
-        return Device.objects.create(
+        device = Device.objects.create(
             name=f"sk-{tag}", device_type=dt, role=role, site=site, status="active", virtual_chassis=vc, vc_position=1
         )
+        # The device is the master, which holds the mapping of the chassis.
+        vc.master = device
+        vc.save()
+        return device
 
     @staticmethod
     def _view_and_request(device, body, *, api_server_key):

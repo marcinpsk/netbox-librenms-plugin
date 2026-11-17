@@ -60,7 +60,8 @@ from netbox_librenms_plugin.serial_identity import (
     stored_form_refusal,
     written_device_conflict,
 )
-from netbox_librenms_plugin.server_selection import build_server_mappings, get_librenms_sync_device
+from netbox_librenms_plugin.mapping_owner import ensure_mapping_owner, mapping_owner
+from netbox_librenms_plugin.server_selection import build_server_mappings
 from netbox_librenms_plugin.sync_cache import SyncTab
 from netbox_librenms_plugin.transactions import (
     atomic_with_events,
@@ -259,13 +260,16 @@ def _live_platform_facts(view, subject, server_key):
     """
     Return the live LibreNMS platform facts of *subject*, read through *view*'s bound server.
 
-    A virtual chassis member reads the facts of the chassis sync device for *server_key*, as the sync page does.
+    A virtual chassis member reads the facts of the chassis master, as the sync page does.
 
     Returns:
         tuple: ``(PlatformFacts, FactsSource, None)``, or ``(None, None, text)`` when the lookup failed.
 
+    Raises:
+        MappingOwnerError: The virtual chassis has no mapping owner.
+
     """
-    lookup_subject = get_librenms_sync_device(subject, server_key=server_key) or subject
+    lookup_subject = mapping_owner(subject)
     source = FactsSource(lookup_subject.pk, getattr(subject, "virtual_chassis_id", None))
     view.librenms_id, lookup_error = view.resolve_librenms_id(lookup_subject)
     if lookup_error is not None:
@@ -306,18 +310,8 @@ class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             messages.error(request, "Selected LibreNMS server is no longer configured.")
             return _device_sync_redirect(request, pk, server_key)
 
-        # For VC members without their own librenms_id, use the VC sync device. Scope the
-        # resolution to the POST-rebound server_key so a multi-server VC picks the sibling
-        # linked to *this* server, not the server-agnostic "any member with any id" fallback
-        # (which would rename the device from a different server's LibreNMS device).
-        librenms_lookup_device = device
-        if hasattr(device, "virtual_chassis") and device.virtual_chassis:
-            if not read_mapping(device).has_recorded_state:
-                sync_device = get_librenms_sync_device(device, server_key=server_key)
-                if sync_device:
-                    librenms_lookup_device = sync_device
-
-        self.librenms_id, lookup_error = self.resolve_librenms_id(librenms_lookup_device)
+        # A virtual chassis member takes its name from the LibreNMS device of the chassis master.
+        self.librenms_id, lookup_error = self.resolve_librenms_id(mapping_owner(device))
 
         if lookup_error is not None:
             messages.error(request, self.scoped_lookup_message(lookup_error))
@@ -381,7 +375,8 @@ class UpdateDeviceSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
         if error := self.require_all_permissions("POST"):
             return error
 
-        device = self.restrict_object_or_404(Device, "change", pk=pk)
+        # The device must hold its own mapping: a chassis member reads the LibreNMS device of the master.
+        device = ensure_mapping_owner(self.restrict_object_or_404(Device, "change", pk=pk))
 
         # Rebind the API client to the POSTed server before resolving the per-server librenms_id,
         # so a multi-server user acting on a non-default tab isn't routed through the globally
@@ -442,7 +437,8 @@ class UpdateDeviceTypeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
         if error := self.require_all_permissions("POST"):
             return error
 
-        device = self.restrict_object_or_404(Device, "change", pk=pk)
+        # The device must hold its own mapping: a chassis member reads the LibreNMS device of the master.
+        device = ensure_mapping_owner(self.restrict_object_or_404(Device, "change", pk=pk))
 
         # Rebind the API client to the POSTed server before resolving the per-server librenms_id,
         # so a multi-server user acting on a non-default tab isn't routed through the globally
@@ -924,6 +920,7 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
         active_sync_tab = _validated_sync_tab(request)
         active_server_key = _validated_active_server_key(request)
         obj, model = self._get_object(object_type, pk)
+        ensure_mapping_owner(obj)
         server_key = request.POST.get("server_key", "").strip()
 
         if not server_key:
@@ -1047,9 +1044,8 @@ class SetPreferredServerView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
         submitted_active_key = request.POST.get("active_server_key", "").strip() or None
 
         with atomic_with_events():
-            owner = get_object_or_404(
-                self.restricted_queryset(model, "change").select_for_update(of=("self",)),
-                pk=pk,
+            owner = ensure_mapping_owner(
+                get_object_or_404(self.restricted_queryset(model, "change").select_for_update(of=("self",)), pk=pk)
             )
             mappings = build_server_mappings(owner)
             selectable_keys = {mapping.server_key for mapping in mappings if mapping.is_selectable}
@@ -1180,8 +1176,8 @@ class EditServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
         )
         try:
             with atomic_with_events():
-                owner = get_object_or_404(
-                    self.restricted_queryset(model, "change").select_for_update(of=("self",)), pk=pk
+                owner = ensure_mapping_owner(
+                    get_object_or_404(self.restricted_queryset(model, "change").select_for_update(of=("self",)), pk=pk)
                 )
                 change = _editor_host_change(
                     owner,
@@ -1289,6 +1285,7 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             return error
 
         model, obj = self._get_model_and_object(object_type, pk)
+        ensure_mapping_owner(obj)
         # Rebind the API client to the POST-scoped server before any lookup/migration so the
         # legacy-ID conversion is verified (get_device_info), conflict-checked and written
         # (convert_legacy and its persistence) under the same server

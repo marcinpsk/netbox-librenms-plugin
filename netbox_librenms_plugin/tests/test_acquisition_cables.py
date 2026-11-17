@@ -348,62 +348,59 @@ def test_neighbour_budget_cannot_skip_the_oob_mappings_own_ports(live_librenms, 
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("cables_first", [True, False])
-def test_an_omitted_neighbour_is_still_requested_for_another_resources_owner(live_librenms, monkeypatch, cables_first):
+def test_an_omitted_neighbour_is_not_requested_for_another_resource_of_the_owner(
+    live_librenms, monkeypatch, cables_first
+):
+    """Every resource of a chassis has the master as its source, so no other resource needs the omitted neighbour."""
     from netbox_librenms_plugin.acquisition import resources
     from netbox_librenms_plugin.acquisition.coordinator import acquire
     from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
     from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
-    _vc, (master, member) = make_virtual_chassis_members("acq-cable-budget-vc")
+    _vc, (master, _member) = make_virtual_chassis_members("acq-cable-budget-vc")
     seed_mapping(master, "default", own=HOST_ID)
-    seed_mapping(member, "default", own=NEIGHBOUR_ID)
     _serve(live_librenms.server, links=LINKS)
     _serve(live_librenms.server, NEIGHBOUR_ID)
-    live_librenms.server.register(f"/api/v0/devices/{NEIGHBOUR_ID}/ip", {"status": "ok", "addresses": []})
-    live_librenms.server.register(
-        f"/api/v0/devices/{NEIGHBOUR_ID}", {"status": "ok", "devices": [{"device_id": NEIGHBOUR_ID}]}
-    )
+    live_librenms.server.register(f"/api/v0/devices/{HOST_ID}/ip", {"status": "ok", "addresses": []})
+    live_librenms.server.register(f"/api/v0/devices/{HOST_ID}", {"status": "ok", "devices": [{"device_id": HOST_ID}]})
     monkeypatch.setattr(resources, "REMOTE_ALIAS_FETCH_BUDGET_SECONDS", 0.0)
     requested = [Resource.CABLES, Resource.IP_ADDRESSES]
     if not cables_first:
         requested.reverse()
 
-    snapshot = acquire(plan_acquisition(member, server_key="default", resources=requested))
+    snapshot = acquire(plan_acquisition(master, server_key="default", resources=requested))
 
     assert is_ready(snapshot, Resource.IP_ADDRESSES)
     assert snapshot.value(Resource.IP_ADDRESSES, "ports") == PORTS
-    assert snapshot.value(Resource.CABLES, f"neighbour_ports:{NEIGHBOUR_ID}") == PORTS
     paths = [request["path"] for request in live_librenms.server.requests]
-    assert paths.count(f"/api/v0/devices/{NEIGHBOUR_ID}/ports") == 1
+    assert paths.count(f"/api/v0/devices/{HOST_ID}/ports") == 1
+    assert f"/api/v0/devices/{NEIGHBOUR_ID}/ports" not in paths
 
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("disconnect", [False, True])
-def test_an_attempted_failed_neighbour_is_not_requested_again_for_another_resource(live_librenms, disconnect):
+def test_an_attempted_failed_neighbour_is_requested_once_for_every_resource_of_the_owner(live_librenms, disconnect):
     from netbox_librenms_plugin.acquisition.coordinator import acquire
     from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
     from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
-    _vc, (master, member) = make_virtual_chassis_members("acq-cable-failed-vc")
+    _vc, (master, _member) = make_virtual_chassis_members("acq-cable-failed-vc")
     seed_mapping(master, "default", own=HOST_ID)
-    seed_mapping(member, "default", own=NEIGHBOUR_ID)
     _serve(live_librenms.server, links=LINKS)
     path = f"/api/v0/devices/{NEIGHBOUR_ID}/ports"
     if disconnect:
         live_librenms.server.register_disconnect(path)
     else:
         live_librenms.server.register(path, {"status": "error"}, status=500)
-    live_librenms.server.register(f"/api/v0/devices/{NEIGHBOUR_ID}/ip", {"status": "ok", "addresses": []})
-    live_librenms.server.register(
-        f"/api/v0/devices/{NEIGHBOUR_ID}", {"status": "ok", "devices": [{"device_id": NEIGHBOUR_ID}]}
-    )
+    live_librenms.server.register(f"/api/v0/devices/{HOST_ID}/ip", {"status": "ok", "addresses": []})
+    live_librenms.server.register(f"/api/v0/devices/{HOST_ID}", {"status": "ok", "devices": [{"device_id": HOST_ID}]})
 
     snapshot = acquire(
-        plan_acquisition(member, server_key="default", resources=[Resource.CABLES, Resource.IP_ADDRESSES])
+        plan_acquisition(master, server_key="default", resources=[Resource.CABLES, Resource.IP_ADDRESSES])
     )
 
-    assert not is_ready(snapshot, Resource.IP_ADDRESSES)
-    assert snapshot.record(Resource.IP_ADDRESSES, "ports").received_at is not None
+    # The failed neighbour blocks no other resource of the owner.
+    assert is_ready(snapshot, Resource.IP_ADDRESSES)
     paths = [request["path"] for request in live_librenms.server.requests]
     assert paths.count(f"/api/v0/devices/{NEIGHBOUR_ID}/ports") == 1
 

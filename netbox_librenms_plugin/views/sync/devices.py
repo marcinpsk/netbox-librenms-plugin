@@ -7,6 +7,7 @@ from django.views import View
 from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.forms import AddToLIbreSNMPV1V2, AddToLIbreSNMPV3
+from netbox_librenms_plugin.mapping_owner import ensure_mapping_owner
 from netbox_librenms_plugin.views.mixins import (
     LibreNMSAPIMixin,
     LibreNMSPermissionMixin,
@@ -70,7 +71,8 @@ class AddDeviceToLibreNMSView(
         if error := self.require_all_permissions("POST"):
             return error
 
-        self.object = self.get_object(object_id, object_type=object_type)
+        # Only the mapping owner is added: another chassis member would become a second LibreNMS device.
+        self.object = ensure_mapping_owner(self.get_object(object_id, object_type=object_type))
 
         server_key = self.rebind_api_for_posted_server(request.POST)
         if server_key is None:
@@ -157,7 +159,8 @@ class UpdateDeviceLocationView(LibreNMSPermissionMixin, NetBoxObjectPermissionMi
         if error := self.require_all_permissions("POST"):
             return error
 
-        device = self.restrict_object_or_404(Device, pk=pk)
+        # The device must hold its own mapping: only the chassis master names the LibreNMS device of a chassis.
+        device = ensure_mapping_owner(self.restrict_object_or_404(Device, pk=pk))
 
         # Rebind the API client to the POSTed server before resolving the per-server
         # librenms_id and writing the location, so a multi-server user acting on a

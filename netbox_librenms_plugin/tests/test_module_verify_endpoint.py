@@ -299,18 +299,17 @@ class TestSingleModuleVerifyRow:
 
 @pytest.mark.django_db
 class TestSingleInterfaceVerifyChassisGuard:
-    """A chassis member with no resolvable sync device stops before any cache read."""
+    """A chassis member with no mapping owner stops before any cache read."""
 
-    def test_unresolvable_chassis_sync_device_returns_404(self, client, librenms_server):
-        """A virtual chassis whose members resolve to no sync device returns the named 404."""
+    def test_a_chassis_without_a_master_refuses_with_a_conflict(self, client, librenms_server):
+        """A virtual chassis without a master has no mapping owner, so the verify answers 409 and names it."""
         from django.urls import reverse
+        from netbox_librenms_plugin.mapping_owner import NO_MASTER_MESSAGE
         from netbox_librenms_plugin.tests.conftest import make_superuser, make_virtual_chassis_members
-        from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
-        _chassis, (device, _sibling) = make_virtual_chassis_members("iface-verify-vc")
-        device.vc_position = None
-        device.save(update_fields=["vc_position"])
-        assert get_librenms_sync_device(device, server_key=SERVER_KEY) is None
+        chassis, (device, _sibling) = make_virtual_chassis_members("iface-verify-vc")
+        chassis.master = None
+        chassis.save()
         client.force_login(make_superuser("iface-verify-vc-user"))
 
         response = client.post(
@@ -319,8 +318,8 @@ class TestSingleInterfaceVerifyChassisGuard:
             content_type="application/json",
         )
 
-        assert response.status_code == 404
-        assert response.json() == {"status": "error", "message": "No sync device found for virtual chassis"}
+        assert response.status_code == 409
+        assert response.json() == {"error": NO_MASTER_MESSAGE}
 
 
 @pytest.mark.django_db(transaction=True)

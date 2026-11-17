@@ -20,7 +20,7 @@ from netbox_librenms_plugin.interface_relationships import (
 )
 from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 from netbox_librenms_plugin.module_grants import ACTION_VERIFY_MODULE, GrantRefusal, GrantRefused, read_module_grant
-from netbox_librenms_plugin.server_selection import get_librenms_sync_device
+from netbox_librenms_plugin.mapping_owner import mapping_owner
 from netbox_librenms_plugin.sync_query import SyncQuery
 from netbox_librenms_plugin.tables.cables import (
     LibreNMSCableTable,
@@ -176,13 +176,6 @@ class SingleInterfaceVerifyView(
             )
         return origin_device, None
 
-    @staticmethod
-    def _sync_device(selected_device, server_key):
-        """Return the device whose cache keys the sync view stored: the VC sync device for a member."""
-        if selected_device.virtual_chassis:
-            return get_librenms_sync_device(selected_device, server_key=server_key)
-        return selected_device
-
     def post(self, request):
         """Verify interface data against cached LibreNMS ports for a device."""
         # Bind the request so require_object_permissions_json() (which reads self.request)
@@ -225,9 +218,8 @@ class SingleInterfaceVerifyView(
         if origin_error:
             return origin_error
 
-        primary_device = self._sync_device(selected_device, server_key)
-        if primary_device is None:
-            return JsonResponse({"status": "error", "message": "No sync device found for virtual chassis"}, status=404)
+        # The device whose cache keys the sync view stored: the chassis master for a member.
+        primary_device = mapping_owner(selected_device)
 
         assessment = read_interface_assessment(primary_device, server_key, interface_name_field)
         if assessment is not None:
@@ -841,10 +833,8 @@ class SaveVlanGroupOverridesView(
         # can't even view (out-of-scope pk). Restrict fail-closes it to a 404 like a nonexistent id.
         device = self.restrict_object_or_404(Device, pk=device_id)
 
-        # Normalise to the VC sync device so cache keys match what the sync view stored
-        sync_device = get_librenms_sync_device(device, server_key=server_key)
-        if sync_device is None:
-            sync_device = device
+        # Normalise to the chassis master so cache keys match what the sync view stored
+        sync_device = mapping_owner(device)
 
         # The overrides belong to the snapshot that every reader accepts, and they expire with it.
         readable = source_cache.read(sync_device, Resource.INTERFACES, server_key) is not None

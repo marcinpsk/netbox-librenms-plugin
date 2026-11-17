@@ -928,7 +928,6 @@ WRITE_SIDE_NAMES = frozenset(
         "claim_librenms_port_binding",
         "LibreNMSPortBindingConflict",
         "LibreNMSPortBindingBusy",
-        "get_librenms_sync_device",
     }
 )
 

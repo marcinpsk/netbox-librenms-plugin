@@ -225,13 +225,12 @@ class TestModuleActionsInvalidateEveryChangedDevice:
         from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
         _vc, (page_device, sibling) = make_virtual_chassis_members("collateral-vc")
-        for member in (page_device, sibling):
-            seed_mapping(member, own=11, save=False)
-            member.save()
+        # The master holds the mapping of the chassis.
+        seed_mapping(page_device, own=11)
         make_module_bay(sibling, "Bay 1")
 
         shared_key = SyncCacheConsistency(page_device).snapshot_key(SyncTab.MODULES, "default")
-        # snapshot_key resolves its owner through get_librenms_sync_device(), so "shared" is a claim
+        # snapshot_key resolves its owner through the owner rule, so "shared" is a claim
         # about both members; without this the survival assert reads a key the sibling mutation
         # never targeted and passes vacuously.
         assert shared_key == SyncCacheConsistency(sibling).snapshot_key(SyncTab.MODULES, "default"), (

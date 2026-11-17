@@ -417,6 +417,7 @@ class TestRebind:
         assert str(STALE_PORT).encode() not in response.content
 
     def test_rebind_is_refused_for_a_migrated_chassis_member(self, client, settings):
+        """A migration marker on a member that is not the master is misplaced mapping data, so the chassis refuses."""
         from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
         from netbox_librenms_plugin.server_mappings import mark_migrated
         from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
@@ -426,10 +427,10 @@ class TestRebind:
         seed_mapping(viewed_member, SERVER_KEY, own=86, save=False)
         viewed_member.save()
         winner = make_device("name-owner-rebind-migrated-winner")
-        apply_mapping_change(target_member, mark_migrated(target_member, winner.pk, SERVER_KEY))
-        target_member.save()
         interface = _bound_interface(target_member, "eth0", STALE_PORT)
         _seed(viewed_member, [_port(HOST_PORT, "eth0")])
+        apply_mapping_change(target_member, mark_migrated(target_member, winner.pk, SERVER_KEY))
+        target_member.save()
         client.force_login(make_superuser("name-owner-rebind-migrated-user"))
 
         response = _rebind(

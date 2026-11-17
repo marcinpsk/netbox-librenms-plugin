@@ -154,7 +154,8 @@ class TestEnrichLocalPortSerial:
         # The viewed member has NO CSP; the sync device (priority member) owns it.
         viewed, _, _ = make_serial_device("ser-enrich-viewed")
         sync_device, (csp,), _ = make_serial_device("ser-enrich-sync", csp_names=["ttyS5"])
-        make_virtual_chassis("ser-enrich-vc", viewed, sync_device)
+        # The sync device is the chassis master, which holds the mapping.
+        make_virtual_chassis("ser-enrich-vc", sync_device, viewed)
         seed_mapping(sync_device, configured_server_key(), own=view.librenms_id, save=False)
         sync_device.save()
 
@@ -537,7 +538,8 @@ class TestSerialDeviceIdPreserved:
 
         viewed, _, _ = make_serial_device("serial-vc-viewed")
         owner, (csp,), _ = make_serial_device("serial-vc-owner", csp_names=["ttyS1"])
-        make_virtual_chassis("serial-vc", viewed, owner)
+        # The owner is the chassis master, which holds the mapping.
+        make_virtual_chassis("serial-vc", owner, viewed)
         server_key = configured_server_key()
         seed_mapping(owner, server_key, own=8)
         snapshot = seed_cables_snapshot(viewed, sensors=[sensor_row(501, 1, device_id=8)], server_key=server_key)
@@ -2141,7 +2143,8 @@ class TestSerialCableReadScope:
 
         page, (csp,), _ = make_serial_device("serial-cache-page", csp_names=["ttyS1"])
         cache_owner = make_serial_device("serial-cache-owner")[0]
-        make_virtual_chassis("serial-cache-scope-vc", page, cache_owner)
+        # The cache owner is the chassis master, which holds the mapping.
+        make_virtual_chassis("serial-cache-scope-vc", cache_owner, page)
         remote = make_serial_device("serial-cache-target")[0]
         server_key = configured_server_key()
         seed_mapping(cache_owner, server_key, own=42, save=False)

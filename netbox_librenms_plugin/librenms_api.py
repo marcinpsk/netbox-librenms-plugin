@@ -12,6 +12,7 @@ from netbox.plugins import get_plugin_config
 
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 from netbox_librenms_plugin.ip_addressing import primary_ips
+from netbox_librenms_plugin.mapping_owner import ensure_mapping_owner
 from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
     assign_own,
@@ -501,6 +502,8 @@ class LibreNMSAPI:
         Raises:
             LibreNMSIDConflictError: The primary IP addresses, or their DNS names, name different
                 LibreNMS devices, or another object owns the discovered ID.
+            MappingOwnerError: Discovery found an ID for a virtual chassis member that does not hold
+                the chassis mappings, so the ID is not stored.
 
         """
         librenms_id = self.get_stored_librenms_id(obj)
@@ -589,6 +592,9 @@ class LibreNMSAPI:
 
         """
         if can_store_device_mapping(obj):
+            # Only the mapping owner stores an ID: a second member with an ID splits the chassis mapping.
+            if getattr(obj, "virtual_chassis_id", None) is not None:
+                ensure_mapping_owner(obj)
             with transaction.atomic():
                 try:
                     locked_obj, conflict = lock_librenms_id_assignment(

@@ -60,6 +60,9 @@ class TestUnresolvedServerKeyVCLeak:
         member.virtual_chassis = vc
         member.vc_position = 1
         member.save()
+        # The master holds the mapping of the chassis.
+        vc.master = member
+        vc.save()
         map_device_to_librenms(member, VC_LIBRENMS_ID, server_key="default")
         return member
 

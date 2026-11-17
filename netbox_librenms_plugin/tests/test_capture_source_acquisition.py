@@ -60,18 +60,12 @@ def test_capture_replays_source_acquisition_including_a_vc_member(
     live_librenms, configure_librenms, recording_server, vc_member
 ):
     if vc_member:
-        _vc, (owner, subject) = make_virtual_chassis_members("capture-source-vc")
-        seed_mapping(owner, "default", own=5501)
-        seed_mapping(subject, "default", own=5502)
-        serve(live_librenms.server, 5502)
+        # The master holds the mapping of the chassis, so it is the subject of the capture.
+        _vc, (subject, _member) = make_virtual_chassis_members("capture-source-vc")
+        seed_mapping(subject, "default", own=5501)
     else:
         subject = seed_mapping(make_device("capture-source"), "default", own=5501)
     serve(live_librenms.server)
-    if vc_member:
-        live_librenms.server.register(
-            "/api/v0/devices/5501/links",
-            {"status": "ok", "links": [{"local_port_id": 7, "remote_device_id": 5502, "remote_port_id": 7}]},
-        )
     before = acquire(
         plan_acquisition(subject, server_key="default", resources=RESOURCES), include_serial=True, inventory_probes=True
     )
@@ -97,50 +91,40 @@ def test_capture_replays_source_acquisition_including_a_vc_member(
 
 
 @pytest.mark.django_db
-def test_capture_modal_keeps_the_vc_member_as_the_acquisition_subject(client, live_librenms):
-    from django.urls import reverse
-    from netbox_librenms_plugin.tests.conftest import make_superuser
-
-    _vc, (owner, subject) = make_virtual_chassis_members("capture-modal-vc")
-    seed_mapping(owner, "default", own=5501)
-    seed_mapping(subject, "default", own=5502)
-    serve(live_librenms.server, 5501)
-    serve(live_librenms.server, 5502)
-    live_librenms.server.ports_response(
-        5501,
-        [
-            {"port_id": 7, "ifName": "eth3", "ifType": "ethernetCsmacd"},
-            {"port_id": 8, "ifName": "eth4", "ifType": "ethernetCsmacd"},
-        ],
-    )
-    live_librenms.server.register(
-        "/api/v0/devices/5502/ip",
-        {"status": "ok", "addresses": [{"port_id": 17, "ipv4_address": "198.18.0.1", "ipv4_prefixlen": 24}]},
-    )
-    live_librenms.server.ports_response(5502, [{"port_id": 17, "ifName": "eth4", "ifType": "ethernetCsmacd"}])
-    client.force_login(make_superuser("capture-modal-vc-user"))
-
-    response = client.get(
-        reverse("plugins:netbox_librenms_plugin:capture_data_shape", kwargs={"device_id": subject.pk}),
-        {"server_key": "default"},
-    )
-
-    assert response.status_code == 200
+def test_capture_modal_captures_the_chassis_on_the_master_and_refuses_another_member(client, live_librenms):
     import json
 
-    recording = json.loads(response.context["recording_json"])
-    assert recording["meta"]["compressed_ports"] == {"from": 2, "to": 1}
-    addresses = next(body["addresses"] for key, body in recording["responses"].items() if key.endswith("/ip"))
-    member_ports = next(
-        body["ports"]
-        for key, body in recording["responses"].items()
-        if key.endswith("/ports") and key != f"GET /api/v0/devices/{recording['device_id']}/ports"
+    from django.urls import reverse
+    from django.utils.html import escape
+
+    from netbox_librenms_plugin.mapping_owner import NOT_OWNER_MESSAGE
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+
+    _vc, (master, member) = make_virtual_chassis_members("capture-modal-vc")
+    seed_mapping(master, "default", own=5501)
+    serve(live_librenms.server, 5501)
+    live_librenms.server.register(
+        "/api/v0/devices/5501/ip",
+        {"status": "ok", "addresses": [{"port_id": 7, "ipv4_address": "198.18.0.1", "ipv4_prefixlen": 24}]},
     )
+    client.force_login(make_superuser("capture-modal-vc-user"))
+    url = "plugins:netbox_librenms_plugin:capture_data_shape"
+
+    refused = client.get(
+        reverse(url, kwargs={"device_id": member.pk}), {"server_key": "default"}, HTTP_HX_REQUEST="true"
+    )
+    assert refused.status_code == 200
+    assert escape(NOT_OWNER_MESSAGE) in refused.content.decode()
+    assert live_librenms.server.requests == []
+
+    response = client.get(reverse(url, kwargs={"device_id": master.pk}), {"server_key": "default"})
+
+    assert response.status_code == 200
+    recording = json.loads(response.context["recording_json"])
+    addresses = next(body["addresses"] for key, body in recording["responses"].items() if key.endswith("/ip"))
     assert len(addresses) == 1
-    assert addresses[0]["port_id"] == member_ports[0]["port_id"]
     paths = {request["path"] for request in live_librenms.server.requests}
-    assert "/api/v0/devices/5502/ip" in paths
-    assert "/api/v0/devices/5501/ip" not in paths
+    assert "/api/v0/devices/5501/ip" in paths
     assert "/api/v0/inventory/5501/all" in paths
 
 
@@ -328,12 +312,7 @@ def test_capture_uses_the_owners_the_request_authorized_before_a_chassis_change(
 
     chassis, (owner, subject, hidden) = make_virtual_chassis_members("capture-planned-owner", count=3)
     seed_mapping(owner, "default", own=5501)
-    from django.core.cache import cache
-    from netbox_librenms_plugin.librenms_api import librenms_id_cache_key
-
-    cache.set(librenms_id_cache_key(subject, "default"), 5502, timeout=60)
     serve(live_librenms.server, 5501)
-    serve(live_librenms.server, 5502)
     user = make_user_with_perms(
         "capture-planned-owner", [("view", Device)], constraints={"pk__in": [owner.pk, subject.pk]}
     )
@@ -341,12 +320,10 @@ def test_capture_uses_the_owners_the_request_authorized_before_a_chassis_change(
     real_acquire = capture_module.acquire
 
     def move_identity_then_acquire(plan, **options):
-        assert {resource: planned.pk for resource, planned in plan.owners} == {
-            Resource.INTERFACES: owner.pk,
-            Resource.IP_ADDRESSES: subject.pk,
-            Resource.CABLES: owner.pk,
-            Resource.MODULES: owner.pk,
-        }
+        # The master is the capture subject and the owner of every resource.
+        assert {resource: planned.pk for resource, planned in plan.owners} == dict.fromkeys(
+            (Resource.INTERFACES, Resource.IP_ADDRESSES, Resource.CABLES, Resource.MODULES), owner.pk
+        )
         # A concurrent assignment changes future owner selection after this request's permission checks.
         seed_mapping(hidden, "default", own=5503)
         # Move the authorized owner out of the chassis. Its identity remains a usable source.
@@ -355,7 +332,7 @@ def test_capture_uses_the_owners_the_request_authorized_before_a_chassis_change(
 
     monkeypatch.setattr(capture_module, "acquire", move_identity_then_acquire)
     response = client.get(
-        reverse("plugins:netbox_librenms_plugin:capture_data_shape", kwargs={"device_id": subject.pk}),
+        reverse("plugins:netbox_librenms_plugin:capture_data_shape", kwargs={"device_id": owner.pk}),
         {"server_key": "default"},
     )
     assert response.status_code == 200

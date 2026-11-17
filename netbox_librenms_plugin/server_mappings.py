@@ -775,9 +775,47 @@ class MergeChange:
     winner: MappingChange
     donor: MappingChange
 
+    @property
+    def sides(self) -> tuple[MappingChange, ...]:
+        """Return the changes that persist together."""
+        return (self.winner, self.donor)
+
     def change_for(self, row) -> MappingChange | None:
         """Return the change of the merge side that *row* is, or None."""
-        return next((side for side in (self.winner, self.donor) if _is_target(row, side)), None)
+        return next((side for side in self.sides if _is_target(row, side)), None)
+
+
+@dataclass(frozen=True, eq=False)
+class ChassisMove:
+    """The master and member changes of one virtual chassis move. Only :func:`persist_merge` persists them, together."""
+
+    master: MappingChange
+    members: tuple[MappingChange, ...]
+
+    @property
+    def sides(self) -> tuple[MappingChange, ...]:
+        """Return the changes that persist together."""
+        return (self.master, *self.members)
+
+    def change_for(self, row) -> MappingChange | None:
+        """Return the change of the row that *row* is, or None."""
+        return next((side for side in self.sides if _is_target(row, side)), None)
+
+
+class MappingMoveRefused(ValueError):
+    """The mapping data of the chassis members cannot move to the master; the text names no object."""
+
+
+class MappingMoveConflict(MappingMoveRefused):
+    """The chassis master, or another member, holds a different value for a stored key of a member."""
+
+    def __init__(self, key):
+        self.key = key
+        if key == PREFERRED_SERVER_FIELD:
+            text = "The master and a member store different preferred servers."
+        else:
+            text = f"The master and a member store different LibreNMS mappings on server '{key}'."
+        super().__init__(f"{text} Correct one of the two values first.")
 
 
 def _stored_value(obj):
@@ -1415,6 +1453,49 @@ def merge_links(winner, donor, server: str, *, at: str | None = None) -> MergeCh
     )
 
 
+def _with_member_mapping(merged, stored):
+    """Return *merged*, the value for the chassis master, with the stored value of one member added."""
+    if _decode_stored_mapping(stored).container is ContainerStatus.INVALID:
+        raise MappingMoveRefused("A member stores a LibreNMS mapping with an invalid format. Repair it first.")
+    if not merged:
+        return copy.deepcopy(stored)
+    if _same_stored(merged, stored):
+        return merged
+    if not isinstance(merged, dict) or not isinstance(stored, dict):
+        raise MappingMoveRefused("A legacy LibreNMS ID combines with no other mapping. Convert it first.")
+    for key, value in stored.items():
+        if key in merged and not _same_stored(merged[key], value):
+            raise MappingMoveConflict(key)
+        merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def move_to_master(master, members) -> ChassisMove:
+    """
+    Build the move of the mapping data of *members* to the chassis *master*, and the release of each member.
+
+    Each stored key of a member (a server entry or the preferred server) goes to the master
+    unchanged. When the master or an earlier member stores the key, the values must be the same. A
+    legacy value moves only to a master that stores nothing. The move binds no new identity, so it
+    claims nothing, and its rows persist only together, through :func:`persist_merge`.
+
+    Raises:
+        MappingMoveConflict: Two values differ for one key.
+        MappingMoveRefused: A value has an invalid format, or a legacy value meets another value.
+
+    """
+    merged = copy.deepcopy(_stored_value(master))
+    if _decode_stored_mapping(merged).container is ContainerStatus.INVALID:
+        raise MappingMoveRefused("The master stores a LibreNMS mapping with an invalid format. Repair it first.")
+    for member in members:
+        merged = _with_member_mapping(merged, _stored_value(member))
+    group = object()
+    return ChassisMove(
+        master=_change(master, merged, group=group),
+        members=tuple(_change(member, None, group=group) for member in members),
+    )
+
+
 # Host changes: a change that removes or replaces a host ID clears that server's port IDs in its scope.
 
 
@@ -1498,37 +1579,56 @@ def stored_entry_digest(obj, server: str) -> str:
     return _canonical_digest(stored.get(require_server_key(server)) if isinstance(stored, dict) else stored)
 
 
-def lock_host_change_owner(model, pk):
+def lock_device_chassis(pk):
     """
-    Lock the rows that own a host change scope in the shared order, and return the locked object.
+    Lock Device *pk* and its virtual chassis in the shared order, and return the locked chassis and members.
 
-    A VM locks its own row. A Device locks its virtual chassis first, then the chassis members in pk
-    order (``views/sync/interfaces.py`` uses the same order). The caller holds the transaction.
-    Returns None when the object is gone. A join of the locked chassis waits for the commit: it
-    locks the chassis row for key share.
+    The virtual chassis row is locked first, then the chassis members in pk order
+    (``views/sync/interfaces.py`` uses the same order). The caller holds the transaction. A join of
+    the locked chassis waits for the commit: it locks the chassis row for key share.
+
+    Returns:
+        tuple: ``(chassis, members)``: the locked VirtualChassis, or None for a device outside a
+            chassis, and the locked chassis members in pk order. *pk* is a member while it exists.
 
     Raises:
         ChassisChanged: The device moved to another chassis between the read and the lock, so the
-            locks do not cover its scope. Only a new transaction can lock the new chassis.
+            locks do not cover its chassis. Only a new transaction can lock the new chassis.
 
     """
     from dcim.models import Device, VirtualChassis
 
-    if model is not Device:
-        return model.objects.select_for_update(of=("self",)).filter(pk=pk).order_by().first()
     chassis_id = Device.objects.filter(pk=pk).values_list("virtual_chassis_id", flat=True).first()
     member_ids = {pk}
+    chassis = None
     if chassis_id is not None:
-        VirtualChassis.objects.select_for_update().filter(pk=chassis_id).order_by().first()
+        chassis = VirtualChassis.objects.select_for_update().filter(pk=chassis_id).order_by().first()
         member_ids |= set(Device.objects.filter(virtual_chassis_id=chassis_id).values_list("pk", flat=True))
-    locked = {
-        device.pk: device
-        for device in Device.objects.select_for_update(of=("self",)).filter(pk__in=member_ids).order_by("pk")
-    }
-    row = locked.get(pk)
+    locked = list(Device.objects.select_for_update(of=("self",)).filter(pk__in=member_ids).order_by("pk"))
+    row = next((device for device in locked if device.pk == pk), None)
     if row is not None and row.virtual_chassis_id != chassis_id:
         raise recorded_conflict(ChassisChanged("The device moved to another virtual chassis. Refresh and try again."))
-    return row
+    # A member that left the chassis before the lock is locked, but it is not a member now.
+    return chassis, [device for device in locked if device.pk == pk or device.virtual_chassis_id == chassis_id]
+
+
+def lock_host_change_owner(model, pk):
+    """
+    Lock the rows that own a host change scope in the shared order, and return the locked object.
+
+    A VM locks its own row. A Device locks its virtual chassis first, then the chassis members, as
+    :func:`lock_device_chassis` does. Returns None when the object is gone.
+
+    Raises:
+        ChassisChanged: The device moved to another chassis between the read and the lock.
+
+    """
+    from dcim.models import Device
+
+    if model is not Device:
+        return model.objects.select_for_update(of=("self",)).filter(pk=pk).order_by().first()
+    _chassis, members = lock_device_chassis(pk)
+    return next((device for device in members if device.pk == pk), None)
 
 
 def _scope_members(obj) -> tuple:
@@ -1735,7 +1835,7 @@ def _enter_group(change) -> None:
     if change._group is None:
         return
     progress = _active_merge.get()
-    if progress is None or progress.change.winner._group is not change._group:
+    if progress is None or progress.change.sides[0]._group is not change._group:
         raise ValueError("A merge side persists only inside persist_merge() of its own merge.")
     if id(change) in progress.written:
         raise ValueError("A merge side persists only once.")
@@ -1789,21 +1889,21 @@ def _put_on(row, change) -> frozenset:
     return _put_stored_value(row, change._stored)
 
 
-def persist_merge(change: MergeChange, *, write: Callable[[], object]):
+def persist_merge(change: MergeChange | ChassisMove, *, write: Callable[[], object]):
     """
-    Run ``write()``, which saves the merge's rows, in one atomic group.
+    Run ``write()``, which saves the rows of a merge or of a chassis move, in one atomic group.
 
-    Both sides' mappings are checked before the first write. ``write`` saves each touched row once,
-    through :func:`persist_mapping` with ``change.change_for(row)`` for the two sides. Any exception
-    rolls the whole group back, so the donor never commits without the winner.
+    The mapping of each side is checked before the first write. ``write`` saves each touched row
+    once, through :func:`persist_mapping` with ``change.change_for(row)``. Any exception rolls the
+    whole group back, so no side commits without the others.
 
     Raises:
-        MappingChanged: A side's mapping changed after the merge was built.
+        MappingChanged: The mapping of a side changed after the change was built.
         RuntimeError: ``write`` did not persist each side exactly once.
 
     """
     with transaction.atomic():
-        for side in (change.winner, change.donor):
+        for side in change.sides:
             row = side._model.objects.select_for_update().get(pk=side._pk)
             if read_mapping(row) != side.before:
                 raise recorded_conflict(
@@ -1815,8 +1915,8 @@ def persist_merge(change: MergeChange, *, write: Callable[[], object]):
             result = write()
         finally:
             _active_merge.reset(token)
-        if progress.written != {id(change.winner), id(change.donor)}:
-            raise RuntimeError("A merge must save its winner and its donor once each.")
+        if progress.written != {id(side) for side in change.sides}:
+            raise RuntimeError("A merge must save each of its sides once.")
     return result
 
 

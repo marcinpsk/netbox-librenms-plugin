@@ -8213,20 +8213,21 @@ class TestAddAsOOBViewPost:
         }
 
     def test_oob_link_written_to_vc_sync_device_not_selected_member(self):
-        """An OOB link matched through a non-sync virtual-chassis member is stored on the resolved sync device."""
+        """An OOB link matched through a virtual-chassis member that is not the master is stored on the master."""
         from dcim.models import Device, VirtualChassis
 
-        from netbox_librenms_plugin.server_selection import get_librenms_sync_device
+        from netbox_librenms_plugin.mapping_owner import mapping_owner
 
         view = self._make_view()
 
         vc = VirtualChassis.objects.create(name="vc-oob-sync")
-        # Sync member: the ONLY member with a host librenms_id for this server key. It is priority 1 of
-        # get_librenms_sync_device. Position 1 so it also iterates first.
+        # The master: the ONLY member with a host librenms_id for this server key.
         sync_member = seed_mapping(make_device("vc-oob-sync-a"), self.server_key, own=10)
         sync_member.virtual_chassis = vc
         sync_member.vc_position = 1
         sync_member.save()
+        vc.master = sync_member
+        vc.save()
 
         # The user-selected member the modal matched as the OOB candidate: no host librenms_id
         # of its own, so it is NOT the sync device.
@@ -8235,8 +8236,8 @@ class TestAddAsOOBViewPost:
         selected_member.vc_position = 2
         selected_member.save()
 
-        # Ground truth: resolution really points from the selected member to the sync member.
-        assert get_librenms_sync_device(selected_member, server_key=self.server_key).pk == sync_member.pk
+        # Ground truth: resolution really points from the selected member to the master.
+        assert mapping_owner(selected_member).pk == sync_member.pk
 
         # Incoming OOB controller id 17 is distinct from host id 10.
         self._register_oob_device(17, "controller-node", serial=selected_member.serial, generic=True)
@@ -9273,7 +9274,7 @@ class TestMergeNetBoxDevicesViewOOBTransfer(_MergeViewHarness):
 
 
 def _two_member_vc(name, *, m1_cf=None):
-    """Create a real 2-member VirtualChassis (positions 1, 2). m1 becomes the sync device when it is the member holding the ``librenms_id``."""
+    """Create a real 2-member VirtualChassis (positions 1, 2) whose master m1 holds the ``librenms_id``."""
     from dcim.models import VirtualChassis
 
     vc = VirtualChassis.objects.create(name=name)
@@ -9287,12 +9288,14 @@ def _two_member_vc(name, *, m1_cf=None):
     m2.virtual_chassis = vc
     m2.vc_position = 2
     m2.save()
+    vc.master = m1
+    vc.save()
     return vc, m1, m2
 
 
 @pytest.mark.django_db
 class TestMergeNetBoxDevicesViewVCSyncDevice(_MergeViewHarness):
-    """MergeNetBoxDevicesView.post: when a merge candidate is a Virtual Chassis member, the LibreNMS link (host id / OOB) and the ``_migrated_to`` marker must be merged on the VC's sync device (``get_librenms_sync_device``), not the raw selected member. Writing to a non-sync member either split-brains a VC that already has a linked member, or leaves the donor's real link (on its sync sibling) uncleared."""
+    """MergeNetBoxDevicesView.post: when a merge candidate is a Virtual Chassis member, the LibreNMS link (host id / OOB) and the ``_migrated_to`` marker must be merged on the chassis master (``mapping_owner``), not the raw selected member. Writing to another member either split-brains a VC that already has a linked member, or leaves the donor's real link (on its master) uncleared."""
 
     def _run_merge(self, *, winner, donor):
         resp = self._post_merge(winner, donor)
@@ -11266,7 +11269,7 @@ class TestConflictActionsObjectScope:
 
     @staticmethod
     def _vc_pair(name, *, sync_own):
-        """Create a two-member chassis whose first member is the sync device."""
+        """Create a two-member chassis whose first member is the master and holds the mapping."""
         from dcim.models import VirtualChassis
 
         vc = VirtualChassis.objects.create(name=name)
@@ -11278,6 +11281,8 @@ class TestConflictActionsObjectScope:
         m2.virtual_chassis = vc
         m2.vc_position = 2
         m2.save()
+        vc.master = m1
+        vc.save()
         return m1, m2
 
     def test_add_as_oob_cannot_write_an_out_of_scope_vc_sync_device(self):

@@ -40,7 +40,7 @@ def _port(port_id, name, *, mac=""):
 
 def _seed(device, ports, oob_ports):
     """Store a snapshot of the host *ports* and the OOB controller's *oob_ports*, with the OOB link on the owner."""
-    owner = resource_owner(device, Resource.INTERFACES, SERVER_KEY)
+    owner = resource_owner(device, Resource.INTERFACES)
     linked = read_mapping(owner).has_oob(SERVER_KEY)
     if oob_ports and not linked:
         seed_mapping(owner, SERVER_KEY, oob=OOB_ID)

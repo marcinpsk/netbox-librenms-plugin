@@ -8,6 +8,8 @@ from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 EXEMPT_VIEWS = {
     "SetPreferredServerView": "the operator names the server",
     "EditServerMappingView": "the operator names the server and its IDs",
+    "MoveChassisMappingsView": "a repair of the chassis owner rule: it adds each stored value to the master and "
+    "refuses a value that differs, so it replaces no value",
     "AddDeviceToLibreNMSView": "writes LibreNMS, outside NetBox reconciliation",
     "UpdateDeviceLocationView": "writes LibreNMS, outside NetBox reconciliation",
     "SyncSiteLocationView": "writes LibreNMS, outside NetBox reconciliation",
