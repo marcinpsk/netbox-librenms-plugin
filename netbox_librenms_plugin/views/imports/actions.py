@@ -3321,15 +3321,10 @@ class AddAsOOBView(
             if matched_is_master:
                 _hold_device_row(existing_device.pk)
             # A row lock holds the selected member in the locked chassis until the commit.
-            if (
-                sync_device.pk != existing_device.pk
-                and Device.objects.select_for_update(of=("self",))
-                .filter(pk=existing_device.pk, virtual_chassis_id=chassis_id)
-                .values_list("pk", flat=True)
-                .first()
-                is None
-            ):
-                raise recorded_conflict(ChassisChanged(CHASSIS_CHANGED_MESSAGE))
+            if sync_device.pk != existing_device.pk:
+                locked_member = self.relock_scoped_row(Device, pk=existing_device.pk)
+                if locked_member is None or locked_member.virtual_chassis_id != chassis_id:
+                    raise recorded_conflict(ChassisChanged(CHASSIS_CHANGED_MESSAGE))
             if serial_match:
                 if not is_sole_holder(existing_device, libre_device.get("serial"), rules=serial_rules):
                     return _htmx_error_response(_SERIAL_MATCH_LOST)
