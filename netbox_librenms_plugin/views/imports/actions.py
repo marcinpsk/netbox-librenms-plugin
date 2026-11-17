@@ -17,6 +17,7 @@ from django.urls import reverse
 from django.utils.html import escape, format_html
 from django.utils.safestring import mark_safe
 from django.views import View
+from utilities.exceptions import PermissionsViolation
 
 from netbox_librenms_plugin.constants import OOB_TYPES
 from netbox_librenms_plugin.identity_replacement import (
@@ -488,6 +489,8 @@ def _write_mapping_in_scope(view, model, lookup, duplicate_message, *, field, ta
             raise
         logger.exception("%s: failed to save mapping: %s", type(view).__name__, exc)
         return _htmx_error_response("Error saving mapping. Please try again.")
+    except PermissionsViolation:
+        return _htmx_error_response("The changed mapping is outside your change permission constraints.")
 
 
 def _write_mapping_rows(view, model, lookup, duplicate_message, *, field, target, existing_mapping, create):
@@ -3783,9 +3786,9 @@ class AddAsOOBView(
                     ),
                     None,
                 )
-            except IPAddress.DoesNotExist:
-                # The row was there a moment ago, so the caller's change grant does not cover it,
-                # or it was deleted in the race.
+            except (IPAddress.DoesNotExist, PermissionsViolation):
+                # The caller's change grant does not cover the row before or after the re-home, or
+                # the row was deleted in the race.
                 return None, "permission_change"
             except _OobIpClaimed:
                 return None, "conflict"

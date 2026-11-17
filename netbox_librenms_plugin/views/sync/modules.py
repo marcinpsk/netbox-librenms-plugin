@@ -16,7 +16,7 @@ from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.utils.html import escape
 from django.views import View
-from utilities.exceptions import AbortRequest
+from utilities.exceptions import AbortRequest, PermissionsViolation
 
 from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE
 from netbox_librenms_plugin.interface_diff import type_change_refusal
@@ -3562,6 +3562,8 @@ class MoveModuleView(
                     )
                 except Module.DoesNotExist:
                     raise _ModuleActionRefused("Module no longer exists.") from None
+                except PermissionsViolation:
+                    raise _ModuleActionRefused(MOVE_OUTSIDE_CHANGE_SCOPE) from None
                 # A change constraint can name the old place, so the saved rows must still be in scope.
                 if not all_trees_in_scope(movable_modules(self), [module_subtree_serials(conflict_module.pk)]):
                     raise _ModuleActionRefused(MOVE_OUTSIDE_CHANGE_SCOPE)
@@ -4376,10 +4378,11 @@ class MarkBuiltInView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libr
             def apply(row):
                 row.part_number = plan.model
 
-            update_existing_row(self.restricted_queryset(DeviceType, "change").filter(pk=locked.pk), apply)
-            # A constrained grant decides on the saved row; a denial rolls the whole mark back.
-            if not saved_in_scope(locked, self.request.user, "change"):
-                raise _MarkBuiltInOutOfScope
+            try:
+                update_existing_row(self.restricted_queryset(DeviceType, "change").filter(pk=locked.pk), apply)
+            except PermissionsViolation:
+                # A constrained grant decides on the saved row; a denial rolls the whole mark back.
+                raise _MarkBuiltInOutOfScope from None
         if plan.rule is not None:
             # A rule edit after the policy read must not leave a mark that no rule covers.
             rule = (
