@@ -450,7 +450,7 @@ def test_a_host_change_whose_device_moved_before_the_lock_retries_and_is_stale(c
 
     # The refused attempt locked the old chassis; the new transaction locked the new one.
     assert chassis_locks == [owner.virtual_chassis_id, other_chassis.pk]
-    assert {"assumptions.membership.count", "assumptions.membership.digest"} & stale_paths(response, owner.name)
+    assert "assumptions.chassis" in stale_paths(response, owner.name)
     assert mapping_summary(_fresh(owner))["default"]["own"] == 4100
 
 
