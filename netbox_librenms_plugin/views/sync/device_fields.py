@@ -1345,6 +1345,7 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             return self._sync_url(object_type, pk)
 
         def convert(locked):
+            ensure_locked_mapping_owner(locked, chassis_id)
             # Re-check preconditions on the locked row (another admin may have
             # changed cf_value or serial between the initial read and the lock).
             locked_mapping = read_mapping(locked)
@@ -1369,6 +1370,7 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                 if not is_vm:
                     # The serial identity locks come before the row lock.
                     assignment_lock([incoming_serial], model=model, rules=serial_rules)
+                chassis_id = lock_owner_chassis(model, pk)
                 update_existing_row(self.restricted_queryset(model, "change").filter(pk=pk), convert)
         except model.DoesNotExist:
             messages.error(request, f"{model.__name__} no longer exists.")
