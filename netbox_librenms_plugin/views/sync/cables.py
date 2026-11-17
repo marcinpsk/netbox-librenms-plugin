@@ -56,6 +56,7 @@ from netbox_librenms_plugin.transactions import (
     TRY_AGAIN_MESSAGE,
     CommittedFollowUpError,
     TransactionConflict,
+    atomic_with_events,
     classify_conflict,
     run_transaction,
     saved_in_scope,
@@ -859,11 +860,13 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
     def _extend_breakout_cable(cable, b_terminations, request):
         """Append the new far end to the B side of *cable*; the existing far ends keep their connectors."""
         try:
-            with transaction.atomic():
+            with atomic_with_events():
                 cable.snapshot()
                 cable.b_terminations = list(b_terminations)
                 cable.full_clean()
                 cable.save()
+                if not saved_in_scope(cable, request.user, "change"):
+                    raise PermissionDenied("You may not change this cable.")
             return True
         except Exception as exc:
             if classify_conflict(exc):
@@ -901,6 +904,9 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             # The change record of the tag add takes its before-state from snapshot().
             cable.snapshot()
             cable.tags.add(self._get_provenance_tag(create=True, sync_settings=sync_settings))
+            # The row's transaction rolls back, and process_interface_sync reports the row as denied.
+            if not saved_in_scope(cable, self.request.user, "change"):
+                raise PermissionDenied("You may not change this cable.")
             return {"status": "tagged", "interface": display_name}
         if action == "create":
             if self.create_cable([local_term], [remote_term], self.request, sync_settings=sync_settings):
