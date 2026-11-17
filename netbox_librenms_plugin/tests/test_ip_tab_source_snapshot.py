@@ -111,7 +111,8 @@ def test_a_refresh_without_every_needed_response_fails_and_drops_the_older_snaps
     (error,) = _messages(response, messages.ERROR)
     assert error == "Failed to fetch IP addresses from LibreNMS."
     assert f"{failed_path} was not obtained" in caplog.text
-    assert failed_path.encode() not in response.content
+    # The path alone can match a NetBox URL of a device with that pk, so check the error detail text.
+    assert f"{failed_path} was not obtained".encode() not in response.content
     assert source_cache.read(device, Resource.IP_ADDRESSES, SERVER_KEY) is None
     assert not _snapshot_available(device)
     assert b"No IP address data loaded" in response.content
