@@ -16,6 +16,7 @@ from django.views import View
 from ipam.models import VLAN
 
 from netbox_librenms_plugin import source_cache
+from netbox_librenms_plugin.acquisition.coordinator import resource_owner
 from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.assessment.interfaces import assess_interfaces
 from netbox_librenms_plugin.constants import (
@@ -878,7 +879,11 @@ class BaseInterfaceTableView(
             interface_name_field = get_interface_name_field(request, obj)
         built = self.build_table(request, obj, interface_name_field, server_key, snapshot=snapshot)
         rows, snapshot, server_key = built.rows, built.snapshot, built.server_key
-        cache_ttl = source_cache.remaining_ttl(obj, Resource.INTERFACES, server_key, snapshot=snapshot) if snapshot is not None else None
+        cache_ttl = (
+            source_cache.remaining_ttl(obj, Resource.INTERFACES, server_key, snapshot=snapshot)
+            if snapshot is not None
+            else None
+        )
         cache_expiry = timezone.now() + timezone.timedelta(seconds=cache_ttl) if cache_ttl else None
         chassis = self.sync_view_scope(obj).chassis
         draft_urls = (
@@ -1344,7 +1349,7 @@ def current_interface_rows(request, obj, server_key, snapshot, entries):
         obj,
         name_field,
         server_key,
-        get_librenms_sync_device(obj, server_key=server_key) or obj,
+        resource_owner(obj, Resource.INTERFACES, server_key),
         snapshot,
         view.sync_view_scope(obj).chassis,
         show_ignored=show_ignored_interfaces(request),
