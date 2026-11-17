@@ -124,7 +124,9 @@ from netbox_librenms_plugin.platform_versions import (
     target_label,
 )
 from netbox_librenms_plugin.server_mappings import (
+    CHASSIS_CHANGED_MESSAGE,
     AmbiguousLibreNMSIdError,
+    ChassisChanged,
     ContainerStatus,
     SameServerIdentityConflict,
     attach_oob,
@@ -146,6 +148,7 @@ from netbox_librenms_plugin.transactions import (
     classify_conflict,
     lock_and_snapshot,
     outside_change_scope,
+    recorded_conflict,
     saved_in_scope,
     update_existing_row,
 )
@@ -3234,7 +3237,8 @@ class AddAsOOBView(
             matched_is_master = hold_matched and VirtualChassis.objects.filter(master_id=existing_device.pk).exists()
             if serial_match:
                 assignment_lock([libre_device.get("serial")], model=Device, rules=serial_rules)
-            chassis_id = lock_owner_chassis(Device, sync_device.pk)
+            # The owner comes from the chassis of the selected member, not from the owner read before the lock.
+            chassis_id = lock_owner_chassis(Device, existing_device.pk)
             if hold_matched and not matched_is_master:
                 _hold_device_row(existing_device.pk)
             try:
@@ -3264,6 +3268,8 @@ class AddAsOOBView(
                 )
             # The owner was read before the locks; a master change since then refuses the link.
             ensure_locked_mapping_owner(sync_device, chassis_id)
+            if chassis_id is None and sync_device.pk != existing_device.pk:
+                raise recorded_conflict(ChassisChanged(CHASSIS_CHANGED_MESSAGE))
             if matched_is_master:
                 _hold_device_row(existing_device.pk)
             if serial_match:

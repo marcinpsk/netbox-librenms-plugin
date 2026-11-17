@@ -528,6 +528,49 @@ def test_an_oob_link_refuses_a_master_that_lost_the_chassis_before_the_lock(clie
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("selected_leaves", [False, True], ids=["member-stays", "member-leaves"])
+def test_an_oob_link_refuses_a_master_that_left_the_chassis_before_the_lock(
+    client, servers, monkeypatch, selected_leaves
+):
+    from dcim.models import VirtualChassis
+
+    from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE
+    from netbox_librenms_plugin.views.imports import actions
+
+    chassis, (master, member, successor) = _chassis(f"owner-oob-left-{selected_leaves}", count=3)
+    seed_mapping(master, PRIMARY, own=7132)
+    member.serial = f"OWNER-OOB-LEFT-{selected_leaves}"
+    member.save()
+    servers.primary.device_info_response(
+        device_id=7133, hostname="owner-oob-left-controller", hardware="Test chassis", serial=member.serial, ip=""
+    )
+    servers.primary.vc_inventory_callable(7133, [], {})
+    resolve = actions.mapping_owner
+    leavers = [master.pk, member.pk] if selected_leaves else [master.pk]
+
+    def resolve_then_detach_the_master(device):
+        owner = resolve(device)
+        # A concurrent chassis edit detaches the master and makes another member the master.
+        Device.objects.filter(pk__in=leavers).update(virtual_chassis=None, vc_position=None)
+        VirtualChassis.objects.filter(pk=chassis.pk).update(master=successor)
+        return owner
+
+    monkeypatch.setattr(actions, "mapping_owner", resolve_then_detach_the_master)
+    client.force_login(make_superuser(f"owner-oob-left-{selected_leaves}"))
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:device_add_as_oob", args=[7133]),
+        {"server_key": PRIMARY, "existing_device_id": member.pk},
+        HTTP_HX_REQUEST="true",
+    )
+
+    assert escape(TRY_AGAIN_MESSAGE) in response.content.decode()
+    assert mapping_summary(_fresh(master)) == {PRIMARY: {"own": 7132}}
+    assert mapping_summary(_fresh(member)) == {}
+    assert mapping_summary(_fresh(successor)) == {}
+
+
+@pytest.mark.django_db
 def test_a_legacy_conversion_refuses_a_master_that_lost_the_master_role_during_the_lookup(client, servers, monkeypatch):
     from dcim.models import VirtualChassis
 
