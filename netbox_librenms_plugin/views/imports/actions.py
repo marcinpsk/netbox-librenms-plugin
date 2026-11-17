@@ -2788,6 +2788,9 @@ class DeviceConflictActionView(
                         locked_device.pk,
                     )
                     return _htmx_error_response("Unable to migrate the LibreNMS mapping. Please try again.")
+                if not saved_in_scope(locked_device, request.user, "change"):
+                    transaction.set_rollback(True)
+                    return _htmx_error_response(str(outside_change_scope(locked_device)))
             logger.info(f"Migrated legacy librenms_id on '{locked_device.name}' to {{{server_key!r}: {cf_locked_int}}}")
 
         else:
