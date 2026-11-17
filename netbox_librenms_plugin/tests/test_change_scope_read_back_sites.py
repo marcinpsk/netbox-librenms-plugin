@@ -16,7 +16,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_virtual_chassis,
     transactional_db_with_all_apps,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, stored_mapping_for_test
+from netbox_librenms_plugin.tests.mapping_fixtures import mapping_summary, seed_mapping
 from netbox_librenms_plugin.tests.view_test_helpers import (
     grant,
     make_request,
@@ -268,13 +268,13 @@ class TestUpdateModuleInterface:
         user = grant(user, "change", Interface, constraints={"module__isnull": True})
         request, queued = _post(UpdateModuleInterfaceView, device, fields, user, live_librenms)
         standalone.refresh_from_db()
-        return request, queued, standalone, stored_mapping_for_test(standalone)
+        return request, queued, standalone, mapping_summary(standalone)
 
     def test_a_bind_out_of_the_change_scope_is_rolled_back(self, live_librenms):
         request, queued, interface, mapping = self._update("rb-bind", live_librenms, port_id=8201)
 
         assert interface.module_id is None
-        assert mapping is None or "default" not in mapping
+        assert "default" not in mapping
         assert not _updates(interface).exists()
         assert ("interface", interface.pk) not in queued
         assert messages.WARNING in _levels(request)
@@ -485,9 +485,9 @@ class TestServerMappingWrites:
     def _owner(tag, constraints):
         from dcim.models import Device
 
-        owner = make_device(
-            tag, librenms_cf={"primary": 13601, "secondary": 13602, "retired": 13603, "_preferred_server": "primary"}
-        )
+        owner = seed_mapping(make_device(tag), "primary", own=13601, preferred=True, save=False)
+        seed_mapping(owner, "secondary", own=13602, save=False)
+        seed_mapping(owner, "retired", own=13603)
         return owner, make_user_with_perms(f"{tag}-user", [("change", Device)], constraints=constraints)
 
     def test_a_removal_that_moves_the_device_out_of_the_change_scope_is_rolled_back(self, client, flushed_events):
@@ -495,7 +495,7 @@ class TestServerMappingWrites:
 
         has_retired = {"custom_field_data__librenms_id__has_key": "retired"}  # nosemgrep: no-stored-mapping-access-orm
         owner, user = self._owner("rb-mapping-remove", has_retired)
-        before = stored_mapping_for_test(owner)
+        before = mapping_summary(owner)
         client.force_login(user)
 
         response = client.post(
@@ -505,7 +505,7 @@ class TestServerMappingWrites:
 
         assert response.status_code == 302
         owner.refresh_from_db()
-        assert stored_mapping_for_test(owner) == before
+        assert mapping_summary(owner) == before
         assert not _updates(owner).exists()
         assert ("device", owner.pk) not in flushed_events
         assert _response_levels(response) == [messages.ERROR]
@@ -516,14 +516,14 @@ class TestServerMappingWrites:
         preferred = "custom_field_data__librenms_id___preferred_server"  # nosemgrep: no-stored-mapping-access-orm
         prefers_primary = {preferred: "primary"}  # nosemgrep: no-stored-mapping-access-orm
         owner, user = self._owner("rb-mapping-prefer", prefers_primary)
-        before = stored_mapping_for_test(owner)
+        before = mapping_summary(owner)
         client.force_login(user)
 
         response = client.post(_preference_url(owner), {"object_type": "device", "server_key": "secondary"})
 
         assert response.status_code == 302
         owner.refresh_from_db()
-        assert stored_mapping_for_test(owner) == before
+        assert mapping_summary(owner) == before
         assert not _updates(owner).exists()
         assert ("device", owner.pk) not in flushed_events
         assert _response_levels(response) == [messages.ERROR]

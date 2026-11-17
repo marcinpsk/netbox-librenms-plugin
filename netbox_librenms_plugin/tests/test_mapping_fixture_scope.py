@@ -30,6 +30,7 @@ PINNED = {
     "test_acquisition_cables.py": (1, SHAPE),
     "test_acquisition_interfaces.py": (1, SHAPE),
     "test_acquisition_modules.py": (1, SHAPE),
+    "test_change_scope_read_back.py": (2, LEGACY),
     "test_coverage_actions.py": (43, f"{LEGACY}; {SHAPE}"),
     "test_coverage_api.py": (4, SHAPE),
     "test_coverage_base_views2.py": (1, SHAPE),
