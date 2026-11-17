@@ -211,7 +211,7 @@ def _ip_writer(tag, *, device_change=None, ip_change=None):
     from ipam.models import VRF, IPAddress
 
     user = make_user_with_perms(
-        f"{tag}-user", [("view", Device), ("view", Interface), ("view", VRF), ("add", IPAddress)]
+        f"{tag}-user", [("view", Device), ("view", Interface), ("view", VRF), ("view", IPAddress), ("add", IPAddress)]
     )
     user = grant(user, "change", Device, constraints=device_change)
     return grant(user, "change", IPAddress, constraints=ip_change)
@@ -374,7 +374,14 @@ def test_an_existing_interface_that_the_ip_tab_writes_out_of_the_change_scope_is
     )
     user = make_user_with_perms(
         "rb-ip-interface-user",
-        [("view", Device), ("view", Interface), ("add", Interface), ("add", IPAddress), ("change", IPAddress)],
+        [
+            ("view", Device),
+            ("view", Interface),
+            ("add", Interface),
+            ("view", IPAddress),
+            ("add", IPAddress),
+            ("change", IPAddress),
+        ],
     )
     client.force_login(grant(user, "change", Interface, constraints={"description": ""}))
 
