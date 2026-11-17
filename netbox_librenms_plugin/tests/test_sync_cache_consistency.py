@@ -357,17 +357,13 @@ def test_module_cache_status_reads_the_inventory_snapshot_like_the_tab(client, s
 
 @pytest.mark.django_db
 def test_module_cache_status_reports_tab_states_when_an_applicable_serial_rule_is_broken(client, settings):
-    """A broken serial rule makes the Modules snapshot unreadable, and the other tab states still answer."""
+    """A broken serial rule does not stop the tab states: the Modules status reads the source snapshot only."""
     from netbox_librenms_plugin.models import NormalizationRule
     from netbox_librenms_plugin.serial_identity import SerialRules
 
     _configure_servers(settings)
     device = make_device("cache-status-module-broken-rule", librenms_cf={"primary": {"id": 6409}})
-    cache.set(
-        _cache_key("inventory", device, "primary"),
-        module_inventory_cache_payload([], 6409, None, serial_context=SerialRules.load().for_device(device)),
-        timeout=300,
-    )
+    seed_modules_snapshot(device, [], server_key="primary")
     rule = NormalizationRule.objects.create(
         scope="serial",
         manufacturer=device.device_type.manufacturer,
@@ -386,7 +382,7 @@ def test_module_cache_status_reports_tab_states_when_an_applicable_serial_rule_i
     assert response.status_code == 200
     tabs = response.json()["tabs"]
     assert set(tabs) == {tab.value for tab in SyncCacheConsistency(device).applicable_tabs()}
-    assert tabs["modules"]["snapshot_available"] is False
+    assert tabs["modules"]["snapshot_available"] is True
 
 
 @pytest.mark.django_db
