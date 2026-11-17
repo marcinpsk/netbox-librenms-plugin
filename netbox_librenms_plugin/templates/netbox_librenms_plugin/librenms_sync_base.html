@@ -941,6 +941,12 @@ that may well be correct.
         The matching LibreNMS device is already linked to another object. Fix that link first.
         {% elif link.state == "unreachable" or link.state == "not_checked" %}
         LibreNMS could not be reached, so no match was checked. Reload the page to try again.
+        {% elif link.state == "conflict" %}
+        <span data-link-branch="conflict">
+            The primary addresses of this object match different LibreNMS devices
+            ({{ link.conflict_ids|join:", " }}), so none is proposed. Correct the primary IP addresses or their DNS
+            names in NetBox, or the duplicate devices in LibreNMS, then reload the page.
+        </span>
         {% elif link.state == "refused" %}
         <span data-link-branch="refused">
             The stored LibreNMS mapping of this object cannot be read, so no match was looked up. Repair the

@@ -6,6 +6,7 @@ from django.utils.html import format_html
 _LINK_STATE_TEXT = {
     "linked": ("text-success", "mdi-check-circle", "Linked"),
     "refused": ("text-warning", "mdi-alert-circle-outline", "Stored mapping needs repair"),
+    "conflict": ("text-warning", "mdi-alert-circle-outline", "Primary addresses match different LibreNMS devices"),
     "no_match": ("text-danger", "mdi-close-circle", "Not found"),
     "unreachable": ("text-secondary", "mdi-help-circle", "Not checked: LibreNMS could not be reached"),
     "not_checked": ("text-secondary", "mdi-help-circle", "Not checked"),

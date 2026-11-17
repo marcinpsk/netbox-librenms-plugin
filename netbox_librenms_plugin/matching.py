@@ -2,7 +2,7 @@
 Find the LibreNMS device that a NetBox device or VM matches. Matching proposes a link and writes nothing.
 
 The lookup always asks for both primary addresses, IPv4 first. Two addresses that name different devices
-are no match. When no address names a device, the lookup asks for the DNS name of each primary IP (IPv4
+are a conflict, not a match. When no address names a device, the lookup asks for the DNS name of each primary IP (IPv4
 first) and then the object name, and stops at the first that names a device. Each probe records its input
 and its result, so a caller can tell "LibreNMS has no such device" from "LibreNMS did not answer".
 """
@@ -31,7 +31,7 @@ class Candidate(StrEnum):
 
 
 # Every lookup asks for each of these; a later candidate is asked only when none of them matched.
-# The candidates of one pair are both asked; when they name two devices, the object matches none.
+# The candidates of one pair are both asked; when they name two devices, the lookup is a conflict.
 CANDIDATE_PAIRS = {
     Candidate.PRIMARY_IP4: frozenset({Candidate.PRIMARY_IP4, Candidate.PRIMARY_IP6}),
     Candidate.PRIMARY_IP6: frozenset({Candidate.PRIMARY_IP4, Candidate.PRIMARY_IP6}),
@@ -122,8 +122,17 @@ class Match:
 
 @dataclass(frozen=True)
 class NoMatch:
-    """LibreNMS answered every probe, and no one device matched: none did, or the primary addresses disagree."""
+    """LibreNMS answered every probe, and no probe found a device."""
 
+    inputs: LookupInputs
+    probes: tuple[Probe, ...]
+
+
+@dataclass(frozen=True)
+class Conflict:
+    """The two probes of one candidate pair found two different LibreNMS devices, so the object matches neither."""
+
+    librenms_ids: tuple[int, int]
     inputs: LookupInputs
     probes: tuple[Probe, ...]
 
@@ -186,7 +195,7 @@ def find_librenms_match(obj, api, *, deadline=None):
             that arrives after it.
 
     Returns:
-        Match | NoMatch | Unreachable | NotChecked: The answer, with every probe it sent.
+        Match | NoMatch | Conflict | Unreachable | NotChecked: The answer, with every probe it sent.
 
     """
     inputs = LookupInputs.of(obj)
@@ -207,8 +216,10 @@ def find_librenms_match(obj, api, *, deadline=None):
         if result is ProbeResult.MATCH:
             if found is None:
                 found = candidate, device
-            elif coerce_librenms_id(device.get("device_id")) != coerce_librenms_id(found[1].get("device_id")):
-                return NoMatch(inputs, tuple(probes))
+            elif (other := coerce_librenms_id(device.get("device_id"))) != (
+                first := coerce_librenms_id(found[1].get("device_id"))
+            ):
+                return Conflict((first, other), inputs, tuple(probes))
     if found is None:
         return NoMatch(inputs, tuple(probes))
     candidate, device = found

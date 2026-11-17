@@ -274,6 +274,7 @@ class BaseLibreNMSSyncView(
             "sysname": match.sysname if match is not None else None,
             "matched_by": CANDIDATE_LABELS[match.candidate] if match is not None else None,
             "owner_label": owner_label,
+            "conflict_ids": assessment.conflict_ids,
             "token": assessment.offer.token if assessment.offer is not None else None,
             "action_url": reverse(
                 "plugins:netbox_librenms_plugin:mapping_lifecycle",

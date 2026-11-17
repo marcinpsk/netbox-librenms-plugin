@@ -18,6 +18,8 @@
         {% endif %}
         {% elif link.state == "unreachable" or link.state == "not_checked" %}
         <span class="text-warning" data-link-branch="unreachable"><i class="mdi mdi-alert-circle-outline"></i> LibreNMS could not be reached</span>
+        {% elif link.state == "conflict" %}
+        <span class="text-warning" data-link-branch="conflict"><i class="mdi mdi-alert-circle-outline"></i> Primary addresses match different devices: LibreNMS IDs {{ link.conflict_ids|join:", " }}</span>
         {% elif link.state == "refused" %}
         <span class="text-warning" data-link-branch="refused"><i class="mdi mdi-alert-outline"></i> Stored mapping needs repair</span>
         {% else %}
