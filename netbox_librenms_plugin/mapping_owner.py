@@ -149,3 +149,34 @@ def ensure_mapping_owner(obj):
     if ownership.require().pk != obj.pk:
         raise MappingOwnerError(ownership, NOT_OWNER_MESSAGE)
     return obj
+
+
+def lock_owner_chassis(model, pk):
+    """
+    Lock the virtual chassis of Device *pk* for share before the caller locks the row; return the chassis id.
+
+    A master change then waits for the commit, so :func:`ensure_locked_mapping_owner` reads an owner
+    that holds until the commit. A VirtualMachine has no chassis: the call returns None.
+    """
+    from dcim.models import Device
+
+    from netbox_librenms_plugin.serial_identity import lock_chassis_of
+
+    return lock_chassis_of(pk) if model is Device else None
+
+
+def ensure_locked_mapping_owner(row, chassis_id):
+    """
+    Return the locked *row* when it holds its own mappings; *chassis_id* is what :func:`lock_owner_chassis` returned.
+
+    Raises:
+        ChassisChanged: The row moved to another chassis before its lock, so the chassis lock does not cover it.
+        MappingOwnerError: The virtual chassis has no owner, or another member is the owner.
+
+    """
+    from netbox_librenms_plugin.server_mappings import CHASSIS_CHANGED_MESSAGE, ChassisChanged
+    from netbox_librenms_plugin.transactions import recorded_conflict
+
+    if getattr(row, "virtual_chassis_id", None) != chassis_id:
+        raise recorded_conflict(ChassisChanged(CHASSIS_CHANGED_MESSAGE))
+    return ensure_mapping_owner(row)

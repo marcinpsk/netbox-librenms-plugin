@@ -436,3 +436,55 @@ def test_the_status_list_reports_each_chassis_outcome_and_discovers_only_on_the_
         assert 'data-owner-problem="misplaced"' in cells[pk]
     assert domain_state() == before
     assert _requests(servers) == []
+
+
+def _import_action(client, servers, device_id, target, action):
+    from netbox_librenms_plugin.tests.import_server_helpers import librenms_device
+
+    servers.primary.register(
+        f"/api/v0/devices/{device_id}", {"status": "ok", "devices": [librenms_device(device_id, target.name)]}
+    )
+    for suffix in ("", "/all"):
+        servers.primary.register(f"/api/v0/inventory/{device_id}{suffix}", {"status": "ok", "inventory": []})
+    return client.post(
+        reverse("plugins:netbox_librenms_plugin:device_conflict_action", kwargs={"device_id": device_id}),
+        {
+            "action": action,
+            "existing_device_id": target.pk,
+            "existing_device_type": "device",
+            "server_key": PRIMARY,
+            "use-sysname-toggle": "on",
+            "strip-domain-toggle": "off",
+        },
+        HTTP_HX_REQUEST="true",
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("action", ["link", "update", "update_serial"])
+@pytest.mark.parametrize(
+    ("has_master", "refusal"), [(True, NOT_OWNER_MESSAGE), (False, NO_MASTER_MESSAGE)], ids=["member", "no-master"]
+)
+def test_an_import_link_never_stores_an_id_on_a_member_that_is_not_the_master(
+    client, servers, action, has_master, refusal
+):
+    _vc, (_first, member) = _chassis(f"owner-import-{action}", master=has_master)
+    client.force_login(make_superuser(f"owner-import-{action}-{has_master}"))
+
+    response = _import_action(client, servers, 7100, member, action)
+
+    assert response.status_code == 200
+    assert escape(refusal) in response.content.decode()
+    assert mapping_summary(_fresh(member)) == {}
+    assert mapping_summary(_fresh(_first)) == {}
+
+
+@pytest.mark.django_db
+def test_an_import_link_stores_the_id_on_the_chassis_master(client, servers):
+    _vc, (master, _member) = _chassis("owner-import-master")
+    client.force_login(make_superuser("owner-import-master"))
+
+    response = _import_action(client, servers, 7101, master, "link")
+
+    assert response.status_code == 200
+    assert mapping_summary(_fresh(master)) == {PRIMARY: {"own": 7101}}
