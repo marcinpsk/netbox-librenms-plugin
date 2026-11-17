@@ -571,6 +571,45 @@ def test_an_oob_link_refuses_a_master_that_left_the_chassis_before_the_lock(
 
 
 @pytest.mark.django_db
+def test_an_oob_link_refuses_a_member_that_left_the_chassis_after_the_chassis_lock(client, servers, monkeypatch):
+    from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE
+    from netbox_librenms_plugin.views.imports import actions
+
+    _vc, (master, member) = _chassis("owner-oob-member-left")
+    seed_mapping(master, PRIMARY, own=7134)
+    member.serial = "OWNER-OOB-MEMBER-LEFT"
+    member.save()
+    servers.primary.device_info_response(
+        device_id=7135,
+        hostname="owner-oob-member-left-controller",
+        hardware="Test chassis",
+        serial=member.serial,
+        ip="",
+    )
+    servers.primary.vc_inventory_callable(7135, [], {})
+    lock = actions.lock_owner_chassis
+
+    def lock_then_move_the_member(model, pk):
+        chassis_id = lock(model, pk)
+        # The member leaves the chassis after its chassis is read and before the owner checks.
+        Device.objects.filter(pk=member.pk).update(virtual_chassis=None, vc_position=None)
+        return chassis_id
+
+    monkeypatch.setattr(actions, "lock_owner_chassis", lock_then_move_the_member)
+    client.force_login(make_superuser("owner-oob-member-left"))
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:device_add_as_oob", args=[7135]),
+        {"server_key": PRIMARY, "existing_device_id": member.pk},
+        HTTP_HX_REQUEST="true",
+    )
+
+    assert escape(TRY_AGAIN_MESSAGE) in response.content.decode()
+    assert mapping_summary(_fresh(master)) == {PRIMARY: {"own": 7134}}
+    assert mapping_summary(_fresh(member)) == {}
+
+
+@pytest.mark.django_db
 def test_a_legacy_conversion_refuses_a_master_that_lost_the_master_role_during_the_lookup(client, servers, monkeypatch):
     from dcim.models import VirtualChassis
 
