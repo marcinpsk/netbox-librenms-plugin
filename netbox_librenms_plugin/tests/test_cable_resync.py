@@ -225,62 +225,66 @@ class TestSerialRowResyncStatus:
 # ---------------------------------------------------------------------------
 # Adopt flow end-to-end through the real request stack
 # ---------------------------------------------------------------------------
+def untagged_serial_cable(tag):
+    """Seed one serial row whose cable exists untagged; return its port, the cable, a client, the URL and the form."""
+    from django.contrib.auth import get_user_model
+    from django.core.cache import cache
+    from django.test import Client
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+    acs, (csp,), _ = make_serial_device(f"acs-{tag}", csp_names=["ttyS9"])
+    _r, _, (cp,) = make_serial_device(f"router-{tag}", cp_names=["console"])
+    cable = cable_together(csp, cp)  # untagged: the pre-enrichment plugin cable case
+
+    link = {
+        "local_port": "ttyS9",
+        "local_port_id": f"serial:{csp.pk}-s",
+        "_source": "serial",
+        "device_id": acs.id,
+        "remote_device": f"router-{tag}",
+        "netbox_local_interface_id": csp.pk,
+        "netbox_remote_interface_id": cp.pk,
+        "can_create_cable": True,
+        "is_configured": True,
+        "sensor_id": 9,
+        "sensor_index_int": 9,
+    }
+    key_view = object.__new__(SyncCablesView)
+    cache.set(key_view.get_cache_key(acs, "links", SERVER_KEY), {"links": [link]}, timeout=300)
+
+    user = get_user_model().objects.create_superuser(f"{tag}-admin", f"{tag}@example.com", "pw")
+    client = Client()
+    client.force_login(user)
+    url = reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[acs.pk])
+    persist_test_server_mapping(acs, SERVER_KEY)
+    rendered = client.get(
+        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[acs.pk]),
+        {"tab": "cables", "server_key": SERVER_KEY},
+    )
+    record = next(iter(rendered.context["cable_sync"]["table"].rows)).record
+    row_id = record["row_id"]
+    data = {
+        "sync_one": row_id,
+        "server_key": SERVER_KEY,
+        f"expected_local_id_{row_id}": record["netbox_local_interface_id"],
+        f"expected_local_device_id_{row_id}": record["netbox_local_device_id"],
+        f"expected_remote_id_{row_id}": record["netbox_remote_interface_id"],
+        f"expected_remote_device_id_{row_id}": record["netbox_remote_device_id"],
+    }
+    return csp, cable, client, url, data
+
+
 @pytest.mark.django_db
 class TestCableAdoptHtmx:
     """Verify real HTTP sync tags a matched untagged cable without recreating it or showing a modal."""
 
     def test_sync_adopts_matched_untagged_cable(self):
         from dcim.models import Cable
-        from django.contrib.auth import get_user_model
-        from django.core.cache import cache
-        from django.test import Client
-        from django.urls import reverse
 
-        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
-
-        acs, (csp,), _ = make_serial_device("acs-adopt-e2e", csp_names=["ttyS9"])
-        _r, _, (cp,) = make_serial_device("router-adopt-e2e", cp_names=["console"])
-        cable = cable_together(csp, cp)  # untagged: the pre-enrichment plugin cable case
-
-        link = {
-            "local_port": "ttyS9",
-            "local_port_id": f"serial:{csp.pk}-s",
-            "_source": "serial",
-            "device_id": acs.id,
-            "remote_device": "router-adopt-e2e",
-            "netbox_local_interface_id": csp.pk,
-            "netbox_remote_interface_id": cp.pk,
-            "can_create_cable": True,
-            "is_configured": True,
-            "sensor_id": 9,
-            "sensor_index_int": 9,
-        }
-        key_view = object.__new__(SyncCablesView)
-        cache.set(key_view.get_cache_key(acs, "links", SERVER_KEY), {"links": [link]}, timeout=300)
-
-        user = get_user_model().objects.create_superuser("adopt-admin", "adopt@example.com", "pw")
-        client = Client()
-        client.force_login(user)
-        url = reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[acs.pk])
-        persist_test_server_mapping(acs, SERVER_KEY)
-        rendered = client.get(
-            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[acs.pk]),
-            {"tab": "cables", "server_key": SERVER_KEY},
-        )
-        record = next(iter(rendered.context["cable_sync"]["table"].rows)).record
-        row_id = record["row_id"]
-        resp = client.post(
-            url,
-            data={
-                "sync_one": row_id,
-                "server_key": SERVER_KEY,
-                f"expected_local_id_{row_id}": record["netbox_local_interface_id"],
-                f"expected_local_device_id_{row_id}": record["netbox_local_device_id"],
-                f"expected_remote_id_{row_id}": record["netbox_remote_interface_id"],
-                f"expected_remote_device_id_{row_id}": record["netbox_remote_device_id"],
-            },
-            HTTP_HX_REQUEST="true",
-        )
+        csp, cable, client, url, data = untagged_serial_cable("adopt-e2e")
+        resp = client.post(url, data=data, HTTP_HX_REQUEST="true")
 
         assert resp.status_code == 200
         content = resp.content.decode()

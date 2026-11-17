@@ -1,4 +1,4 @@
-"""A module write must leave each row it changes in the user's change scope, as NetBox's own edit views require."""
+"""A sync write must leave each row it changes in the user's change scope, as NetBox's own edit views require."""
 
 from contextlib import contextmanager
 from uuid import uuid4
@@ -14,6 +14,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_interface,
     make_module_type,
     make_virtual_chassis,
+    transactional_db_with_all_apps,
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, stored_mapping_for_test
 from netbox_librenms_plugin.tests.view_test_helpers import (
@@ -25,7 +26,27 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
 )
 from netbox_librenms_plugin.tests.view_test_helpers import post as view_post
 
+# The fixture of the breakout cable test below.
+from netbox_librenms_plugin.tests.test_cable_breakout import breakout_server  # noqa: F401
+
 pytestmark = pytest.mark.django_db
+
+
+@pytest.fixture
+def flushed_events(monkeypatch):
+    """Record the (model, pk) of each event that NetBox flushes at the end of a request, and flush it."""
+    from netbox import context_managers
+
+    flushed = set()
+    flush = context_managers.flush_events
+
+    def record(events):
+        flushed.update((event["object_type"].model, event["object_id"]) for event in events)
+        return flush(events)
+
+    monkeypatch.setattr(context_managers, "flush_events", record)
+    return flushed
+
 
 ENT_INDEX = 11
 
@@ -353,3 +374,109 @@ def test_an_interface_type_change_out_of_the_change_scope_drops_its_event(live_l
     assert not _updates(interface).exists()
     assert ("interface", interface.pk) not in queued
     assert messages.ERROR in _levels(request)
+
+
+def _changes(obj):
+    from core.models import ObjectChange
+    from django.contrib.contenttypes.models import ContentType
+
+    return ObjectChange.objects.filter(
+        changed_object_type=ContentType.objects.get_for_model(obj), changed_object_id=obj.pk
+    )
+
+
+def _response_levels(response):
+    return [m.level for m in messages.get_messages(response.wsgi_request)]
+
+
+# Transactional: the cable sync commits each row through run_transaction, which keeps the events only on a commit.
+@transactional_db_with_all_apps()
+def test_a_cable_tag_that_moves_the_cable_out_of_the_change_scope_is_rolled_back(flushed_events):
+    from dcim.models import Cable, ConsolePort, ConsoleServerPort, Device
+    from django.test import Client
+
+    from netbox_librenms_plugin.tests.test_cable_resync import untagged_serial_cable
+
+    _port, cable, _admin, url, data = untagged_serial_cable("rb-cable-tag")
+    user = make_user_with_perms(
+        "rb-cable-tag-user",
+        [("view", Device), ("view", Cable), ("add", Cable), ("view", ConsoleServerPort), ("view", ConsolePort)],
+    )
+    user = grant(user, "change", ConsoleServerPort)
+    user = grant(user, "change", ConsolePort)
+    user = grant(user, "change", Cable, constraints={"tags__isnull": True})
+    client = Client()
+    client.force_login(user)
+
+    response = client.post(url, data=data)
+
+    assert response.status_code == 302
+    assert not cable.tags.exists()
+    assert not _changes(cable).exists()
+    assert ("cable", cable.pk) not in flushed_events
+    assert _response_levels(response) == [messages.ERROR]
+
+
+@transactional_db_with_all_apps()
+@pytest.mark.usefixtures("breakout_server")
+def test_a_breakout_extend_that_moves_the_cable_out_of_the_change_scope_is_rolled_back(flushed_events):
+    from dcim.models import Cable, Interface
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.test_cable_breakout import _Breakout, _constrained_user
+    from netbox_librenms_plugin.tests.test_cable_overwrite import _rendered_sync_data
+
+    if not hasattr(Interface, "channel_id"):
+        pytest.skip("NetBox before 4.7 has no channel interfaces")
+    setup = _Breakout("rb-extend")
+    setup.seed(setup.row(1), setup.row(2))
+    setup.sync(1)
+    cable = setup.parent_cable()
+    logged = _changes(cable).count()
+    flushed_events.clear()
+    # The save of the extend moves last_updated past this bound, so the saved cable leaves the grant.
+    setup.client.force_login(
+        _constrained_user("rb-extend-user", cable_change={"last_updated__lte": cable.last_updated.isoformat()})
+    )
+    data = _rendered_sync_data(setup.client, setup.device, "102")
+
+    response = setup.client.post(
+        reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[setup.device.pk]), data
+    )
+
+    assert response.status_code == 302
+    assert setup.b_side(Cable.objects.get(pk=cable.pk)) == [(1, setup.far_ends[0])]
+    assert _changes(cable).count() == logged
+    assert ("cable", cable.pk) not in flushed_events
+    assert messages.ERROR in _response_levels(response)
+
+
+def test_a_rebind_that_moves_the_interface_out_of_the_change_scope_is_rolled_back(client, settings, flushed_events):
+    from dcim.models import Device, Interface
+
+    from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server
+    from netbox_librenms_plugin.tests.test_interface_name_owner_rebind import (
+        HOST_PORT,
+        STALE_PORT,
+        _binding,
+        _bound_interface,
+        _device,
+        _port,
+        _rebind,
+        _seed,
+    )
+
+    configure_default_librenms_server(settings)
+    device = _device("rb-rebind")
+    interface = _bound_interface(device, "eth0", STALE_PORT)
+    _seed(device, [_port(HOST_PORT, "eth0")])
+    user = make_user_with_perms("rb-rebind-user", [("view", Device), ("view", Interface)])
+    user = grant(user, "change", Interface, constraints={"custom_field_data__librenms_id__default": STALE_PORT})
+    client.force_login(user)
+
+    response = _rebind(client, device, HOST_PORT)
+
+    assert _binding(interface) == STALE_PORT
+    assert not _updates(interface).exists()
+    assert ("interface", interface.pk) not in flushed_events
+    assert _response_levels(response) == [messages.ERROR]
