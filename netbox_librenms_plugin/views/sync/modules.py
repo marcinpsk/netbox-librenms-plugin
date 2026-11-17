@@ -4224,7 +4224,8 @@ class MarkBuiltInView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libr
             return _modules_action_response(request, page_device)
 
         try:
-            with transaction.atomic():
+            # A refusal rolls back the part number and the rule, and their events.
+            with atomic_with_events():
                 plan = self._plan(page_device, server_key, request.POST, write=True)
                 self.required_object_permissions = {"POST": self._permissions(plan)}
                 if error := self.require_object_permissions("POST"):
