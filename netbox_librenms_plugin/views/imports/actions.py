@@ -145,7 +145,7 @@ from netbox_librenms_plugin.server_mappings import (
     promote_to_host,
     read_mapping,
 )
-from netbox_librenms_plugin.mapping_owner import mapping_owner
+from netbox_librenms_plugin.mapping_owner import ensure_locked_mapping_owner, lock_owner_chassis, mapping_owner
 from netbox_librenms_plugin.server_selection import parse_configured_server_key
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
 from netbox_librenms_plugin.transactions import (
@@ -554,12 +554,16 @@ def _write_mapping_rows(view, model, lookup, duplicate_message, *, field, target
 
 
 def _lock_librenms_id_assignment_target(view, target_model, target_pk, librenms_id, server_key):
-    """Lock the chassis of a Device target, one server/ID claim and the target; reject ownership across models."""
-    from dcim.models import Device
+    """
+    Lock the chassis of a Device target, one server/ID claim and the target; reject ownership across models.
+
+    Raises:
+        MappingOwnerError: The locked target does not hold the mappings of its virtual chassis.
+
+    """
     from virtualization.models import VirtualMachine as NetBoxVM
 
-    if target_model is Device:
-        lock_chassis_of(target_pk)
+    chassis_id = lock_owner_chassis(target_model, target_pk)
     try:
         locked_target, id_conflict = lock_librenms_id_assignment(
             librenms_id,
@@ -585,7 +589,7 @@ def _lock_librenms_id_assignment_target(view, target_model, target_pk, librenms_
             f"LibreNMS ID conflict: ID {librenms_id} is already assigned to {object_label} "
             f"'{conflict_name}' (ID: {id_conflict.pk})"
         )
-
+    ensure_locked_mapping_owner(locked_target, chassis_id)
     return locked_target, None
 
 

@@ -715,6 +715,9 @@ class MappingChanged(TransactionConflict):
     """The row's mapping is not the mapping that the change was built on."""
 
 
+CHASSIS_CHANGED_MESSAGE = "The device moved to another virtual chassis. Refresh and try again."
+
+
 class ChassisChanged(TransactionConflict):
     """The device moved to another virtual chassis between the read of its chassis and the lock."""
 
@@ -1607,7 +1610,7 @@ def lock_device_chassis(pk):
     locked = list(Device.objects.select_for_update(of=("self",)).filter(pk__in=member_ids).order_by("pk"))
     row = next((device for device in locked if device.pk == pk), None)
     if row is not None and row.virtual_chassis_id != chassis_id:
-        raise recorded_conflict(ChassisChanged("The device moved to another virtual chassis. Refresh and try again."))
+        raise recorded_conflict(ChassisChanged(CHASSIS_CHANGED_MESSAGE))
     # A member that left the chassis before the lock is locked, but it is not a member now.
     return chassis, [device for device in locked if device.pk == pk or device.virtual_chassis_id == chassis_id]
 
