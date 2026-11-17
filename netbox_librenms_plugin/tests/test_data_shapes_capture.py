@@ -584,6 +584,35 @@ def test_capture_records_verbatim_port_body(recording_server):
     assert captured_ports == seed["responses"][f"GET /api/v0/devices/{_SINGLE_RECORDING_ID}/ports"]
 
 
+@pytest.mark.parametrize("renamed", [False, True], ids=["agree", "renamed-between-reads"])
+def test_capture_refuses_ports_reads_that_disagree_outside_vlans(renamed, recording_server):
+    """The VLAN and plain ports reads share one recorded route, so a port that changed between them is refused."""
+    from copy import deepcopy
+
+    seed = _with_empty_inventory_source(load_recording("cisco-lag-and-subinterface"))
+    server, api = recording_server(seed)
+    ports_path = f"/api/v0/devices/{_SINGLE_RECORDING_ID}/ports"
+    status, vlan_body = server.routes[f"GET {ports_path}"]
+    vlan_body["ports"][0]["vlans"] = [{"vlan": 7}]
+    plain_body = deepcopy(vlan_body)
+    for port in plain_body["ports"]:
+        port.pop("vlans", None)
+    if renamed:
+        plain_body["ports"][0]["ifName"] += "-renamed"
+
+    def _ports(method, path, query, headers, body):
+        return status, vlan_body if query.get("with") == ["vlans"] else plain_body
+
+    server.register(ports_path, _ports, method="GET")
+    plan = plan_acquisition(_subject(api, _SINGLE_RECORDING_ID), server_key=api.server_key, resources=CAPTURE_RESOURCES)
+
+    if renamed:
+        with pytest.raises(RuntimeError, match="retry"):
+            capture_device_recording(plan)
+    else:
+        assert capture_device_recording(plan)["responses"][f"GET {ports_path}"] == vlan_body
+
+
 def test_capture_mirrors_inventory_all_fallback_when_server_ignores_filters(recording_server):
     """A server that returns empty filtered inventory but populates /all must still capture the VC."""
     root = [{"entPhysicalIndex": 1, "entPhysicalClass": "stack", "entPhysicalContainedIn": 0}]
