@@ -1994,6 +1994,14 @@ rules:
               $ROW = <... $MANAGER.restrict($USER, "change") ...>
               ...
               $ROW.save(...)
+          - pattern: |
+              $ROW = <... $VIEW.restricted_queryset($MODEL, "change") ...>
+              ...
+              persist_mapping($ROW, ...)
+          - pattern: |
+              $ROW = <... $MANAGER.restrict($USER, "change") ...>
+              ...
+              persist_mapping($ROW, ...)
       - pattern-not-inside: |
           def $F(...):
             ...
