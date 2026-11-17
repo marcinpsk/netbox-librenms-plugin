@@ -358,3 +358,58 @@ def test_a_device_type_mapping_out_of_the_mapping_change_scope_is_rolled_back(cl
     mapping.refresh_from_db()
     assert mapping.netbox_device_type_id == current.pk
     assert _changes(mapping) == []
+
+
+# ---------------------------------------------------------------------------
+# write_interface_row: the IP tab writes an existing interface for an address
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_an_existing_interface_that_the_ip_tab_writes_out_of_the_change_scope_is_rolled_back(client, settings):
+    from dcim.models import Device, Interface
+    from django.core.cache import cache
+    from ipam.models import IPAddress
+
+    from netbox_librenms_plugin.sync_cache import TAB_SPECS, SyncTab, sync_snapshot_key
+    from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server
+    from netbox_librenms_plugin.tests.interface_sync_post_helpers import sync_port
+
+    configure_default_librenms_server(settings)
+    device = make_device("rb-ip-interface", librenms_cf={SERVER_KEY: {"id": 7331}})
+    interface = make_interface(device, "eth0")
+    cache.set(
+        sync_snapshot_key(device, TAB_SPECS[SyncTab.IP_ADDRESSES].data_type, SERVER_KEY),
+        {
+            # No interface name in the row: the address finds its interface through the port.
+            "ip_addresses": [
+                {"ip_address": "198.18.73.31", "prefix_length": 24, "ip_with_mask": "198.18.73.31/24", "port_id": 9331}
+            ],
+            "mgmt_ip": "",
+            "ports_by_id": {9331: sync_port(9331, "eth0", alias="uplink")},
+            "interface_name_field": "ifName",
+        },
+        timeout=300,
+    )
+    user = make_user_with_perms(
+        "rb-ip-interface-user",
+        [("view", Device), ("view", Interface), ("add", Interface), ("add", IPAddress), ("change", IPAddress)],
+    )
+    client.force_login(grant(user, "change", Interface, constraints={"description": ""}))
+
+    response = client.post(
+        _ip_sync_url(device),
+        {
+            "server_key": SERVER_KEY,
+            "create-missing-interfaces-toggle": "on",
+            "select": ["198.18.73.31/24"],
+            "vrf_198.18.73.31/24": "",
+        },
+    )
+
+    assert response.status_code == 302
+    interface.refresh_from_db()
+    assert interface.description == ""
+    assert not IPAddress.objects.filter(address="198.18.73.31/24").exists()
+    assert _changes(interface) == []
+    assert len(_errors(response)) == 1
