@@ -1,8 +1,8 @@
 """
 Concurrency tests for VLAN synchronization.
 
-Global VIDs are serialized by an advisory lock. The rebuild locks the chosen group and the target
-VLAN rows before it reads them, so a change that commits while it waits makes the approval stale.
+Global VIDs are serialized by an advisory lock. The rebuild locks the subject device, the chosen group
+and the target VLAN rows before it reads them, so a change that commits while it waits makes the approval stale.
 """
 
 from functools import partial
@@ -30,6 +30,7 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
     post,
 )
 from netbox_librenms_plugin.tests.vlan_intent_helpers import assessed_tokens
+from netbox_librenms_plugin.transactions import lock_and_snapshot
 
 
 class _CapturedQueries:
@@ -298,8 +299,11 @@ def test_a_target_change_committed_while_the_writer_waits_for_its_lock_is_stale(
 
     with bounded_executor(max_workers=1) as executor:
         with transaction.atomic():
-            # The competitor holds the lock the writer takes for this target: the VLAN row, or the group row for a create.
-            if vlan is not None:
+            # The competitor holds the lock the writer takes for this change: the device row for a change of the
+            # device, the VLAN row, or the group row for a create.
+            if change in {"device_type", "remap", "unmap"}:
+                lock_and_snapshot(Device.objects.filter(pk=device.pk))
+            elif vlan is not None:
                 VLAN.objects.select_for_update().filter(pk=vlan.pk).order_by().first()
             else:
                 VLANGroup.objects.select_for_update().filter(pk=group.pk).first()
@@ -316,7 +320,10 @@ def test_a_target_change_committed_while_the_writer_waits_for_its_lock_is_stale(
                     scope=NormalizationRule.SCOPE_VLAN_NAME, match_pattern=r"^librenms-name$", replacement="ruled-name"
                 )
             elif change == "source":
-                _seed_grouped_vid(device, 61, "refreshed-name")
+                # A refresh stores a new snapshot only; the device row stays as it is.
+                seed_source_snapshot(
+                    device, Resource.VLANS, "default", vlans=[{"vlan_vlan": 61, "vlan_name": "refreshed-name"}]
+                )
             elif change == "expire":
                 source_cache.delete(device, Resource.VLANS, "default")
             elif change == "device_type":
@@ -343,6 +350,56 @@ def test_a_target_change_committed_while_the_writer_waits_for_its_lock_is_stale(
             "unmap": ["old-name"],
         }[change]
     )
+
+
+@pytest.mark.django_db(
+    transaction=True,
+    # Explicit available apps make Django use cascade-aware transaction cleanup.
+    # This is required when another installed plugin has M2M tables outside the default flush list.
+    available_apps=[app.name for app in apps.get_app_configs()],
+)
+def test_an_interface_sync_that_holds_the_device_and_assigns_the_vlan_does_not_deadlock_the_rename():
+    """
+    The interface sync locks its device, then its VLAN assignment takes a key-share lock on the VLAN row.
+
+    The rename locks the device before the VLAN row, so the two writers wait in one order and both commit.
+    """
+    from dcim.models import Interface
+    from django.db import transaction
+    from ipam.models import VLAN, VLANGroup
+
+    device = make_device("vlan-lock-order", librenms_cf={"default": {"id": 42}})
+    interface = Interface.objects.create(device=device, name="eth0", type="1000base-t")
+    group = VLANGroup.objects.create(name="Lock-Order", slug="lock-order")
+    vlan = VLAN.objects.create(vid=71, group=group, name="old-name", status="active")
+    user = _grouped_vlan_user("vlan-lock-order-user")
+    _seed_grouped_vid(device, 71, "librenms-name")
+    token = assessed_tokens(device, user, choices={71: group.pk})[71]
+    backend_pids = Queue()
+
+    def sync_as_caller():
+        close_old_connections()
+        try:
+            connection.ensure_connection()
+            backend_pids.put(connection.connection.info.backend_pid)
+            return _drive_grouped_sync(device, get_user_model().objects.get(pk=user.pk), token)
+        finally:
+            close_old_connections()
+
+    with bounded_executor(max_workers=1) as executor:
+        with transaction.atomic():
+            list(Device.objects.select_for_update(of=("self",)).filter(pk=device.pk))
+            syncing = executor.submit(sync_as_caller)
+            _wait_until_blocked(backend_pids.get(timeout=5), syncing)
+            # update(), not save(): the save signal clears the device's snapshots on commit, in a race with the sync.
+            Interface.objects.filter(pk=interface.pk).update(mode="access", untagged_vlan=vlan)
+        recorded = syncing.result(timeout=20)
+
+    joined = " || ".join(text for _level, text in recorded)
+    assert any(level == "success" for level, _text in recorded), joined
+    assert not any(level == "error" for level, _text in recorded), joined
+    assert list(VLAN.objects.filter(vid=71).values_list("name", flat=True)) == ["librenms-name"]
+    assert Interface.objects.get(pk=interface.pk).untagged_vlan_id == vlan.pk
 
 
 @pytest.mark.django_db(

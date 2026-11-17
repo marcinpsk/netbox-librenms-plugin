@@ -38,6 +38,7 @@ from netbox_librenms_plugin.views.mixins import (
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
     VlanAssignmentMixin,
+    relock_scoped_row,
 )
 
 VLAN_SYNC_POLICY = intent.RoutePolicy(
@@ -245,6 +246,8 @@ class SyncVLANsView(
 
     def _rebuild(self, approved, *, obj):
         """Lock the scope of every approved VLAN operation and rebuild each one from current state."""
+        # Device first: a mapping change waits for these writes, and an interface sync locks its device before its VLANs.
+        relock_scoped_row(Device, pk=obj.pk)
         _acquire_global_vlan_locks(operation.identity.vid for operation in approved if operation.choices.group is None)
         # The group row lock keeps a chosen group, and the absence of a VID in it, until the writes commit.
         group_pks = {operation.choices.group for operation in approved} - {None}
