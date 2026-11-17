@@ -465,3 +465,95 @@ def test_an_import_conflict_action_out_of_the_change_scope_is_rolled_back(
     assert read_mapping(device).own_id(SERVER_KEY) is None
     assert _changes(device) == []
     assert flushed_events == []
+
+
+# ---------------------------------------------------------------------------
+# The move-to-winner views of a migrated donor
+# ---------------------------------------------------------------------------
+
+
+def _migrated_pair(tag):
+    """Return a donor device that is marked as migrated to a winner device, and the winner."""
+    from netbox_librenms_plugin.server_mappings import mark_migrated
+    from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
+
+    donor, winner = make_device(f"{tag}-donor"), make_device(f"{tag}-winner")
+    apply_mapping_change(donor, mark_migrated(donor, winner.pk, SERVER_KEY))
+    donor.save(update_fields=["custom_field_data"])
+    return donor, winner
+
+
+def _post_move(client, name, *args):
+    return client.post(
+        reverse(f"plugins:netbox_librenms_plugin:{name}", args=args), {"server_key": SERVER_KEY}, HTTP_HX_REQUEST="true"
+    )
+
+
+def _assert_refused(response):
+    assert (response.status_code, response["HX-Reswap"]) == (200, "none")
+    assert "HX-Refresh" not in response.headers
+
+
+@pytest.mark.django_db
+def test_an_interface_move_out_of_the_interface_change_scope_is_rolled_back(client, flushed_events):
+    from dcim.models import Device, Interface
+
+    donor, _winner = _migrated_pair("rb-move-interface")
+    interface = make_interface(donor, "Ethernet1")
+    user = make_user_with_perms("rb-move-interface-user", [("change", Device)])
+    client.force_login(grant(user, "change", Interface, constraints={"device__name": donor.name}))
+
+    response = _post_move(client, "interface_move_to_winner", interface.pk)
+
+    _assert_refused(response)
+    interface.refresh_from_db()
+    assert interface.device_id == donor.pk
+    assert _changes(interface) == []
+    assert flushed_events == []
+
+
+@pytest.mark.django_db
+def test_an_ip_move_out_of_the_ip_change_scope_is_rolled_back(client, flushed_events):
+    from dcim.models import Device
+    from ipam.models import IPAddress
+
+    from netbox_librenms_plugin.tests.conftest import make_ip
+
+    donor, winner = _migrated_pair("rb-move-ip")
+    donor_interface = make_interface(donor, "Ethernet1")
+    make_interface(winner, "Ethernet1")
+    address = make_ip("198.18.73.51/24", assigned_object=donor_interface)
+    user = make_user_with_perms("rb-move-ip-user", [("change", Device)])
+    client.force_login(grant(user, "change", IPAddress, constraints={"assigned_object_id": donor_interface.pk}))
+
+    response = _post_move(client, "ipaddress_move_to_winner", address.pk)
+
+    _assert_refused(response)
+    address.refresh_from_db()
+    assert address.assigned_object == donor_interface
+    assert _changes(address) == []
+    assert flushed_events == []
+
+
+@pytest.mark.django_db
+def test_a_device_ip_transfer_out_of_the_device_change_scope_is_rolled_back(client, flushed_events):
+    from dcim.models import Device
+
+    from netbox_librenms_plugin.tests.conftest import ip_on
+
+    donor, winner = _migrated_pair("rb-transfer")
+    address = ip_on(winner, "198.18.73.61/24", "mgmt0")
+    Device.objects.filter(pk=donor.pk).update(primary_ip4=address)
+    user = make_user_with_perms("rb-transfer-user", [])
+    # The winner may be changed only while it has no primary IPv4.
+    scope = [{"name": donor.name}, {"name": winner.name, "primary_ip4__isnull": True}]
+    client.force_login(grant(user, "change", Device, constraints=scope))
+
+    response = _post_move(client, "device_transfer_ip", donor.pk, "primary4")
+
+    _assert_refused(response)
+    donor.refresh_from_db()
+    winner.refresh_from_db()
+    assert (donor.primary_ip4_id, winner.primary_ip4_id) == (address.pk, None)
+    assert _changes(donor) == _changes(winner) == []
+    assert flushed_events == []
