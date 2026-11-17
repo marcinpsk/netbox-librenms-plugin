@@ -560,10 +560,18 @@ def _lock_chassis(model, pk, actor, source):
         _Stop: The binding changed, or the actor may not change every member.
 
     """
+    from netbox_librenms_plugin.mapping_owner import lock_owner_chassis, mapping_ownership
+
+    # The chassis row decides the facts source: share-lock it before the member rows.
+    lock_owner_chassis(model, pk)
     # Pk order, so two chassis applications take the member locks in the same order.
     members = model.objects.filter(virtual_chassis_id=source.chassis_id).order_by("pk").select_for_update()
     pks = tuple(members.values_list("pk", flat=True))
     if pk not in pks or source.source_pk not in pks:
+        raise _Stop(PlatformOutcome(OutcomeStatus.STALE, PlatformReason.CHASSIS_CHANGED))
+    # The facts were read from the chassis owner; a master change since then makes them stale.
+    owner = mapping_ownership(model.objects.get(pk=pk)).owner
+    if owner is None or owner.pk != source.source_pk:
         raise _Stop(PlatformOutcome(OutcomeStatus.STALE, PlatformReason.CHASSIS_CHANGED))
     if model.objects.restrict(actor, "change").filter(pk__in=pks).count() != len(pks):
         raise _Stop(PlatformOutcome(OutcomeStatus.BLOCKED, PlatformReason.CHASSIS_MEMBER_DENIED))

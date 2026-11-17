@@ -645,6 +645,48 @@ def test_a_merge_waits_for_a_master_change_of_the_donor_chassis_and_merges_nothi
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("view_name", ["update_device_platform", "create_and_assign_platform"])
+def test_a_chassis_platform_write_is_stale_when_the_master_changes_during_the_lookup(
+    client, servers, monkeypatch, view_name
+):
+    from dcim.models import VirtualChassis
+
+    from netbox_librenms_plugin.tests.test_platform_version_tracking_views import _platform, _tracking
+    from netbox_librenms_plugin.views.sync.device_fields import CreateAndAssignPlatformView, UpdateDevicePlatformView
+
+    _tracking(False)
+    if view_name == "update_device_platform":
+        # The update applies an existing OS platform; the create makes it.
+        _platform("junos")
+    chassis, (master, successor) = _chassis(f"owner-platform-{view_name}")
+    seed_mapping(master, PRIMARY, own=7300)
+    servers.primary.device_info_response(device_id=7300, hostname=master.name, os="junos", version="21.2R3")
+    view = UpdateDevicePlatformView if view_name == "update_device_platform" else CreateAndAssignPlatformView
+    read = view.get_live_device_info
+
+    def read_then_change_the_master(self, librenms_id):
+        answer = read(self, librenms_id)
+        # A concurrent chassis edit makes another member the master after the facts were read.
+        VirtualChassis.objects.filter(pk=chassis.pk).update(master=successor)
+        return answer
+
+    monkeypatch.setattr(view, "get_live_device_info", read_then_change_the_master)
+    client.force_login(make_superuser(f"owner-platform-{view_name}"))
+    data = {"server_key": PRIMARY}
+    if view_name == "create_and_assign_platform":
+        data |= {
+            "platform_name": "junos",
+            "librenms_os": "junos",
+            "manufacturer": str(master.device_type.manufacturer_id),
+        }
+
+    response = client.post(reverse(f"plugins:netbox_librenms_plugin:{view_name}", kwargs={"pk": master.pk}), data)
+
+    assert "The virtual chassis changed after LibreNMS was read." in " ".join(message_texts(response))
+    assert [_fresh(device).platform for device in (master, successor)] == [None, None]
+
+
+@pytest.mark.django_db
 def test_a_legacy_conversion_refuses_a_master_that_lost_the_master_role_during_the_lookup(client, servers, monkeypatch):
     from dcim.models import VirtualChassis
 
