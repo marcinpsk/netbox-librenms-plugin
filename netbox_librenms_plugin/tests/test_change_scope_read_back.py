@@ -413,3 +413,55 @@ def test_an_existing_interface_that_the_ip_tab_writes_out_of_the_change_scope_is
     assert not IPAddress.objects.filter(address="198.18.73.31/24").exists()
     assert _changes(interface) == []
     assert len(_errors(response)) == 1
+
+
+# ---------------------------------------------------------------------------
+# _save_device: the import conflict actions
+# ---------------------------------------------------------------------------
+
+
+def _serve_import_device(server, device_id, hostname, serial):
+    """Serve one LibreNMS device for the import validation."""
+    from netbox_librenms_plugin.tests.import_server_helpers import librenms_device
+
+    payload = {**librenms_device(device_id, hostname), "serial": serial}
+    server.register(f"/api/v0/devices/{device_id}", {"status": "ok", "devices": [payload]})
+    for suffix in ("", "/all"):
+        server.register(f"/api/v0/inventory/{device_id}{suffix}", {"status": "ok", "inventory": []})
+
+
+def _post_conflict_action(client, device_id, device, action):
+    return client.post(
+        reverse("plugins:netbox_librenms_plugin:device_conflict_action", kwargs={"device_id": device_id}),
+        {
+            "action": action,
+            "existing_device_id": device.pk,
+            "existing_device_type": "device",
+            "server_key": SERVER_KEY,
+            "use-sysname-toggle": "on",
+            "strip-domain-toggle": "off",
+        },
+        HTTP_HX_REQUEST="true",
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("action", ["sync_name", "link"])
+def test_an_import_conflict_action_out_of_the_change_scope_is_rolled_back(
+    client, live_librenms, flushed_events, action
+):
+    from netbox_librenms_plugin.server_mappings import read_mapping
+
+    device = make_device(f"managed-rb-{action}", serial=f"RB-SN-{action}")
+    _serve_import_device(live_librenms.server, 7341, f"other-rb-{action}", f"RB-SN-{action}")
+    client.force_login(_device_writer(f"rb-{action}", MANAGED))
+
+    response = _post_conflict_action(client, 7341, device, action)
+
+    device.refresh_from_db()
+    assert device.name == f"managed-rb-{action}"
+    assert (response.status_code, response["HX-Reswap"]) == (200, "none")
+    # The link saves the mapping with the name, so the refusal rolls the mapping back too.
+    assert read_mapping(device).own_id(SERVER_KEY) is None
+    assert _changes(device) == []
+    assert flushed_events == []

@@ -55,7 +55,7 @@ ALLOWED = [
     ),
     (
         "views/imports/actions.py",
-        "_save_device.write",
+        "_write_device_row.write",
         "row",
         NOT_A_LITERAL,
         "The callers pass Device and VirtualMachine columns, which have no _name, and the mapping "

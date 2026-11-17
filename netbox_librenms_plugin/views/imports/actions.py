@@ -147,6 +147,8 @@ from netbox_librenms_plugin.transactions import (
     atomic_with_events,
     classify_conflict,
     lock_and_snapshot,
+    outside_change_scope,
+    saved_in_scope,
     update_existing_row,
 )
 from netbox_librenms_plugin.utils import (
@@ -836,7 +838,6 @@ def _targeted_device_checks(row, update_fields):
     return None
 
 
-@transaction.atomic
 def _save_device(device, update_fields: list[str], request=None, mapping=None) -> HttpResponse | None:
     """
     Save the columns *update_fields* of a Device or VirtualMachine row, returning an HttpResponse on failure or None on success.
@@ -847,7 +848,9 @@ def _save_device(device, update_fields: list[str], request=None, mapping=None) -
     untouched fields would block legitimate updates. The row is read again under its lock, its
     before-state is recorded, and the callers' values of *update_fields* are copied to it.
     *mapping*, a mapping change that the caller built on its locked row, is persisted in the same
-    save: its identities are claimed again and their owners checked first.
+    save: its identities are claimed again and their owners checked first. After the save, the row
+    must be in the change scope of the request's user, as NetBox's edit views check: else the save,
+    the mapping and their NetBox events roll back. A call without a request has no user scope.
 
     Args:
         device: The NetBox Device or VirtualMachine to persist.
@@ -867,10 +870,24 @@ def _save_device(device, update_fields: list[str], request=None, mapping=None) -
             return _htmx_error_response(msg)
         return HttpResponse(escape(msg), status=status)
 
+    user = getattr(request, "user", None)
+    try:
+        with atomic_with_events():
+            if refusal := _write_device_row(device, update_fields, mapping, user, error_response=_err):
+                return refusal
+            if user is not None and not saved_in_scope(device, user, "change"):
+                raise outside_change_scope(device)
+    except PermissionsViolation as exc:
+        return _err(str(exc), 403)
+    return None
+
+
+def _write_device_row(device, update_fields, mapping, user, *, error_response) -> HttpResponse | None:
+    """Write the row of ``_save_device`` in the caller's transaction; return the error response, or None."""
     try:
         stored = lock_and_snapshot(type(device).objects.filter(pk=device.pk))
     except ObjectDoesNotExist:
-        return _err("Could not save: the record may have been changed or deleted; refresh and retry.", 409)
+        return error_response("Could not save: the record may have been changed or deleted; refresh and retry.", 409)
     for name in update_fields:
         field = device._meta.get_field(name)
         setattr(stored, field.attname, getattr(device, field.attname))
@@ -882,19 +899,18 @@ def _save_device(device, update_fields: list[str], request=None, mapping=None) -
             row.save(update_fields=[*update_fields, *mapping_fields, "last_updated"])
         except IntegrityError:
             logger.exception("Integrity error saving device pk=%s", getattr(device, "pk", None))
-            return _err("Could not save: a database integrity constraint was violated.", 409)
+            return error_response("Could not save: a database integrity constraint was violated.", 409)
         except ValidationError as exc:
             logger.warning(
                 "Validation error saving %s pk=%s: %s", type(device).__name__, device.pk, validation_error_detail(exc)
             )
-            user = getattr(request, "user", None)
-            return _err(f"Validation error: {exception_text_for(exc, type(device), user)}", 400)
+            return error_response(f"Validation error: {exception_text_for(exc, type(device), user)}", 400)
         except DataError:
             # save(update_fields=...) skips full_clean(), so an overlong/invalid value
             # from LibreNMS (e.g. a hostname past Device.name max_length) reaches the DB
             # and raises DataError. Convert it to a clean toast instead of a 500.
             logger.exception("Data error saving device pk=%s", getattr(device, "pk", None))
-            return _err("Could not save: a field value is invalid (for example, too long).", 400)
+            return error_response("Could not save: a field value is invalid (for example, too long).", 400)
         except DatabaseError as exc:
             if classify_conflict(exc):
                 raise
@@ -907,7 +923,9 @@ def _save_device(device, update_fields: list[str], request=None, mapping=None) -
             # a 500. (Must follow the IntegrityError / DataError handlers above — both subclass
             # DatabaseError.)
             logger.exception("Database error saving device pk=%s", getattr(device, "pk", None))
-            return _err("Could not save: the record may have been changed or deleted; refresh and retry.", 409)
+            return error_response(
+                "Could not save: the record may have been changed or deleted; refresh and retry.", 409
+            )
         return None
 
     if mapping is None:
