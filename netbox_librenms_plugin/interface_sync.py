@@ -34,7 +34,7 @@ from netbox_librenms_plugin.utils import (
     convert_speed_to_kbps,
     interface_name_rejection_reason,
 )
-from netbox_librenms_plugin.transactions import first_at_version, row_changed, save_at_version
+from netbox_librenms_plugin.transactions import first_at_version, outside_change_scope, row_changed, save_at_version
 
 logger = logging.getLogger(__name__)
 
@@ -264,10 +264,11 @@ def write_interface_row(interface, apply, *, fresh_read_queryset, created=False)
     checks it and puts it on the row before the column diff. With no changed column, nothing is
     locked, written or serialized. With a changed column, the change log's before-state is the
     state of the fresh read, and the row is saved only when no other operation changed it since the
-    fresh read (``save_at_version``). A row that this sync created is private to its transaction,
-    so it is written without a fresh read, and its before-state is its state as created. When the
-    write renames the row, the channel children that NetBox renames after the commit are recorded
-    for the final check of the interface sync.
+    fresh read (``save_at_version``). After that save, *fresh_read_queryset* must still find the
+    row, as NetBox's edit views read the saved row again. A row that this sync created is private
+    to its transaction, so it is written without a fresh read, and its before-state is its state as
+    created. When the write renames the row, the channel children that NetBox renames after the
+    commit are recorded for the final check of the interface sync.
 
     Args:
         interface (Interface | VMInterface): The interface as the caller read it.
@@ -284,6 +285,8 @@ def write_interface_row(interface, apply, *, fresh_read_queryset, created=False)
     Raises:
         ConcurrentRowChange: The row left its owner or *fresh_read_queryset*, or another operation
             changed it after the fresh read.
+        PermissionsViolation: The saved row is outside *fresh_read_queryset*; the caller's
+            transaction must roll back.
 
     """
     if created:
@@ -309,6 +312,8 @@ def write_interface_row(interface, apply, *, fresh_read_queryset, created=False)
                 row.save()
             else:
                 save_at_version(row, version=version, changed_columns=changed_columns, name=interface.name)
+                if not fresh_read_queryset.filter(pk=row.pk).exists():
+                    raise outside_change_scope(row)
         return InterfaceWrite(row, bool(changed_columns) or result.changed_elsewhere)
 
     if result.mapping_change is None:
