@@ -26,8 +26,9 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
 )
 from netbox_librenms_plugin.tests.view_test_helpers import post as view_post
 
-# The fixture of the breakout cable test below.
+# The fixtures of the cable and server-mapping tests below.
 from netbox_librenms_plugin.tests.test_cable_breakout import breakout_server  # noqa: F401
+from netbox_librenms_plugin.tests.test_object_server_preference import servers  # noqa: F401
 
 pytestmark = pytest.mark.django_db
 
@@ -480,3 +481,52 @@ def test_a_rebind_that_moves_the_interface_out_of_the_change_scope_is_rolled_bac
     assert not _updates(interface).exists()
     assert ("interface", interface.pk) not in flushed_events
     assert _response_levels(response) == [messages.ERROR]
+
+
+@pytest.mark.usefixtures("servers")
+class TestServerMappingWrites:
+    """The mapping views of a Device write only its custom field, which a constraint can still name."""
+
+    @staticmethod
+    def _owner(tag, constraints):
+        from dcim.models import Device
+
+        owner = make_device(
+            tag, librenms_cf={"primary": 13601, "secondary": 13602, "retired": 13603, "_preferred_server": "primary"}
+        )
+        return owner, make_user_with_perms(f"{tag}-user", [("change", Device)], constraints=constraints)
+
+    def test_a_removal_that_moves_the_device_out_of_the_change_scope_is_rolled_back(self, client, flushed_events):
+        from django.urls import reverse
+
+        owner, user = self._owner("rb-mapping-remove", {"custom_field_data__librenms_id__has_key": "retired"})
+        before = stored_mapping_for_test(owner)
+        client.force_login(user)
+
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:remove_server_mapping", args=[owner.pk]),
+            {"object_type": "device", "server_key": "retired"},
+        )
+
+        assert response.status_code == 302
+        owner.refresh_from_db()
+        assert stored_mapping_for_test(owner) == before
+        assert not _updates(owner).exists()
+        assert ("device", owner.pk) not in flushed_events
+        assert _response_levels(response) == [messages.ERROR]
+
+    def test_a_preference_that_moves_the_device_out_of_the_change_scope_is_rolled_back(self, client, flushed_events):
+        from netbox_librenms_plugin.tests.test_object_server_preference import _preference_url
+
+        owner, user = self._owner("rb-mapping-prefer", {"custom_field_data__librenms_id___preferred_server": "primary"})
+        before = stored_mapping_for_test(owner)
+        client.force_login(user)
+
+        response = client.post(_preference_url(owner), {"object_type": "device", "server_key": "secondary"})
+
+        assert response.status_code == 302
+        owner.refresh_from_db()
+        assert stored_mapping_for_test(owner) == before
+        assert not _updates(owner).exists()
+        assert ("device", owner.pk) not in flushed_events
+        assert _response_levels(response) == [messages.ERROR]
