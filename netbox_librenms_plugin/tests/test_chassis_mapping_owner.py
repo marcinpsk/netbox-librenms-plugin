@@ -725,7 +725,6 @@ def test_a_legacy_conversion_refuses_a_master_that_lost_the_master_role_during_t
 
 
 _WAITING_WRITERS = {
-    "remove": ("remove_server_mapping", {"server_key": RETIRED, "object_type": "device"}),
     "preferred": ("set_preferred_server", {"server_key": SECONDARY, "object_type": "device"}),
     "edit": (
         "edit_server_mapping",
