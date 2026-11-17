@@ -634,3 +634,38 @@ def test_a_merge_whose_winner_leaves_the_change_scope_rolls_back_the_donor_too(c
     assert (response.status_code, response["HX-Reswap"]) == (200, "none")
     assert _changes(donor) == _changes(winner) == []
     assert flushed_events == []
+
+
+# ---------------------------------------------------------------------------
+# The mark-built-in action of the modules tab
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_a_refused_built_in_mark_leaves_no_event_for_its_rolled_back_rows():
+    from dcim.models import DeviceType
+
+    from netbox_librenms_plugin.models import InventoryIgnoreRule
+    from netbox_librenms_plugin.tests.test_fixed_platform_built_in_units import (
+        SLOT_1,
+        ixr_device,
+        mark,
+        modal_form,
+        user_with,
+        written,
+    )
+
+    device = ixr_device("rb-mark-built-in", part_number="")
+    # The part number write succeeds; the new rule is outside the add constraint, so the mark is refused.
+    user = grant(user_with("rb-mark-built-in"), "change", DeviceType)
+    user = grant(user, "add", InventoryIgnoreRule, constraints={"manufacturer__slug": "another-vendor"})
+    fields = modal_form(device, SLOT_1, user=user)
+    before = written(device)
+
+    with _netbox_request(user) as queue:
+        request = mark(device, fields, user=user)
+        assert queue == {}
+
+    assert written(device) == before
+    assert _changes(device.device_type) == []
+    assert [m.level for m in messages.get_messages(request)] == [messages.ERROR]
