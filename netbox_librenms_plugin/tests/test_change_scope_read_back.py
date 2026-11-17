@@ -467,6 +467,35 @@ def test_an_import_conflict_action_out_of_the_change_scope_is_rolled_back(
     assert flushed_events == []
 
 
+@pytest.mark.django_db
+def test_a_legacy_id_migration_out_of_the_change_scope_is_rolled_back(client, live_librenms, flushed_events):
+    from netbox_librenms_plugin.tests.mapping_fixtures import stored_mapping_for_test
+
+    device = make_device("rb-migrate-legacy", serial="RB-SN-MIGRATE", librenms_cf=7342)
+    _serve_import_device(live_librenms.server, 7342, "rb-migrate-legacy", "RB-SN-MIGRATE")
+    # The grant names the stored mapping on purpose: the migration writes only the mapping.
+    legacy_id = {"custom_field_data__librenms_id": 7342}  # nosemgrep: no-stored-mapping-access-orm
+    client.force_login(_device_writer("rb-migrate-legacy", legacy_id))
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:device_conflict_action", kwargs={"device_id": 7342}),
+        {
+            "action": "migrate_librenms_id",
+            "existing_device_id": device.pk,
+            "existing_device_type": "device",
+            "server_key": SERVER_KEY,
+            "force": "on",
+        },
+        HTTP_HX_REQUEST="true",
+    )
+
+    device.refresh_from_db()
+    assert stored_mapping_for_test(device) == 7342
+    assert (response.status_code, response["HX-Reswap"]) == (200, "none")
+    assert _changes(device) == []
+    assert flushed_events == []
+
+
 # ---------------------------------------------------------------------------
 # The move-to-winner views of a migrated donor
 # ---------------------------------------------------------------------------
