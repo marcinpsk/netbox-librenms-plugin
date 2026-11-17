@@ -64,7 +64,13 @@ from netbox_librenms_plugin.sync_cache import (
     schedule_request_cache_mutation,
 )
 from netbox_librenms_plugin.sync_query import page_query_url
-from netbox_librenms_plugin.transactions import CommittedFollowUpError, classify_conflict, run_transaction
+from netbox_librenms_plugin.transactions import (
+    CommittedFollowUpError,
+    atomic_with_events,
+    classify_conflict,
+    run_transaction,
+    saved_in_scope,
+)
 from netbox_librenms_plugin.utils import (
     build_migrated_context,
     coerce_model_pk,
@@ -2096,7 +2102,7 @@ class RebindInterfacePortView(SyncInterfacesView):
         if ports_data is None:
             return self._tab_response(request, object_type, interface_name_field, server_key)
         try:
-            with transaction.atomic():
+            with atomic_with_events():
                 interface = self._rebind(obj, ports_data, port_id, expected_port_id, interface_name_field, server_key)
         except LibreNMSPortBindingConflict as conflict:
             messages.error(request, str(conflict))
@@ -2195,7 +2201,13 @@ class RebindInterfacePortView(SyncInterfacesView):
                 f"NetBox interface '{owner.name}' stores its LibreNMS ID in the legacy format. Convert it first."
             )
         interface.snapshot()
-        return persist_mapping(interface, change, write=_save_row)
+        persist_mapping(interface, change, write=_save_row)
+        if not saved_in_scope(interface, self.request.user, "change"):
+            raise _RebindRefusedError(
+                f"You cannot change NetBox interface '{owner.name}': "
+                "the rebound interface is outside your change permission constraints."
+            )
+        return interface
 
 
 class DeleteNetBoxInterfacesView(
