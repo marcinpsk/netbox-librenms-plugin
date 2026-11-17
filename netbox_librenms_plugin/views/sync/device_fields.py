@@ -60,7 +60,12 @@ from netbox_librenms_plugin.serial_identity import (
     stored_form_refusal,
     written_device_conflict,
 )
-from netbox_librenms_plugin.mapping_owner import ensure_mapping_owner, mapping_owner
+from netbox_librenms_plugin.mapping_owner import (
+    ensure_locked_mapping_owner,
+    ensure_mapping_owner,
+    lock_owner_chassis,
+    mapping_owner,
+)
 from netbox_librenms_plugin.server_selection import build_server_mappings
 from netbox_librenms_plugin.sync_cache import SyncTab
 from netbox_librenms_plugin.transactions import (
@@ -214,7 +219,8 @@ def _write_device_serial(view, request, pk, server_key, incoming):
     """
     Write the LibreNMS serial *incoming* to the locked standalone device.
 
-    The serial identity locks come before the row lock, then the conflict check reads the locked row.
+    The serial identity locks and the chassis share lock come before the row lock. The owner rule
+    and the conflict check then read the locked row.
 
     Returns:
         tuple: ``(old serial, None)`` after the write, or ``(None, redirect)`` when nothing was written.
@@ -224,6 +230,7 @@ def _write_device_serial(view, request, pk, server_key, incoming):
     old_values = []
 
     def apply(row):
+        ensure_locked_mapping_owner(row, chassis_id)
         if refusal := direct_serial_sync_refusal(row):
             raise _WriteRefused(refusal)
         assignment = device_assignment(row, incoming, rules=serial_rules)
@@ -240,6 +247,7 @@ def _write_device_serial(view, request, pk, server_key, incoming):
         with atomic_with_events():
             serial_rules = SerialRules.load()
             assignment_lock([incoming], model=Device, rules=serial_rules)
+            chassis_id = lock_owner_chassis(Device, pk)
             update_existing_row(view.restricted_queryset(Device, "change").filter(pk=pk), apply)
     except Device.DoesNotExist:
         messages.error(request, "Device no longer exists.")
@@ -376,8 +384,8 @@ class UpdateDeviceSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
         if error := self.require_all_permissions("POST"):
             return error
 
-        # The device must hold its own mapping: a chassis member reads the LibreNMS device of the master.
-        device = ensure_mapping_owner(self.restrict_object_or_404(Device, "change", pk=pk))
+        # The writer checks the owner rule on the locked row: a chassis change can commit before that lock.
+        device = self.restrict_object_or_404(Device, "change", pk=pk)
 
         # Rebind the API client to the POSTed server before resolving the per-server librenms_id,
         # so a multi-server user acting on a non-default tab isn't routed through the globally
@@ -438,8 +446,8 @@ class UpdateDeviceTypeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
         if error := self.require_all_permissions("POST"):
             return error
 
-        # The device must hold its own mapping: a chassis member reads the LibreNMS device of the master.
-        device = ensure_mapping_owner(self.restrict_object_or_404(Device, "change", pk=pk))
+        # The writer checks the owner rule on the locked row: a chassis change can commit before that lock.
+        device = self.restrict_object_or_404(Device, "change", pk=pk)
 
         # Rebind the API client to the POSTed server before resolving the per-server librenms_id,
         # so a multi-server user acting on a non-default tab isn't routed through the globally
@@ -494,12 +502,13 @@ class UpdateDeviceTypeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
         scope = retype_scope(device)
 
         def no_new_holder(row):
+            ensure_locked_mapping_owner(row, chassis_id)
             if retype_conflict(row, device_type, rules=serial_rules, scope=scope):
                 raise _WriteRefused(RETYPE_HELD)
 
         with atomic_with_events():
             retype_lock(scope, rules=serial_rules)
-            lock_chassis_of(pk)
+            chassis_id = lock_owner_chassis(Device, pk)
             old_device_type, failed = _write_device_field(
                 self,
                 request,
