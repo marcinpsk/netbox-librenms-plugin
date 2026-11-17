@@ -3268,7 +3268,8 @@ class AddAsOOBView(
         oob_type = oob_candidate.get("type") or ""
         oob_ip_str = oob_candidate.get("ip") or None
 
-        with transaction.atomic():
+        # A refused link rolls back the rows that the block creates, and their events.
+        with atomic_with_events():
             # Serial-derived candidates take their identity lock before the claim and row locks.
             serial_rules = SerialRules.load()
             # The evidence that found the controller is checked again under the locks.
@@ -4156,7 +4157,8 @@ class MergeNetBoxDevicesView(
         # back to the same rows, so the common path is unchanged. The oob_ip transfer and the
         # candidate-match check deliberately stay on the user-selected winner/donor: oob_ip is a
         # per-device FK on those rows, not a VC link.
-        with transaction.atomic():
+        # A refused winner save rolls back the donor save, and its event.
+        with atomic_with_events():
             # Lock the selected winner/donor AND every current member of their virtual chassis, in
             # deterministic pk order to avoid deadlocks, BEFORE resolving the sync device:
             # get_librenms_sync_device scans every VC member's librenms_id custom field, so resolving

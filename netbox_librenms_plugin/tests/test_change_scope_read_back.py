@@ -557,3 +557,80 @@ def test_a_device_ip_transfer_out_of_the_device_change_scope_is_rolled_back(clie
     assert (donor.primary_ip4_id, winner.primary_ip4_id) == (address.pk, None)
     assert _changes(donor) == _changes(winner) == []
     assert flushed_events == []
+
+
+@pytest.mark.django_db
+def test_an_oob_link_out_of_the_change_scope_rolls_back_the_link_and_its_new_rows(
+    client, live_librenms, flushed_events
+):
+    from dcim.models import Interface
+    from ipam.models import IPAddress
+
+    from netbox_librenms_plugin.server_mappings import read_mapping
+
+    device = make_device("rb-oob", serial="RB-OOB")
+    live_librenms.server.device_info_response(
+        device_id=7351, hostname="rb-oob-idrac", hardware="iDRAC", os="idrac", serial=device.serial, ip="198.18.73.71"
+    )
+    live_librenms.server.vc_inventory_callable(7351, [], {})
+    user = _device_writer(
+        "rb-oob",
+        {"oob_ip__isnull": True},
+        *((action, model) for model in (Interface, IPAddress) for action in ("view", "add", "change")),
+    )
+    client.force_login(user)
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:device_add_as_oob", args=[7351]),
+        {
+            "existing_device_id": str(device.pk),
+            "server_key": SERVER_KEY,
+            "oob_interface_id": "__new__",
+            "oob_new_interface_name": "idrac",
+        },
+        HTTP_HX_REQUEST="true",
+    )
+
+    device.refresh_from_db()
+    assert device.oob_ip_id is None
+    assert not read_mapping(device).has_oob(SERVER_KEY)
+    assert (response.status_code, response["HX-Reswap"]) == (200, "none")
+    assert not device.interfaces.filter(name="idrac").exists()
+    assert not IPAddress.objects.filter(address__net_host="198.18.73.71").exists()
+    assert _changes(device) == []
+    assert flushed_events == []
+
+
+@pytest.mark.django_db
+def test_a_merge_whose_winner_leaves_the_change_scope_rolls_back_the_donor_too(client, live_librenms, flushed_events):
+    from dcim.models import Device
+
+    from netbox_librenms_plugin.server_mappings import read_mapping
+    from netbox_librenms_plugin.tests.conftest import ip_on
+
+    winner = make_device("rb-merge-winner", librenms_cf={SERVER_KEY: {"id": 20}})
+    donor = make_device("rb-merge-donor", serial="RB-MERGE", librenms_cf={SERVER_KEY: {"id": 10}})
+    # The donor's OOB IP sits on a winner interface, so the merge moves it to the winner.
+    oob_ip = ip_on(winner, "198.18.73.81/32", "mgmt0")
+    Device.objects.filter(pk=donor.pk).update(oob_ip=oob_ip)
+    live_librenms.server.device_info_response(
+        device_id=99, hostname=winner.name, hardware=winner.device_type.model, os="ios", serial=donor.serial, ip=""
+    )
+    live_librenms.server.vc_inventory_callable(99, [], {})
+    # The winner may be changed only while it has no OOB IP.
+    scope = [{"name": donor.name}, {"name": winner.name, "oob_ip__isnull": True}]
+    client.force_login(grant(make_user_with_perms("rb-merge-user", []), "change", Device, constraints=scope))
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:device_merge_netbox_devices", kwargs={"device_id": 99}),
+        {"server_key": SERVER_KEY, "winner_pk": str(winner.pk)},
+        HTTP_HX_REQUEST="true",
+    )
+
+    donor.refresh_from_db()
+    winner.refresh_from_db()
+    assert (donor.oob_ip_id, winner.oob_ip_id) == (oob_ip.pk, None)
+    assert read_mapping(donor).migrated_to(SERVER_KEY) is None
+    assert (response.status_code, response["HX-Reswap"]) == (200, "none")
+    assert _changes(donor) == _changes(winner) == []
+    assert flushed_events == []
