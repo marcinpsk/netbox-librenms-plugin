@@ -907,11 +907,13 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
             return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
 
         with atomic_with_events():
+            chassis_id = lock_owner_chassis(model, pk)
             try:
                 obj_locked = self.restricted_queryset(model, "change").select_for_update(of=("self",)).get(pk=pk)
             except model.DoesNotExist:
                 messages.error(request, f"{model.__name__} no longer exists.")
                 return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
+            ensure_locked_mapping_owner(obj_locked, chassis_id)
             # Re-check after acquiring lock; mirror the pre-transaction protection logic
             _is_protected = server_key in configured_servers or (
                 legacy_url_configured and not configured_servers and server_key == "default"
@@ -992,8 +994,10 @@ class SetPreferredServerView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
         submitted_active_key = request.POST.get("active_server_key", "").strip() or None
 
         with atomic_with_events():
-            owner = ensure_mapping_owner(
-                get_object_or_404(self.restricted_queryset(model, "change").select_for_update(of=("self",)), pk=pk)
+            chassis_id = lock_owner_chassis(model, pk)
+            owner = ensure_locked_mapping_owner(
+                get_object_or_404(self.restricted_queryset(model, "change").select_for_update(of=("self",)), pk=pk),
+                chassis_id,
             )
             mappings = build_server_mappings(owner)
             selectable_keys = {mapping.server_key for mapping in mappings if mapping.is_selectable}
@@ -1124,8 +1128,10 @@ class EditServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
         )
         try:
             with atomic_with_events():
-                owner = ensure_mapping_owner(
-                    get_object_or_404(self.restricted_queryset(model, "change").select_for_update(of=("self",)), pk=pk)
+                chassis_id = lock_owner_chassis(model, pk)
+                owner = ensure_locked_mapping_owner(
+                    get_object_or_404(self.restricted_queryset(model, "change").select_for_update(of=("self",)), pk=pk),
+                    chassis_id,
                 )
                 change = _editor_host_change(
                     owner,
