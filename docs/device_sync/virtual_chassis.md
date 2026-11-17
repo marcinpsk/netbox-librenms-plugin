@@ -2,15 +2,9 @@
 
 ## Overview
 
-The plugin automatically detects Virtual Chassis configurations and displays all VC interfaces on the LibreNMS Sync page of the designated sync device.
+The plugin automatically detects Virtual Chassis configurations and displays all VC interfaces on the LibreNMS Sync page of the chassis master.
 
-**LibreNMS Sync Device Selection Priority:**
-1. Member with `librenms_id` custom field (highest priority)
-2. Master device with primary IP
-3. Any member with primary IP
-4. Member with lowest VC position
-
-> **Note:** LibreNMS treats a Virtual Chassis as a single logical device. Only one member (the sync device) should have the `librenms_id` custom field set.
+> **Note:** LibreNMS treats a Virtual Chassis as a single logical device. The master of the virtual chassis holds the `librenms_id` custom field of the chassis, and the plugin finds the chassis in LibreNMS from the primary IP or the name of the master. Leave the field empty on the other members. A chassis without a master, or with mapping data on another member, cannot sync until you correct it; see [Virtual chassis](../configuration/custom_field.md#virtual-chassis).
 
 ## Stack Detection
 
