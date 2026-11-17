@@ -40,6 +40,8 @@ PINNED = {
     "test_bulk_import_refresh_state.py": (1, PENDING),
     "test_cable_blocker_notifications.py": (1, PENDING),
     "test_cable_tab_source_snapshot.py": (1, PENDING),
+    "test_change_scope_read_back.py": (9, PENDING),
+    "test_change_scope_read_back_sites.py": (6, PENDING),
     "test_confirmation_intent_contract.py": (6, PENDING),
     "test_coverage_actions.py": (43, f"{LEGACY}; {SHAPE}"),
     "test_coverage_api.py": (4, SHAPE),
