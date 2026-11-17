@@ -145,8 +145,10 @@ them.
 When an object has no LibreNMS ID on the active server, the sync page looks for it in LibreNMS by the
 primary IP address, then the DNS name of the primary IP, then the object name. The **LibreNMS Status**
 card shows the match: the LibreNMS ID, its hostname and what matched it. Click **Link** to store the ID.
-When no device matches, the card offers **Add to LibreNMS**. When LibreNMS does not answer, the card
-says that LibreNMS could not be reached, and nothing is proposed.
+When no device matches, the card offers **Add to LibreNMS**. When the IPv4 and the IPv6 primary address,
+or their DNS names, match two different LibreNMS devices, the card shows both IDs and proposes no link
+and no **Add to LibreNMS**. When LibreNMS does not answer, the card says that LibreNMS could not be
+reached, and nothing is proposed.
 
 The **Device LibreNMS Status** and **Virtual Machine LibreNMS Status** lists show the stored link of
 every listed object. For the unlinked objects on the visible page, they also show the match. Click

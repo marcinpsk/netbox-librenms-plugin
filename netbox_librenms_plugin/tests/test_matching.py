@@ -6,7 +6,7 @@ import time
 import pytest
 
 from netbox_librenms_plugin import matching
-from netbox_librenms_plugin.matching import Candidate, Match, NoMatch, NotChecked, ProbeResult, Unreachable
+from netbox_librenms_plugin.matching import Candidate, Conflict, Match, NoMatch, NotChecked, ProbeResult, Unreachable
 from netbox_librenms_plugin.tests.conftest import bind_librenms_server, make_device
 from netbox_librenms_plugin.tests.link_intent_helpers import give_primary_ip
 from netbox_librenms_plugin.tests.view_test_helpers import domain_state
@@ -150,7 +150,7 @@ class TestDualStackLookupOrder:
         assert isinstance(result, Match)
         assert (result.librenms_id, result.candidate) == (58, Candidate.PRIMARY_IP4)
 
-    def test_primaries_that_name_two_devices_are_no_match_and_end_the_lookup(self, api, librenms_server):
+    def test_primaries_that_name_two_devices_are_a_conflict_and_end_the_lookup(self, api, librenms_server):
         device = _dual_stack_device("match-dual-conflict", dns_names=("v4.example.net", ""))
         librenms_server.register(IP_PATH, _found(58))
         librenms_server.register(IP6_PATH, _found(59))
@@ -158,7 +158,8 @@ class TestDualStackLookupOrder:
         result = matching.find_librenms_match(device, api)
 
         assert _paths(librenms_server) == [IP_PATH, IP6_PATH]
-        assert isinstance(result, NoMatch)
+        assert isinstance(result, Conflict)
+        assert result.librenms_ids == (58, 59)
         assert [probe.result for probe in result.probes] == [ProbeResult.MATCH, ProbeResult.MATCH]
 
     def test_primaries_that_name_one_device_match_it(self, api, librenms_server):
@@ -209,7 +210,7 @@ class TestDualStackLookupOrder:
             Candidate.DNS_NAME4,
             Candidate.DNS_NAME6,
         ]
-        assert isinstance(result, Match if matches else NoMatch)
+        assert isinstance(result, Match if matches else Conflict)
 
     def test_one_dns_name_on_both_primaries_is_asked_once(self, api, librenms_server):
         device = _dual_stack_device("match-dual-dns", dns_names=("same.example.net", "same.example.net"))

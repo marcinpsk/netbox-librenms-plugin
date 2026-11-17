@@ -14,6 +14,7 @@ from netbox_librenms_plugin.mapping_owner import mapping_ownership
 from netbox_librenms_plugin.matching import (
     CANDIDATE_PAIRS,
     Candidate,
+    Conflict,
     Match,
     NoMatch,
     NotChecked,
@@ -42,6 +43,8 @@ class LinkState(StrEnum):
     REFUSED = "refused"
     MATCH = "match"
     OWNED = "owned"
+    # The two probes of one candidate pair found two different devices.
+    CONFLICT = "conflict"
     NO_MATCH = "no_match"
     UNREACHABLE = "unreachable"
     NOT_CHECKED = "not_checked"
@@ -199,6 +202,7 @@ class LinkAssessment:
     match: Match | None = None
     owner: object = None
     offer: intent.Offer | None = None
+    conflict_ids: tuple = ()
 
 
 _UNMATCHED_STATES = {NoMatch: LinkState.NO_MATCH, Unreachable: LinkState.UNREACHABLE, NotChecked: LinkState.NOT_CHECKED}
@@ -235,6 +239,8 @@ def read_link_assessment(obj, server, context, *, deadline=None):
     if (state := link_state_without_matching(obj, server_key)) is not None:
         return LinkAssessment(state, server_key)
     result = find_librenms_match(obj, server, deadline=deadline)
+    if isinstance(result, Conflict):
+        return LinkAssessment(LinkState.CONFLICT, server_key, conflict_ids=result.librenms_ids)
     if not isinstance(result, Match):
         return LinkAssessment(_UNMATCHED_STATES[type(result)], server_key)
     try:

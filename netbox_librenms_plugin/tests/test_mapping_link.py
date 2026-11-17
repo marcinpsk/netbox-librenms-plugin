@@ -4,6 +4,8 @@ Link through the real routes: the sync page and the status lists propose a match
 Each test mints its token through the page that offers it, posts it over HTTP, and reads the real database.
 """
 
+from urllib.parse import quote
+
 import netaddr
 import pytest
 from dcim.models import Device, VirtualChassis
@@ -214,7 +216,7 @@ class TestLinkOnTheSyncPage:
 
         link_proposal = page_link(linker, obj)
 
-        assert (link_proposal["state"], link_proposal["token"]) == ("no_match", None)
+        assert (link_proposal["state"], link_proposal["token"]) == ("conflict", None)
         assert domain_state() == before
 
     def test_primaries_that_name_one_device_offer_its_link(self, linker, server, kind):
@@ -392,6 +394,28 @@ class TestSyncPageAnswers:
 
         assert proposal["state"] == "no_match"
         assert proposal["token"] is None
+
+    @pytest.mark.parametrize(("ipv6_id", "state"), [(8701, "conflict"), (None, "no_match")], ids=["disagree", "none"])
+    def test_add_is_offered_only_when_no_probe_matched(self, linker, server, ipv6_id, state):
+        device = make_device(f"link-dual-{state}")
+        give_primary_ip(device, "198.51.100.80/24")
+        give_primary_ip(_fresh(device), "2001:db8::80/64")
+        if ipv6_id is not None:
+            register_match(server, "198.51.100.80", 8700, hostname=device.name)
+            register_match(server, quote("2001:db8::80", safe=""), ipv6_id, hostname=f"{device.name}-v6")
+
+        page = sync_page(linker, device)
+        rows = _status_rows(status_list(linker, "device", q=device.name))
+
+        offered = state == "no_match"
+        assert (page.context["link"]["state"], page.context["link"]["token"]) == (state, None)
+        assert page.context["show_add_device"] is offered
+        assert (page.context["v1v2form"] is not None, page.context["v3form"] is not None) == (offered, offered)
+        assert rows[device.pk].state == state
+        assert mapping_summary(_fresh(device)) == {}
+        if not offered:
+            assert page.context["link"]["conflict_ids"] == (8700, 8701)
+            assert 'data-link-branch="conflict"' in page.content.decode()
 
     @pytest.mark.parametrize("answer", ["server_error", "disconnect"])
     def test_an_unreachable_server_is_not_reported_as_not_found(self, linker, server, answer):
