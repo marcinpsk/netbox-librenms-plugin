@@ -415,7 +415,7 @@ class MappingLifecycleView(_LifecycleWriter):
         model = self._model(object_type)
         if error := self.require_all_permissions("GET"):
             return error
-        obj = self.restrict_object_or_404(model, "change", pk=pk)
+        obj = ensure_mapping_owner(self.restrict_object_or_404(model, "change", pk=pk))
         if request.GET.get("action") != Unlink.ACTION:
             raise Http404("Unknown mapping lifecycle action.")
         try:
@@ -433,7 +433,7 @@ class MappingLifecycleView(_LifecycleWriter):
             server_key,
             Unlink.ACTION,
             UnlinkChoices(),
-            tab=_tab(request.GET),
+            tab=posted_tab(request.GET),
             return_server_key=return_server_key,
         )
 

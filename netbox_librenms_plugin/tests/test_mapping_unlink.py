@@ -9,12 +9,13 @@ import html
 import re
 
 import pytest
-from dcim.models import Device, Interface
+from dcim.models import Device, Interface, VirtualChassis
 from django.core import signing
 from django.db import connection
 from virtualization.models import VirtualMachine, VMInterface
 
 from netbox_librenms_plugin import confirmation_intent as intent
+from netbox_librenms_plugin.mapping_owner import MISPLACED_MESSAGE, NO_MASTER_MESSAGE, NOT_OWNER_MESSAGE
 from netbox_librenms_plugin.models import LibreNMSSettings
 from netbox_librenms_plugin.tests.conftest import (
     configure_librenms_servers,
@@ -607,33 +608,104 @@ def _connections_card(response):
     return body[start : body.index("<!-- ", start)]
 
 
-def _stale_owner_chassis(server, tag, address):
-    """Return member A, which holds only an entry of an unconfigured server, and master B, which syncs on default."""
-    chassis, (stale_owner, sync_member) = make_virtual_chassis_members(tag)
-    chassis.master = sync_member
-    chassis.save()
-    give_primary_ip(sync_member, f"{address}/24")
-    register_match(server, address, 4530, hostname=sync_member.name)
-    seed_mapping(_fresh(stale_owner), "retired", own=4531)
-    return stale_owner, sync_member
+def _retired_master_chassis(server, tag, address):
+    """Return master A, which syncs on default and holds an entry of an unconfigured server, and member B."""
+    _chassis, (master, member) = make_virtual_chassis_members(tag)
+    give_primary_ip(master, f"{address}/24")
+    register_match(server, address, 4530, hostname=f"{tag}-lnms")
+    seed_mapping(_fresh(master), "retired", own=4531)
+    return _fresh(master), _fresh(member)
 
 
 @pytest.mark.django_db
-def test_a_chassis_member_with_an_unconfigured_entry_offers_its_unlink_while_another_member_syncs(writer, server):
-    stale_owner, sync_member = _stale_owner_chassis(server, "unlink-stale-owner", "203.0.113.203")
+def test_the_page_of_each_chassis_member_offers_the_unlink_of_the_master(writer, server):
+    master, member = _retired_master_chassis(server, "unlink-master-entry", "203.0.113.203")
     before = domain_state()
 
-    owner_page, member_page = (sync_page(writer, obj) for obj in (stale_owner, sync_member))
+    master_page, member_page = (sync_page(writer, obj) for obj in (master, member))
 
     assert domain_state() == before
-    assert mapping_summary(_fresh(stale_owner)) == {"retired": {"own": 4531}}
-    for page in (owner_page, member_page):
-        assert (page.context["server_key"], page.context["lookup_device_pk"]) == ("default", sync_member.pk)
-    owner_card, member_card = (_connections_card(page) for page in (owner_page, member_page))
-    assert f"{lifecycle_url(stale_owner)}?action=unlink&amp;server_key=retired" in owner_card
-    assert "data-unlink-server" not in member_card
-    assert 'data-mapping-owner="visible"' in member_card
-    assert f'href="{sync_page_url(stale_owner)}"' in member_card
+    for page in (master_page, member_page):
+        assert (page.context["server_key"], page.context["lookup_device_pk"]) == ("default", master.pk)
+        card = _connections_card(page)
+        assert f"{lifecycle_url(master)}?action=unlink&amp;server_key=retired" in card
+        assert lifecycle_url(member) not in card
+
+
+@pytest.mark.django_db
+def test_a_chassis_with_misplaced_mappings_offers_only_the_move_to_the_master(writer, server):
+    master, member = _retired_master_chassis(server, "unlink-misplaced", "203.0.113.205")
+    seed_mapping(member, "old", own=4532)
+    before = domain_state()
+
+    pages = [sync_page(writer, obj) for obj in (master, member)]
+    confirmations = [unlink_page(writer, obj, server_key=key) for obj, key in ((master, "retired"), (member, "old"))]
+
+    assert domain_state() == before
+    for page in pages:
+        assert page.context["chassis_owner_problem"]["problem"] == "misplaced"
+        body = page.content.decode()
+        assert "data-unlink-server" not in body
+        assert 'id="librenms-move-to-master"' in body
+    for confirmation in confirmations:
+        assert confirmation.status_code == 302
+        assert MISPLACED_MESSAGE in message_texts(confirmation)
+
+
+@pytest.mark.django_db
+def test_the_unlink_of_a_member_that_is_not_the_master_refuses(writer, server):
+    master, member = _retired_master_chassis(server, "unlink-not-owner", "203.0.113.206")
+    before = domain_state()
+
+    confirmation = unlink_page(writer, member, server_key="retired")
+
+    assert domain_state() == before
+    assert confirmation.status_code == 302
+    assert NOT_OWNER_MESSAGE in message_texts(confirmation)
+    assert mapping_summary(_fresh(master)) == {"retired": {"own": 4531}}
+
+
+@pytest.mark.django_db
+def test_an_unlink_on_a_chassis_without_a_master_refuses(writer, server):
+    owner, interfaces = _linked("chassis", "unlink-no-master")
+    token = offered_token(unlink_page(writer, owner))
+    VirtualChassis.objects.filter(pk=owner.virtual_chassis_id).update(master=None)
+    before = domain_state()
+
+    responses = [unlink_page(writer, owner), _confirm(writer, owner, token)]
+
+    assert domain_state() == before
+    for response in responses:
+        assert response.status_code == 302
+        assert NO_MASTER_MESSAGE in message_texts(response)
+    assert _ports(interfaces)["both"] == {"default": {"own": 5100}, "other": {"own": 5200}}
+
+
+@transactional_db_with_all_apps()
+def test_an_unlink_whose_chassis_master_changes_before_the_lock_is_stale(client, server):
+    """The owner check passes; the master changes before the chassis lock, so the locked chassis has no owner."""
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import commit_row_change
+
+    owner, interfaces = _linked("chassis", "unlink-new-master")
+    other_member = Device.objects.filter(virtual_chassis_id=owner.virtual_chassis_id).exclude(pk=owner.pk).get()
+    client.force_login(make_user_with_perms("unlink-new-master", PERMISSIONS))
+    token = offered_token(unlink_page(client, owner))
+    changed = []
+
+    def change_the_master_before_the_chassis_lock(execute, sql, params, many, context):
+        if not changed and 'FROM "dcim_virtualchassis"' in sql and "FOR UPDATE" in sql:
+            changed.append(True)
+            with second_connection() as other:
+                commit_row_change(other, VirtualChassis, owner.virtual_chassis_id, {"master_id": other_member.pk})
+        return execute(sql, params, many, context)
+
+    with connection.execute_wrapper(change_the_master_before_the_chassis_lock):
+        response = _confirm(client, owner, token)
+
+    assert changed
+    assert "assumptions.chassis" in stale_paths(response, owner.name)
+    assert mapping_summary(_fresh(owner))["default"]["own"] == 4100
+    assert _ports(interfaces)["both"] == {"default": {"own": 5100}, "other": {"own": 5200}}
 
 
 @pytest.mark.django_db
@@ -641,14 +713,14 @@ def test_a_chassis_member_with_an_unconfigured_entry_offers_its_unlink_while_ano
     ("query", "plugin_write", "guidance"),
     [({}, True, "librenms-connections"), ({"server_key": "retired"}, False, "librenms-server-selection-recovery")],
 )
-def test_the_owner_guidance_does_not_name_a_member_outside_the_view_scope(
+def test_the_owner_guidance_does_not_name_a_master_outside_the_view_scope(
     client, server, query, plugin_write, guidance
 ):
-    stale_owner, sync_member = _stale_owner_chassis(server, "hidden-stale-owner", "203.0.113.204")
+    master, member = _retired_master_chassis(server, "hidden-master-entry", "203.0.113.204")
     user = make_user_with_perms(
         f"owner-scope-{plugin_write}",
         [("view", Device), ("change", Device)],
-        constraints={"pk": sync_member.pk},
+        constraints={"pk": member.pk},
         plugin_write=plugin_write,
     )
     if not plugin_write:
@@ -656,12 +728,12 @@ def test_the_owner_guidance_does_not_name_a_member_outside_the_view_scope(
     client.force_login(user)
     before = domain_state()
 
-    body = sync_page(client, sync_member, **query).content.decode()
+    body = sync_page(client, member, **query).content.decode()
 
     assert domain_state() == before
-    assert stale_owner.name not in body
-    assert sync_page_url(stale_owner) not in body
-    assert lifecycle_url(stale_owner) not in body
+    assert master.name not in body
+    assert sync_page_url(master) not in body
+    assert lifecycle_url(master) not in body
     start = body.index(f'id="{guidance}"')
     assert 'data-mapping-owner="restricted"' in body[start:]
 
@@ -809,7 +881,8 @@ def test_an_unlink_whose_device_moved_before_the_lock_retries_and_is_stale(clien
 
     # The refused attempt locked the old chassis; the new transaction locked the new one.
     assert chassis_locks == [owner.virtual_chassis_id, other_chassis.pk]
-    assert {"assumptions.membership.count", "assumptions.membership.digest"} & stale_paths(response, owner.name)
+    # In the new chassis the device is not the master, so the locked chassis gives it no mapping ownership.
+    assert "assumptions.chassis" in stale_paths(response, owner.name)
     assert mapping_summary(_fresh(owner))["default"]["own"] == 4100
 
 
@@ -1038,6 +1111,7 @@ def test_a_host_change_whose_device_moved_before_the_lock_retries_and_is_stale(c
 
     # The refused attempt locked the old chassis; the new transaction locked the new one.
     assert chassis_locks == [owner.virtual_chassis_id, other_chassis.pk]
+    # In the new chassis the device is not the master, so the locked chassis gives it no mapping ownership.
     assert "assumptions.chassis" in stale_paths(response, owner.name)
     assert mapping_summary(_fresh(owner))["default"]["own"] == 4100
 
