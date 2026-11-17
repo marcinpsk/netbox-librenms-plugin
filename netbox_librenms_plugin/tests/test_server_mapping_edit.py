@@ -397,6 +397,29 @@ def test_an_object_outside_the_change_scope_is_not_found(client, servers):
 
 
 @pytest.mark.django_db
+def test_an_edit_that_moves_the_object_out_of_the_change_scope_is_rolled_back(client, servers, flushed_events):
+    """A change constraint can read the mapping, so an edit that leaves the scope writes nothing."""
+    from dcim.models import Device
+
+    from netbox_librenms_plugin.transactions import outside_change_scope
+
+    target = seed_mapping(make_device("edit-scope-exit"), "primary", own=14600)
+    no_oob = {"custom_field_data__librenms_id__primary__oob__isnull": True}  # nosemgrep: no-stored-mapping-access-orm
+    user = make_user_with_perms("edit-scope-exit-writer", [("view", Device), ("change", Device)], constraints=no_oob)
+    client.force_login(user)
+    records = _change_records(target)
+
+    response = _submit(client, target, "primary", oob_id="14601", oob_type="idrac")
+
+    assert response.status_code == 302
+    target.refresh_from_db()
+    assert mapping_summary(target) == {"primary": {"own": 14600}}
+    assert _change_records(target) == records
+    assert ("device", target.pk) not in flushed_events
+    assert _messages(response) == [str(outside_change_scope(target))]
+
+
+@pytest.mark.django_db
 def test_a_viewer_without_change_permission_gets_no_form(client, servers):
     from dcim.models import Device
 
