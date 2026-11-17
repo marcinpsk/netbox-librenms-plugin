@@ -58,6 +58,7 @@ from netbox_librenms_plugin.transactions import (
     atomic_with_events,
     classify_conflict,
     run_transaction,
+    saved_in_scope,
     update_existing_row,
 )
 from netbox_librenms_plugin.utils import (
@@ -896,7 +897,7 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
             )
             return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
 
-        with transaction.atomic():
+        with atomic_with_events():
             try:
                 obj_locked = self.restricted_queryset(model, "change").select_for_update(of=("self",)).get(pk=pk)
             except model.DoesNotExist:
@@ -928,6 +929,14 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
                     messages.error(
                         request,
                         f"Validation error removing LibreNMS mapping: {exception_text_for(exc, model, request.user)}",
+                    )
+                    return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
+                if not saved_in_scope(obj_locked, request.user, "change"):
+                    transaction.set_rollback(True)
+                    messages.error(
+                        request,
+                        f"Nothing was changed: the {model._meta.verbose_name} would be outside your change "
+                        "permission constraints.",
                     )
                     return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
                 removed = True
@@ -973,7 +982,7 @@ class SetPreferredServerView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
             return self._redirect(object_type, pk, _validated_active_server_key(request), active_sync_tab)
         submitted_active_key = request.POST.get("active_server_key", "").strip() or None
 
-        with transaction.atomic():
+        with atomic_with_events():
             owner = get_object_or_404(
                 self.restricted_queryset(model, "change").select_for_update(of=("self",)),
                 pk=pk,
@@ -1001,6 +1010,14 @@ class SetPreferredServerView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
                 messages.error(
                     request,
                     f"Validation error changing preferred server: {exception_text_for(exc, model, request.user)}",
+                )
+                return self._redirect(object_type, pk, active_server_key, active_sync_tab)
+            if not saved_in_scope(owner, request.user, "change"):
+                transaction.set_rollback(True)
+                messages.error(
+                    request,
+                    f"Nothing was changed: the {model._meta.verbose_name} would be outside your change "
+                    "permission constraints.",
                 )
                 return self._redirect(object_type, pk, active_server_key, active_sync_tab)
 
