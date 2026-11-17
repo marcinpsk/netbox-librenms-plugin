@@ -25,7 +25,7 @@ from netbox_librenms_plugin.assessment.mapping_lifecycle import (
 )
 from netbox_librenms_plugin.import_utils.disclosure import visible_object_label
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-from netbox_librenms_plugin.mapping_owner import ensure_mapping_owner
+from netbox_librenms_plugin.mapping_owner import ensure_mapping_owner, mapping_ownership
 from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
     IdentityOwned,
@@ -188,8 +188,10 @@ class _LifecycleWriter(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Lib
         row = lock_host_change_owner(model, operation.identity.pk)
         if row is None or not changeable.filter(pk=row.pk).exists():
             return intent.Unavailable("subject.available")
-        # The chassis and its members are locked now, so a master change since the first check is seen.
-        ensure_mapping_owner(row)
+        # The locked chassis decides the owner: a master change after the owner check makes the change stale.
+        owner = mapping_ownership(row).owner
+        if owner is None or owner.pk != row.pk:
+            return intent.Unavailable("assumptions.chassis")
         owned = False
         if (claimed := cls.claimed_id(operation.choices)) is not None:
             try:
