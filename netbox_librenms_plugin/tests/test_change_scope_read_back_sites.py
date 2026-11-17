@@ -472,7 +472,9 @@ def test_a_rebind_that_moves_the_interface_out_of_the_change_scope_is_rolled_bac
     interface = _bound_interface(device, "eth0", STALE_PORT)
     _seed(device, [_port(HOST_PORT, "eth0")])
     user = make_user_with_perms("rb-rebind-user", [("view", Device), ("view", Interface)])
-    user = grant(user, "change", Interface, constraints={"custom_field_data__librenms_id__default": STALE_PORT})
+    # The grant names the stored mapping on purpose: the rebind writes only the mapping.
+    binding = {"custom_field_data__librenms_id__default": STALE_PORT}  # nosemgrep: no-stored-mapping-access-orm
+    user = grant(user, "change", Interface, constraints=binding)
     client.force_login(user)
 
     response = _rebind(client, device, HOST_PORT)
@@ -485,7 +487,7 @@ def test_a_rebind_that_moves_the_interface_out_of_the_change_scope_is_rolled_bac
 
 @pytest.mark.usefixtures("servers")
 class TestServerMappingWrites:
-    """The mapping views of a Device write only its custom field, which a constraint can still name."""
+    """The mapping views of a Device write only its mapping, which a grant constraint can still name on purpose."""
 
     @staticmethod
     def _owner(tag, constraints):
@@ -499,7 +501,8 @@ class TestServerMappingWrites:
     def test_a_removal_that_moves_the_device_out_of_the_change_scope_is_rolled_back(self, client, flushed_events):
         from django.urls import reverse
 
-        owner, user = self._owner("rb-mapping-remove", {"custom_field_data__librenms_id__has_key": "retired"})
+        has_retired = {"custom_field_data__librenms_id__has_key": "retired"}  # nosemgrep: no-stored-mapping-access-orm
+        owner, user = self._owner("rb-mapping-remove", has_retired)
         before = stored_mapping_for_test(owner)
         client.force_login(user)
 
@@ -518,7 +521,9 @@ class TestServerMappingWrites:
     def test_a_preference_that_moves_the_device_out_of_the_change_scope_is_rolled_back(self, client, flushed_events):
         from netbox_librenms_plugin.tests.test_object_server_preference import _preference_url
 
-        owner, user = self._owner("rb-mapping-prefer", {"custom_field_data__librenms_id___preferred_server": "primary"})
+        preferred = "custom_field_data__librenms_id___preferred_server"  # nosemgrep: no-stored-mapping-access-orm
+        prefers_primary = {preferred: "primary"}  # nosemgrep: no-stored-mapping-access-orm
+        owner, user = self._owner("rb-mapping-prefer", prefers_primary)
         before = stored_mapping_for_test(owner)
         client.force_login(user)
 
