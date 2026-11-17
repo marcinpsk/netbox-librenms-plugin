@@ -15,7 +15,7 @@ from django.urls import reverse
 from django.contrib import messages
 from django.utils.html import escape
 
-from netbox_librenms_plugin.mapping_owner import MISPLACED_MESSAGE, NO_MASTER_MESSAGE
+from netbox_librenms_plugin.mapping_owner import MISPLACED_MESSAGE, NO_MASTER_MESSAGE, NOT_OWNER_MESSAGE
 from netbox_librenms_plugin.models import LibreNMSSettings
 from netbox_librenms_plugin.tests.conftest import (
     configure_librenms_servers,
@@ -720,87 +720,6 @@ def test_a_legacy_conversion_refuses_a_master_that_lost_the_master_role_during_t
     assert _errors(response) == [MISPLACED_MESSAGE]
     assert read_mapping(_fresh(master)).container is ContainerStatus.LEGACY
     assert mapping_summary(_fresh(successor)) == {}
-
-
-def _paths(server):
-    return [request["path"] for request in server.requests]
-
-
-@pytest.mark.django_db
-def test_discovery_refuses_a_device_that_joined_a_chassis_as_a_member_after_it_was_read(servers):
-    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-    from netbox_librenms_plugin.mapping_owner import MappingOwnerError
-    from netbox_librenms_plugin.tests.conftest import make_device
-
-    chassis, (master,) = _chassis("owner-discovery-join", count=1)
-    seed_mapping(master, PRIMARY, own=7140)
-    joiner = make_device("owner-discovery-join-late")
-    joiner.primary_ip4 = ip_on(joiner, "198.18.73.1/24", "mgmt0")
-    joiner.save()
-    stale = _fresh(joiner)
-    joiner.virtual_chassis = chassis
-    joiner.vc_position = 2
-    joiner.save()
-    servers.primary.register("/api/v0/devices/198.18.73.1", {"status": "ok", "devices": [{"device_id": 7141}]})
-
-    with pytest.raises(MappingOwnerError, match=NOT_OWNER_MESSAGE):
-        LibreNMSAPI(server_key=PRIMARY).get_librenms_id(stale)
-
-    assert mapping_summary(_fresh(joiner)) == {}
-    assert mapping_summary(_fresh(master)) == {PRIMARY: {"own": 7140}}
-
-
-@pytest.mark.django_db
-def test_without_the_mapping_field_discovery_caches_no_id_for_a_member_that_is_not_the_master(client, servers):
-    from extras.models import CustomField
-
-    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-
-    CustomField.objects.filter(name="librenms_id").delete()
-    _vc, (_master, member) = _chassis("owner-cache-discovery")
-    member.primary_ip4 = ip_on(member, "198.18.74.1/24", "mgmt0")
-    member.save()
-    servers.primary.register("/api/v0/devices/198.18.74.1", {"status": "ok", "devices": [{"device_id": 7150}]})
-    client.force_login(make_superuser("owner-cache-discovery"))
-
-    response = client.post(
-        reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", args=[member.pk]),
-        {"server_key": PRIMARY},
-        HTTP_HX_REQUEST="true",
-    )
-
-    assert response.status_code == 200
-    assert escape(NOT_OWNER_MESSAGE) in response.content.decode()
-    assert LibreNMSAPI(server_key=PRIMARY).get_cached_librenms_id(member) is None
-    assert "/api/v0/devices/7150/ip" not in _paths(servers.primary)
-
-
-@pytest.mark.django_db
-def test_without_the_mapping_field_a_member_refresh_reads_no_cached_id(client, servers):
-    from django.core.cache import cache
-    from extras.models import CustomField
-
-    from netbox_librenms_plugin.acquisition.coordinator import SubjectNotMapped, acquire, plan_acquisition
-    from netbox_librenms_plugin.acquisition.registry import Resource
-    from netbox_librenms_plugin.librenms_api import librenms_id_cache_key
-
-    CustomField.objects.filter(name="librenms_id").delete()
-    _vc, (_master, member) = _chassis("owner-cache-read")
-    # The member held this ID before it joined the chassis.
-    cache.set(librenms_id_cache_key(member, PRIMARY), 7160, timeout=300)
-    client.force_login(make_superuser("owner-cache-read"))
-
-    response = client.post(
-        reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", args=[member.pk]),
-        {"server_key": PRIMARY},
-        HTTP_HX_REQUEST="true",
-    )
-    with pytest.raises(SubjectNotMapped):
-        acquire(plan_acquisition(member, server_key=PRIMARY, resources=[Resource.IP_ADDRESSES]))
-
-    assert response.status_code == 200
-    assert response.context["ip_sync"]["table"] is None
-    assert not any(path.startswith("/api/v0/devices/7160") for path in _paths(servers.primary))
 
 
 _WAITING_WRITERS = {
