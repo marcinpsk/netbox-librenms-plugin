@@ -505,8 +505,10 @@ class BaseLibreNMSSyncView(
         device_info_unavailable = librenms_info.get("device_info_unavailable", False)
         link = self._link_context(request, _lookup_device)
         # A device that LibreNMS already has is linked, not added; an unanswered lookup proposes neither.
+        # A chassis member is never added: the master holds the mapping of the chassis.
         show_add_device = (
-            not librenms_info["found_in_librenms"]
+            (_lookup_device is None or _lookup_device.pk == obj.pk)
+            and not librenms_info["found_in_librenms"]
             and not device_info_unavailable
             and (link is None or link["state"] == LinkState.NO_MATCH.value)
         )

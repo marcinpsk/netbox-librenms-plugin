@@ -214,7 +214,9 @@ class _ModuleTabParser(HTMLParser):
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
         if tag == "form":
-            self._open_forms.append({"action": attrs.get("action", ""), "fields": {}, "selects": {}})
+            self._open_forms.append(
+                {"id": attrs.get("id"), "action": attrs.get("action", ""), "fields": {}, "selects": {}}
+            )
             self.forms.append(self._open_forms[-1])
         elif tag == "table" and attrs.get("id") == "librenms-module-table":
             self.table_attrs = attrs

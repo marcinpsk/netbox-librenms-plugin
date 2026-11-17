@@ -54,6 +54,16 @@ def page_link(client, obj, **query):
     return sync_page(client, obj, **query).context["link"]
 
 
+def rendered_link_form(client, obj, **query):
+    """Return ``(action URL, fields)`` of the Link form that the sync page of *obj* renders, or None."""
+    from netbox_librenms_plugin.tests.view_test_helpers import module_tab_forms
+
+    html = sync_page(client, obj, **query).content.decode()
+    forms = [form for form in module_tab_forms(html).forms if form["id"] == "librenms-link-form"]
+    assert len(forms) <= 1, forms
+    return (forms[0]["action"], dict(forms[0]["fields"])) if forms else None
+
+
 def page_token(client, obj):
     """Return the Link token that the sync page of *obj* offers."""
     link = page_link(client, obj)
