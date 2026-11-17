@@ -356,7 +356,7 @@ def test_module_cache_status_reports_tab_states_when_an_applicable_serial_rule_i
     from netbox_librenms_plugin.models import NormalizationRule
 
     _configure_servers(settings)
-    device = make_device("cache-status-module-broken-rule", librenms_cf={"primary": {"id": 6409}})
+    device = seed_mapping(make_device("cache-status-module-broken-rule"), "primary", own=6409)
     seed_modules_snapshot(device, [], server_key="primary")
     rule = NormalizationRule.objects.create(
         scope="serial",

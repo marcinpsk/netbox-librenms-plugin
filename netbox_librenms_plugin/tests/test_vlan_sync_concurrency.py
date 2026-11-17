@@ -369,7 +369,7 @@ def test_an_interface_sync_that_holds_the_device_and_assigns_the_vlan_does_not_d
     from django.db import transaction
     from ipam.models import VLAN, VLANGroup
 
-    device = make_device("vlan-lock-order", librenms_cf={"default": {"id": 42}})
+    device = seed_mapping(make_device("vlan-lock-order"), "default", own=42)
     interface = Interface.objects.create(device=device, name="eth0", type="1000base-t")
     group = VLANGroup.objects.create(name="Lock-Order", slug="lock-order")
     vlan = VLAN.objects.create(vid=71, group=group, name="old-name", status="active")

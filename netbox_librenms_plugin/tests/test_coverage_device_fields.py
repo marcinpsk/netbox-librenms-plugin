@@ -1494,7 +1494,7 @@ class TestConvertLegacyLibreNMSIdView:
             assert _messages(response, "error") == [_SERIAL_MISMATCH_MESSAGE]
             assert not any("legacy-twin-hidden" in text for text in _messages(response))
         else:
-            assert stored_mapping_for_test(device) == {SERVER_KEY: 6567}
+            assert mapping_summary(device) == {SERVER_KEY: {"own": 6567}}
             assert _messages(response, "error") == []
 
     def test_a_hidden_twin_written_under_the_row_lock_refuses_the_conversion(
