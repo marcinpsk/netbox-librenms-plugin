@@ -35,6 +35,7 @@ from netbox_librenms_plugin.sync_cache import (
     schedule_request_cache_mutation,
     sync_subject_key,
 )
+from netbox_librenms_plugin.transactions import atomic_with_events, outside_change_scope, saved_in_scope
 from netbox_librenms_plugin.utils import (
     DEVICE_IP_FK_FIELDS,
     DEVICE_IP_FK_LABELS,
@@ -443,6 +444,19 @@ class _BaseMoveToWinnerView(
             )
         return donor, winner, None
 
+    def _refuse_rows_outside_change_scope(self, request, rows):
+        """
+        Roll the move back and return the refusal when a written row left the user's change scope, else None.
+
+        Call it after the last write, inside the move's atomic block: a constrained grant decides on
+        the saved rows, as NetBox's edit views check.
+        """
+        outside = next((row for row in rows if not saved_in_scope(row, request.user, "change")), None)
+        if outside is None:
+            return None
+        transaction.set_rollback(True)
+        return self._fail(request, str(outside_change_scope(outside)), status=403)
+
 
 def _refresh_cable_termination_caches(interface):
     """
@@ -553,7 +567,7 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
             )
 
         with claim_sync_subjects(sync_subject_key(donor), sync_subject_key(winner)):
-            with transaction.atomic():
+            with atomic_with_events():
                 donor, winner, err = self._lock_donor_winner_and_reverify(request, donor, winner, server_key)
                 if err is not None:
                     return err
@@ -718,6 +732,8 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
                     # rather than 500ing or leaving the donor with a dangling FK NetBox rejects.
                     transaction.set_rollback(True)
                     return self._fail(request, f"Cannot reconcile donor IP assignments: {exc}", status=409)
+                if refusal := self._refuse_rows_outside_change_scope(request, [interface, *dependents, donor, winner]):
+                    return refusal
 
             message = f"Moved interface '{interface.name}' to {winner.name}."
             if dependents:
@@ -789,7 +805,7 @@ class MoveIPAddressToWinnerView(_BaseMoveToWinnerView):
             )
 
         with claim_sync_subjects(sync_subject_key(donor), sync_subject_key(winner)):
-            with transaction.atomic():
+            with atomic_with_events():
                 donor, winner, err = self._lock_donor_winner_and_reverify(request, donor, winner, server_key)
                 if err is not None:
                     return err
@@ -834,6 +850,8 @@ class MoveIPAddressToWinnerView(_BaseMoveToWinnerView):
                     # rather than 500ing or leaving the donor with a dangling FK NetBox rejects.
                     transaction.set_rollback(True)
                     return self._fail(request, f"Cannot reconcile donor IP assignments: {exc}", status=409)
+                if refusal := self._refuse_rows_outside_change_scope(request, [ip, donor, winner]):
+                    return refusal
 
             message = f"Moved IP {ip.address} to {winner.name} interface '{winner_iface.name}'."
             if notes:
@@ -896,7 +914,7 @@ class TransferDeviceIPView(_BaseMoveToWinnerView):
             )
 
         with claim_sync_subjects(sync_subject_key(donor), sync_subject_key(winner)):
-            with transaction.atomic():
+            with atomic_with_events():
                 donor, winner, err = self._lock_donor_winner_and_reverify(request, donor, winner, server_key)
                 if err is not None:
                     return err
@@ -965,6 +983,8 @@ class TransferDeviceIPView(_BaseMoveToWinnerView):
                     # 500ing or leaving the donor's FK cleared with the winner's left unset.
                     transaction.set_rollback(True)
                     return self._fail(request, f"Cannot transfer {human}: {exc}", status=409)
+                if refusal := self._refuse_rows_outside_change_scope(request, [donor, winner]):
+                    return refusal
 
             schedule_request_cache_mutation(request, donor, SyncTab.IP_ADDRESSES, server_key)
             _schedule_winner_cache_mutation(request, winner, SyncTab.IP_ADDRESSES, server_key)
