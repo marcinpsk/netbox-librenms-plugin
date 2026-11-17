@@ -609,6 +609,41 @@ def test_an_oob_link_refuses_a_member_that_left_the_chassis_after_the_chassis_lo
     assert mapping_summary(_fresh(member)) == {}
 
 
+@transactional_db_with_all_apps()
+def test_a_merge_waits_for_a_master_change_of_the_donor_chassis_and_merges_nothing(servers):
+    """The merge share-locks the donor's chassis, so a promotion waits, and the merge then sees a misplaced mapping."""
+    from netbox_librenms_plugin.tests.conftest import make_device
+    from netbox_librenms_plugin.tests.test_serial_identity_concurrency import (
+        _set_master,
+        _write_during_a_chassis_change,
+    )
+
+    winner = seed_mapping(make_device("owner-merge-winner"), PRIMARY, own=7201)
+    chassis, (donor, member) = _chassis("owner-merge")
+    donor.serial = "OWNER-MERGE-SERIAL"
+    donor.save()
+    seed_mapping(donor, PRIMARY, own=7200)
+    servers.primary.device_info_response(
+        device_id=7202, hostname=winner.name, hardware=winner.device_type.model, os="ios", serial=donor.serial, ip=""
+    )
+    servers.primary.vc_inventory_callable(7202, [], {})
+    url = reverse("plugins:netbox_librenms_plugin:device_merge_netbox_devices", kwargs={"device_id": 7202})
+
+    status, sqlstates = _write_during_a_chassis_change(
+        make_superuser("owner-merge-user"),
+        url,
+        {"server_key": PRIMARY, "winner_pk": str(winner.pk)},
+        [_set_master(chassis, member)],
+    )
+
+    assert "40P01" not in sqlstates
+    # The owner refusal of a plain request is a redirect with the misplaced-mapping message.
+    assert status == 302
+    assert mapping_summary(_fresh(winner)) == {PRIMARY: {"own": 7201}}
+    assert mapping_summary(_fresh(donor)) == {PRIMARY: {"own": 7200}}
+    assert mapping_summary(_fresh(member)) == {}
+
+
 @pytest.mark.django_db
 def test_a_legacy_conversion_refuses_a_master_that_lost_the_master_role_during_the_lookup(client, servers, monkeypatch):
     from dcim.models import VirtualChassis
