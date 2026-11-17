@@ -12,7 +12,7 @@ from netbox.plugins import get_plugin_config
 
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 from netbox_librenms_plugin.ip_addressing import primary_ips
-from netbox_librenms_plugin.mapping_owner import ensure_mapping_owner
+from netbox_librenms_plugin.mapping_owner import ensure_locked_mapping_owner, lock_owner_chassis
 from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
     assign_own,
@@ -592,10 +592,8 @@ class LibreNMSAPI:
 
         """
         if can_store_device_mapping(obj):
-            # Only the mapping owner stores an ID: a second member with an ID splits the chassis mapping.
-            if getattr(obj, "virtual_chassis_id", None) is not None:
-                ensure_mapping_owner(obj)
             with transaction.atomic():
+                chassis_id = lock_owner_chassis(type(obj), obj.pk)
                 try:
                     locked_obj, conflict = lock_librenms_id_assignment(
                         librenms_id,
@@ -627,6 +625,8 @@ class LibreNMSAPI:
                             f"LibreNMS ID {librenms_id} is already assigned to {object_label} '{conflict.name}'"
                         ),
                     )
+                # Only the mapping owner stores an ID: a second member with an ID splits the chassis mapping.
+                ensure_locked_mapping_owner(locked_obj, chassis_id)
                 locked_obj.snapshot()
                 persist_mapping(
                     locked_obj,

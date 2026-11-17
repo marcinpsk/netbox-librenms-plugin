@@ -525,3 +525,31 @@ def test_an_oob_link_refuses_a_master_that_lost_the_chassis_before_the_lock(clie
     assert mapping_summary(_fresh(master)) == {PRIMARY: {"own": 7130}}
     assert mapping_summary(_fresh(member)) == {}
     assert mapping_summary(_fresh(successor)) == {}
+
+
+def _paths(server):
+    return [request["path"] for request in server.requests]
+
+
+@pytest.mark.django_db
+def test_discovery_refuses_a_device_that_joined_a_chassis_as_a_member_after_it_was_read(servers):
+    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+    from netbox_librenms_plugin.mapping_owner import MappingOwnerError
+    from netbox_librenms_plugin.tests.conftest import make_device
+
+    chassis, (master,) = _chassis("owner-discovery-join", count=1)
+    seed_mapping(master, PRIMARY, own=7140)
+    joiner = make_device("owner-discovery-join-late")
+    joiner.primary_ip4 = ip_on(joiner, "198.18.73.1/24", "mgmt0")
+    joiner.save()
+    stale = _fresh(joiner)
+    joiner.virtual_chassis = chassis
+    joiner.vc_position = 2
+    joiner.save()
+    servers.primary.register("/api/v0/devices/198.18.73.1", {"status": "ok", "devices": [{"device_id": 7141}]})
+
+    with pytest.raises(MappingOwnerError, match=NOT_OWNER_MESSAGE):
+        LibreNMSAPI(server_key=PRIMARY).get_librenms_id(stale)
+
+    assert mapping_summary(_fresh(joiner)) == {}
+    assert mapping_summary(_fresh(master)) == {PRIMARY: {"own": 7140}}
