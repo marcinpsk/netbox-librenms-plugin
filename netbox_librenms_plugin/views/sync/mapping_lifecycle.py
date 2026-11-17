@@ -188,6 +188,8 @@ class _LifecycleWriter(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Lib
         row = lock_host_change_owner(model, operation.identity.pk)
         if row is None or not changeable.filter(pk=row.pk).exists():
             return intent.Unavailable("subject.available")
+        # The chassis and its members are locked now, so a master change since the first check is seen.
+        ensure_mapping_owner(row)
         owned = False
         if (claimed := cls.claimed_id(operation.choices)) is not None:
             try:

@@ -653,3 +653,33 @@ def test_a_mapping_writer_that_waits_for_a_master_change_writes_nothing_on_the_o
     assert status == 302
     assert mapping_summary(_fresh(master)) == before
     assert mapping_summary(_fresh(successor)) == {}
+
+
+@transactional_db_with_all_apps()
+def test_a_confirmed_host_change_that_waits_for_a_master_change_writes_nothing_on_the_old_master(client, servers):
+    from netbox_librenms_plugin.confirmation_intent import FIELD
+    from netbox_librenms_plugin.tests.test_serial_identity_concurrency import (
+        _set_master,
+        _write_during_a_chassis_change,
+    )
+
+    chassis, (master, successor) = _chassis("owner-wait-lifecycle")
+    seed_mapping(master, PRIMARY, own=7190)
+    user = make_superuser("owner-wait-lifecycle")
+    client.force_login(user)
+    action, fields = _editor_forms(client, master, server_key=PRIMARY)[PRIMARY]
+    confirmation = client.post(action, {**fields, "own_id": "7191"})
+    assert confirmation.status_code == 200, message_texts(confirmation)
+    context = confirmation.context
+
+    status, sqlstates = _write_during_a_chassis_change(
+        user,
+        context["action_url"],
+        {"server_key": context["server_key"], FIELD: [context["token"]]},
+        [_set_master(chassis, successor)],
+    )
+
+    assert "40P01" not in sqlstates
+    assert status == 302
+    assert mapping_summary(_fresh(master)) == {PRIMARY: {"own": 7190}}
+    assert mapping_summary(_fresh(successor)) == {}
