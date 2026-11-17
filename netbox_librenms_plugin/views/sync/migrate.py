@@ -796,7 +796,7 @@ class MoveInterfaceToWinnerView(_MoveResourceToWinnerView):
                     # rather than 500ing or leaving the donor with a dangling FK NetBox rejects.
                     transaction.set_rollback(True)
                     return self._fail(request, f"Cannot reconcile donor IP assignments: {exc}", status=409)
-                if refusal := self._refuse_rows_outside_change_scope(request, [interface, *dependents, donor, winner]):
+                if refusal := self._refuse_rows_outside_change_scope(request, [donor, winner]):
                     return refusal
 
             message = f"Moved interface '{interface.name}' to {winner.name}."
@@ -922,7 +922,7 @@ class MoveIPAddressToWinnerView(_MoveResourceToWinnerView):
                     # rather than 500ing or leaving the donor with a dangling FK NetBox rejects.
                     transaction.set_rollback(True)
                     return self._fail(request, f"Cannot reconcile donor IP assignments: {exc}", status=409)
-                if refusal := self._refuse_rows_outside_change_scope(request, [ip, donor, winner]):
+                if refusal := self._refuse_rows_outside_change_scope(request, [donor, winner]):
                     return refusal
 
             message = f"Moved IP {ip.address} to {winner.name} interface '{winner_iface.name}'."
