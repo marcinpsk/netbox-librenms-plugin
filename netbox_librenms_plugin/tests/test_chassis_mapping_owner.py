@@ -606,3 +606,50 @@ def test_without_the_mapping_field_a_member_refresh_reads_no_cached_id(client, s
     assert response.status_code == 200
     assert response.context["ip_sync"]["table"] is None
     assert not any(path.startswith("/api/v0/devices/7160") for path in _paths(servers.primary))
+
+
+_WAITING_WRITERS = {
+    "remove": ("remove_server_mapping", {"server_key": RETIRED, "object_type": "device"}),
+    "preferred": ("set_preferred_server", {"server_key": SECONDARY, "object_type": "device"}),
+    "edit": (
+        "edit_server_mapping",
+        {
+            "object_type": "device",
+            "server_key": SECONDARY,
+            "own_id": "7182",
+            "oob_id": "",
+            "oob_type": "",
+            "shown_own_id": "",
+            "shown_oob_id": "",
+            "shown_oob_type": "",
+        },
+    ),
+}
+
+
+@transactional_db_with_all_apps()
+@pytest.mark.parametrize("writer", sorted(_WAITING_WRITERS))
+def test_a_mapping_writer_that_waits_for_a_master_change_writes_nothing_on_the_old_master(servers, writer):
+    from netbox_librenms_plugin.tests.test_serial_identity_concurrency import (
+        _set_master,
+        _write_during_a_chassis_change,
+    )
+
+    chassis, (master, successor) = _chassis(f"owner-wait-{writer}")
+    seed_mapping(master, PRIMARY, own=7180, save=False)
+    if writer != "edit":
+        seed_mapping(master, SECONDARY, own=7181, save=False)
+    seed_mapping(master, RETIRED, own=7183)
+    before = mapping_summary(_fresh(master))
+    view_name, data = _WAITING_WRITERS[writer]
+    url = reverse(f"plugins:netbox_librenms_plugin:{view_name}", args=[master.pk])
+
+    # The holder makes the successor the master; the old master then holds misplaced data.
+    status, sqlstates = _write_during_a_chassis_change(
+        make_superuser(f"owner-wait-{writer}"), url, data, [_set_master(chassis, successor)]
+    )
+
+    assert "40P01" not in sqlstates
+    assert status == 302
+    assert mapping_summary(_fresh(master)) == before
+    assert mapping_summary(_fresh(successor)) == {}
