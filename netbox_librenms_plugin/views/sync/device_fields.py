@@ -66,6 +66,7 @@ from netbox_librenms_plugin.sync_cache import SyncTab
 from netbox_librenms_plugin.transactions import (
     atomic_with_events,
     classify_conflict,
+    outside_change_scope,
     run_transaction,
     saved_in_scope,
     update_existing_row,
@@ -1190,6 +1191,9 @@ class EditServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
                 if change.changed:
                     owner.snapshot()
                     persist_mapping(owner, change, write=save_mapping_fields)
+                    # A change constraint can read the mapping, so the saved row must stay in the change scope.
+                    if not saved_in_scope(owner, request.user, "change"):
+                        raise outside_change_scope(owner)
         except _NeedsConfirmation as needed:
             # The confirmation is an assessment: it reads the object again and writes nothing.
             return render_host_change(
@@ -1209,6 +1213,9 @@ class EditServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
             return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
         except _WriteRefused as exc:
             messages.add_message(request, exc.level, str(exc))
+            return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
+        except PermissionsViolation as exc:
+            messages.error(request, str(exc))
             return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
         except ValidationError as exc:
             if classify_conflict(exc):
