@@ -699,7 +699,8 @@ def test_a_replacement_refuses_when_the_device_moves_to_another_chassis_before_t
     from netbox_librenms_plugin.tests.lock_conflict_helpers import commit_row_change, second_connection
     from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE
 
-    _first, (_master, device) = make_virtual_chassis_members("replace-moved")
+    # The chassis master owns the mapping of the chassis.
+    _first, (device, _member) = make_virtual_chassis_members("replace-moved")
     other_chassis, _members = make_virtual_chassis_members("replace-moved-to", count=1)
     seed_mapping(device, "secondary", own=52331)
     client.force_login(make_superuser("identity-replacement-moved"))
@@ -728,7 +729,8 @@ def test_a_device_that_joins_the_locked_chassis_waits_for_the_replacement(client
     from netbox_librenms_plugin.tests.conftest import bounded_executor, make_interface, make_virtual_chassis_members
     from netbox_librenms_plugin.tests.lock_conflict_helpers import backend_pid, second_connection, wait_for_lock_wait
 
-    chassis, (_master, device) = make_virtual_chassis_members("replace-join")
+    # The chassis master owns the mapping of the chassis.
+    chassis, (device, _member) = make_virtual_chassis_members("replace-join")
     joiner = make_device("replace-join-new-member")
     seed_mapping(make_interface(joiner, "eth0"), "secondary", own=52342)
     seed_mapping(device, "secondary", own=52341)
