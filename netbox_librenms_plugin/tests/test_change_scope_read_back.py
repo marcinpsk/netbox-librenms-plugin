@@ -358,13 +358,12 @@ def test_an_existing_interface_that_the_ip_tab_writes_out_of_the_change_scope_is
 
     from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server, make_virtual_chassis_members
     from netbox_librenms_plugin.tests.interface_sync_post_helpers import bound_interface
-    from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
 
     configure_default_librenms_server(settings)
     # Member 3 has the same name on another port: the name match is ambiguous, so the create-missing
     # writer finds member 2 from the port name and writes its existing interface.
     _chassis, (device, member, sibling) = make_virtual_chassis_members("rb-ip-interface", count=3)
-    seed_stored_mapping(device, {SERVER_KEY: {"id": 7331}}, save=True)
+    seed_mapping(device, SERVER_KEY, own=7331)
     bound_interface(sibling, "eth2/1", 7900)
     interface = make_interface(member, "eth2/1", iface_type="1000base-t")
     seed_ip_snapshot(
