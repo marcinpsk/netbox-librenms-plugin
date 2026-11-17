@@ -130,7 +130,7 @@ def _post_field_sync(client, name, device):
 
 @pytest.mark.django_db
 def test_a_name_sync_out_of_the_change_scope_is_rolled_back(client, live_librenms, flushed_events):
-    device = make_device("managed-rb-name", librenms_cf={SERVER_KEY: 7301})
+    device = seed_mapping(make_device("managed-rb-name"), SERVER_KEY, own=7301)
     live_librenms.server.device_info_response(device_id=7301, hostname="other-rb-name")
     client.force_login(_device_writer("rb-name", MANAGED))
 
@@ -146,7 +146,7 @@ def test_a_name_sync_out_of_the_change_scope_is_rolled_back(client, live_librenm
 
 @pytest.mark.django_db
 def test_a_serial_sync_out_of_the_change_scope_is_rolled_back(client, live_librenms):
-    device = make_device("rb-serial", librenms_cf={SERVER_KEY: 7302})
+    device = seed_mapping(make_device("rb-serial"), SERVER_KEY, own=7302)
     live_librenms.server.device_info_response(device_id=7302, hostname=device.name, serial="RB-SERIAL")
     client.force_login(_device_writer("rb-serial", {"serial": ""}))
 
@@ -163,7 +163,7 @@ def test_a_serial_sync_out_of_the_change_scope_is_rolled_back(client, live_libre
 def test_a_platform_sync_out_of_the_change_scope_is_rolled_back(client, live_librenms):
     from dcim.models import Platform
 
-    device = make_device("rb-platform", librenms_cf={SERVER_KEY: 7303})
+    device = seed_mapping(make_device("rb-platform"), SERVER_KEY, own=7303)
     platform = Platform.objects.create(name="rb-platform-os", slug="rb-platform-os")
     live_librenms.server.device_info_response(device_id=7303, hostname=device.name, os=platform.name)
     client.force_login(_device_writer("rb-platform", {"platform__isnull": True}, ("view", Platform)))
@@ -450,9 +450,9 @@ def test_an_import_conflict_action_out_of_the_change_scope_is_rolled_back(
 
 @pytest.mark.django_db
 def test_a_legacy_id_migration_out_of_the_change_scope_is_rolled_back(client, live_librenms, flushed_events):
-    from netbox_librenms_plugin.tests.mapping_fixtures import stored_mapping_for_test
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping, stored_mapping_for_test
 
-    device = make_device("rb-migrate-legacy", serial="RB-SN-MIGRATE", librenms_cf=7342)
+    device = seed_stored_mapping(make_device("rb-migrate-legacy", serial="RB-SN-MIGRATE"), 7342, save=True)
     _serve_import_device(live_librenms.server, 7342, "rb-migrate-legacy", "RB-SN-MIGRATE")
     # The grant names the stored mapping on purpose: the migration writes only the mapping.
     legacy_id = {"custom_field_data__librenms_id": 7342}  # nosemgrep: no-stored-mapping-access-orm
@@ -484,13 +484,8 @@ def test_a_legacy_id_migration_out_of_the_change_scope_is_rolled_back(client, li
 
 def _migrated_pair(tag):
     """Return a donor device that is marked as migrated to a winner device, and the winner."""
-    from netbox_librenms_plugin.server_mappings import mark_migrated
-    from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
-
     donor, winner = make_device(f"{tag}-donor"), make_device(f"{tag}-winner")
-    apply_mapping_change(donor, mark_migrated(donor, winner.pk, SERVER_KEY))
-    donor.save(update_fields=["custom_field_data"])
-    return donor, winner
+    return seed_mapping(donor, SERVER_KEY, migrated_to=winner.pk), winner
 
 
 def _post_move(client, name, *args):
@@ -618,8 +613,8 @@ def test_a_merge_whose_winner_leaves_the_change_scope_rolls_back_the_donor_too(c
     from netbox_librenms_plugin.server_mappings import read_mapping
     from netbox_librenms_plugin.tests.conftest import ip_on
 
-    winner = make_device("rb-merge-winner", librenms_cf={SERVER_KEY: {"id": 20}})
-    donor = make_device("rb-merge-donor", serial="RB-MERGE", librenms_cf={SERVER_KEY: {"id": 10}})
+    winner = seed_mapping(make_device("rb-merge-winner"), SERVER_KEY, own=20)
+    donor = seed_mapping(make_device("rb-merge-donor", serial="RB-MERGE"), SERVER_KEY, own=10)
     # The donor's OOB IP sits on a winner interface, so the merge moves it to the winner.
     oob_ip = ip_on(winner, "198.18.73.81/32", "mgmt0")
     Device.objects.filter(pk=donor.pk).update(oob_ip=oob_ip)
