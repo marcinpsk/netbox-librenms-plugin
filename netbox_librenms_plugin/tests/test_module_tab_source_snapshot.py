@@ -522,6 +522,45 @@ def test_a_member_page_merges_transceivers_under_the_serial_rules_of_the_chassis
 
 
 @pytest.mark.django_db
+def test_masterless_chassis_members_read_the_module_source_that_one_refresh_stored(live_librenms):
+    """Without a master each member has its own serial context, and no member's read refuses the shared source."""
+    from dcim.models import DeviceType, Manufacturer, VirtualChassis
+    from netbox_librenms_plugin.acquisition.coordinator import acquire
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.serial_identity import SerialRules
+    from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members, map_device_to_librenms
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import transceiver_row
+
+    chassis, (owner, page) = make_virtual_chassis_members("module-tab-masterless", count=2)
+    VirtualChassis.objects.filter(pk=chassis.pk).update(master=None)
+    other_maker = Manufacturer.objects.create(name="Masterless page maker", slug="masterless-page-maker")
+    page.device_type = DeviceType.objects.create(
+        manufacturer=other_maker, model="Masterless page", slug="masterless-page"
+    )
+    page.save()
+    NormalizationRule.objects.filter(scope=NormalizationRule.SCOPE_SERIAL).delete()
+    NormalizationRule.objects.create(
+        scope="serial", manufacturer=owner.device_type.manufacturer, match_pattern=r"^S/N\s+(.+)$", replacement=r"\1"
+    )
+    map_device_to_librenms(owner, HOST_ID, server_key="default")
+    owner.refresh_from_db()
+    page.refresh_from_db()
+    rules = SerialRules.load()
+    assert rules.for_device(owner).fingerprint != rules.for_device(page).fingerprint
+    # Only the owner's rule makes "S/N CARD-SERIAL" the card's serial, so each read shows its merge context.
+    transceivers = [transceiver_row(20, model="SFP-RULE", serial="S/N CARD-SERIAL", kind="sfp")]
+    serve(live_librenms.server, inventory=INVENTORY, transceivers=transceivers)
+    assert source_cache.store(
+        page, Resource.MODULES, acquire(plan_acquisition(page, server_key="default", resources=[Resource.MODULES]))
+    )
+
+    for member, indices in ((page, [1, 2, 20]), (owner, [1, 2]), (page, [1, 2, 20])):
+        assert _read_inventory_indices(member) == indices, member.name
+        assert SyncCacheConsistency(member).status("default")["modules"]["snapshot_available"], member.name
+        assert source_cache.read(member, Resource.MODULES, "default") is not None, member.name
+
+
+@pytest.mark.django_db
 def test_refresh_does_not_report_success_when_its_source_owner_is_deleted(client, live_librenms, monkeypatch):
     from dcim.models import Device
 
