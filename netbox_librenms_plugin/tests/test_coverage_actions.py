@@ -7413,12 +7413,14 @@ class TestAddAsOOBViewPost:
 
         tag = "master" if selected_is_master else "member"
         vc = VirtualChassis.objects.create(name=f"vc-oob-hold-{tag}")
-        sync_member = seed_mapping(make_device(f"vc-oob-hold-sync-{tag}"), self.server_key, own=10)
+        other = make_device(f"vc-oob-hold-other-{tag}")
         selected = make_device(f"vc-oob-hold-selected-{tag}", serial=f"VC-OOB-HOLD-{tag}")
-        Device.objects.filter(pk=sync_member.pk).update(virtual_chassis=vc, vc_position=1)
+        Device.objects.filter(pk=other.pk).update(virtual_chassis=vc, vc_position=1)
         Device.objects.filter(pk=selected.pk).update(virtual_chassis=vc, vc_position=2)
-        if selected_is_master:
-            VirtualChassis.objects.filter(pk=vc.pk).update(master=selected)
+        # The master holds the mappings of the chassis: the selected member itself, or the other member.
+        sync_member = selected if selected_is_master else other
+        seed_mapping(Device.objects.get(pk=sync_member.pk), self.server_key, own=10)
+        VirtualChassis.objects.filter(pk=vc.pk).update(master=sync_member)
         self._register_oob_device(17, "controller-node", serial=selected.serial, generic=True)
         client.force_login(make_superuser(f"vc-oob-hold-user-{tag}"))
         url = url_for("plugins:netbox_librenms_plugin:device_add_as_oob", kwargs={"device_id": 17})
@@ -10247,6 +10249,7 @@ class TestConflictActionsObjectScope:
         """No member is linked, and the chassis names an outside master with a primary IP: it owns nothing."""
         from dcim.models import Device, VirtualChassis
 
+        from netbox_librenms_plugin.mapping_owner import MappingOwnerError
         from netbox_librenms_plugin.tests.conftest import make_interface, make_ip, make_virtual_chassis
         from netbox_librenms_plugin.views.imports.actions import AddAsOOBView
 
@@ -10275,9 +10278,12 @@ class TestConflictActionsObjectScope:
             HTTP_HX_REQUEST="true",
         )
 
-        post_view(AddAsOOBView(), request, device_id=4343)
+        # The chassis has no mapping owner, so the attach refuses before any write.
+        with pytest.raises(MappingOwnerError):
+            post_view(AddAsOOBView(), request, device_id=4343)
 
         assert mapping_summary(Device.objects.get(pk=outside.pk)) == {}
+        assert mapping_summary(Device.objects.get(pk=target.pk)) == {}
 
     def test_add_as_oob_cannot_attach_to_an_out_of_scope_device(self):
         """AddAsOOB must object-scope its target too: a constrained grant cannot attach an OOB link elsewhere."""
