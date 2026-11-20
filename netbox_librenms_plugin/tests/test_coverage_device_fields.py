@@ -1510,7 +1510,7 @@ class TestConvertLegacyLibreNMSIdView:
         NormalizationRule.objects.get_or_create(
             scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
         )
-        device = make_device("legacy-late-twin-target", serial="LATE-TWIN", librenms_cf=6568)
+        device = seed_stored_mapping(make_device("legacy-late-twin-target", serial="LATE-TWIN"), 6568, save=True)
         librenms_server.device_info_response(device_id=6568, hostname=device.name, serial="LATE-TWIN")
         client.force_login(
             make_user_with_perms(
@@ -1539,7 +1539,7 @@ class TestConvertLegacyLibreNMSIdView:
         """A list or an object is no serial: the conversion refuses it, and the resolver never reads it."""
         from netbox_librenms_plugin.views.sync.device_fields import _SERIAL_MISMATCH_MESSAGE
 
-        device = make_device("legacy-malformed-serial", serial="MALFORMED-LEGACY", librenms_cf=6569)
+        device = seed_stored_mapping(make_device("legacy-malformed-serial", serial="MALFORMED-LEGACY"), 6569, save=True)
         librenms_server.device_info_response(device_id=6569, hostname=device.name, serial=serial)
 
         response = _post(logged_in_client, "convert_legacy_librenms_id", device, {"object_type": "device"})

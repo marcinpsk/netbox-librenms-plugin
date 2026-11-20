@@ -512,7 +512,7 @@ def test_capture_view_reports_a_malformed_database_id(recording_server):
     recording = deepcopy(load_recording("iosxe-c8300"))
     recording["responses"][f"GET /api/v0/devices/{recording['device_id']}"]["devices"][0]["poller_group"] = ["7"]
     server, api = recording_server(recording)
-    device = make_device("capture-malformed-id", librenms_cf={"test": {"id": recording["device_id"]}})
+    device = seed_mapping(make_device("capture-malformed-id"), "test", own=recording["device_id"])
 
     response = _run_capture(_view_with_api(api), server, device)
 
@@ -710,7 +710,7 @@ def test_a_standalone_capture_does_not_read_an_unrelated_invalid_serial_context(
     NormalizationRule.objects.filter(pk=rule.pk).update(replacement=r"invalid-\1")
     recording = load_recording("iosxe-c8300")
     server, api = recording_server(recording)
-    device = make_device("capture-standalone-context", librenms_cf={"test": {"id": recording["device_id"]}})
+    device = seed_mapping(make_device("capture-standalone-context"), "test", own=recording["device_id"])
 
     response = _run_capture(_view_with_api(api), server, device)
 
@@ -724,7 +724,7 @@ def test_a_capture_with_an_invalid_own_serial_context_renders_the_rule_error(rec
 
     recording = load_recording("iosxe-c8300")
     server, api = recording_server(recording)
-    device = make_device("capture-own-invalid-context", librenms_cf={"test": {"id": recording["device_id"]}})
+    device = seed_mapping(make_device("capture-own-invalid-context"), "test", own=recording["device_id"])
     rule = NormalizationRule.objects.create(
         scope="serial",
         manufacturer=device.device_type.manufacturer,
@@ -762,7 +762,7 @@ def test_a_capture_without_a_serial_does_not_need_its_serial_rules(recording_ser
 
     recording = _without_serials(load_recording("iosxe-c8300"))
     server, api = recording_server(recording)
-    device = make_device("capture-no-serial", librenms_cf={"test": {"id": recording["device_id"]}})
+    device = seed_mapping(make_device("capture-no-serial"), "test", own=recording["device_id"])
     rule = NormalizationRule.objects.create(
         scope="serial",
         manufacturer=device.device_type.manufacturer,
@@ -785,7 +785,7 @@ def test_a_capture_under_a_master_outside_the_chassis_renders_the_unavailable_re
 
     recording = load_recording("iosxe-c8300")
     server, api = recording_server(recording)
-    device = make_device("capture-outside-master", librenms_cf={"test": {"id": recording["device_id"]}})
+    device = seed_mapping(make_device("capture-outside-master"), "test", own=recording["device_id"])
     chassis = VirtualChassis.objects.create(name="capture-outside-master-vc")
     device.virtual_chassis = chassis
     device.vc_position = 1
@@ -815,7 +815,7 @@ def test_a_capture_never_reads_a_linked_master_outside_the_chassis(recording_ser
     device.virtual_chassis = chassis
     device.vc_position = 1
     device.save()
-    outsider = make_device("capture-linked-outsider", librenms_cf={"test": {"id": recording["device_id"]}})
+    outsider = seed_mapping(make_device("capture-linked-outsider"), "test", own=recording["device_id"])
     address = IPAddress.objects.create(address="198.18.0.20/32")
     Device.objects.filter(pk=outsider.pk).update(primary_ip4=address)
     VirtualChassis.objects.filter(pk=chassis.pk).update(master=outsider)
@@ -844,7 +844,7 @@ def test_a_junos_stack_under_a_master_outside_the_chassis_renders_the_unavailabl
         if "/inventory/" not in route and route != f"GET /api/v0/devices/{ports['device_id']}":
             recording["responses"].setdefault(route.replace(str(ports["device_id"]), str(recording["device_id"])), body)
     server, api = recording_server(recording)
-    device = make_device("capture-junos-outside-master", librenms_cf={"test": {"id": recording["device_id"]}})
+    device = seed_mapping(make_device("capture-junos-outside-master"), "test", own=recording["device_id"])
     chassis = VirtualChassis.objects.create(name="capture-junos-outside-master-vc")
     device.virtual_chassis = chassis
     device.vc_position = 1
@@ -866,7 +866,7 @@ def test_a_capture_refuses_a_list_valued_serial_without_showing_it(recording_ser
     route = next(key for key, body in recording["responses"].items() if "/inventory/" in key and body.get("inventory"))
     recording["responses"][route]["inventory"][0]["entPhysicalSerialNum"] = ["ASSET123"]
     server, api = recording_server(recording)
-    device = make_device("capture-list-serial", librenms_cf={"test": {"id": recording["device_id"]}})
+    device = seed_mapping(make_device("capture-list-serial"), "test", own=recording["device_id"])
 
     response = _run_capture(_view_with_api(api), server, device)
 

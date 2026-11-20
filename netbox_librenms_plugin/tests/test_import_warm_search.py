@@ -179,7 +179,7 @@ class TestNetBoxChanges:
         row = _row(5525, "warm-imported-row", serial="-", ip="")
         _serve(librenms, row)
         assert _search(librenms, clear_cache=True)[5525]["existing_device"] is None
-        imported = make_device("warm-imported-other-name", librenms_cf={"default": {"id": 5525}})
+        imported = seed_mapping(make_device("warm-imported-other-name"), "default", own=5525)
         matched = _search(librenms)[5525]
         assert (matched["existing_device"], matched["existing_match_type"]) == (imported, "librenms_id")
         imported.delete()

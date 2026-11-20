@@ -1,6 +1,8 @@
 """Bulk-import behavior tests against real HTTP, cache, and NetBox rows."""
 
 import pytest
+
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
 from django.core.cache import cache
 
 from netbox_librenms_plugin.tests.conftest import (
@@ -182,7 +184,7 @@ class TestCollisionDetection:
         from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
         from netbox_librenms_plugin.tests.test_coverage_device_operations import _broken_serial_rule
 
-        target = make_device("collision-legacy-target", serial="LEGACY-COLLIDE", librenms_cf=53)
+        target = seed_stored_mapping(make_device("collision-legacy-target", serial="LEGACY-COLLIDE"), 53, save=True)
         _broken_serial_rule("collision-legacy")
         legacy = _libre_device(53, "collision-legacy-other-name", serial="LEGACY-COLLIDE")
         by_name = _libre_device(54, target.name)
