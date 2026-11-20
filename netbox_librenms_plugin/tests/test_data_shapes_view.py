@@ -786,10 +786,11 @@ def test_a_capture_without_a_serial_does_not_need_its_serial_rules(recording_ser
 
 
 @pytest.mark.django_db
-def test_a_capture_under_a_master_outside_the_chassis_renders_the_unavailable_reason(recording_server):
+def test_a_capture_under_a_master_outside_the_chassis_is_refused(recording_server):
+    """A master outside the chassis is no mapping owner, so the capture reads nothing."""
     from dcim.models import VirtualChassis
 
-    from netbox_librenms_plugin.serial_identity import UNAVAILABLE_MASTER_LINK
+    from netbox_librenms_plugin.mapping_owner import MappingOwnerError
 
     recording = load_recording("iosxe-c8300")
     server, api = recording_server(recording)
@@ -800,12 +801,9 @@ def test_a_capture_under_a_master_outside_the_chassis_renders_the_unavailable_re
     device.save()
     VirtualChassis.objects.filter(pk=chassis.pk).update(master=make_device("capture-outside-master-other"))
 
-    response = _run_capture(_view_with_api(api), server, device)
-
-    html = unescape(response.content.decode())
-    assert response.status_code == 200
-    assert UNAVAILABLE_MASTER_LINK in html
-    assert "Anonymized recording" not in html
+    with pytest.raises(MappingOwnerError):
+        _run_capture(_view_with_api(api), server, device)
+    assert server.requests == []
 
 
 @pytest.mark.django_db
@@ -837,12 +835,13 @@ def test_a_capture_never_reads_a_linked_master_outside_the_chassis(recording_ser
 
 
 @pytest.mark.django_db
-def test_a_junos_stack_under_a_master_outside_the_chassis_renders_the_unavailable_reason(recording_server):
-    """Another serial context can explain the FPC stack, but the device's own context is Unavailable."""
+def test_a_junos_stack_under_a_master_outside_the_chassis_is_refused(recording_server):
+    """Another serial context can explain the FPC stack, but a master outside the chassis is no mapping owner."""
     from dcim.models import VirtualChassis
 
     from netbox_librenms_plugin.data_shapes.signature import compute_shape_signature
-    from netbox_librenms_plugin.serial_identity import UNAVAILABLE_MASTER_LINK, plain_context
+    from netbox_librenms_plugin.mapping_owner import MappingOwnerError
+    from netbox_librenms_plugin.serial_identity import plain_context
 
     recording = deepcopy(load_recording("juniper-ex4400-vc-2member"))
     assert compute_shape_signature(recording, serial_context=plain_context())["virtual_chassis"]["present"]
@@ -859,12 +858,9 @@ def test_a_junos_stack_under_a_master_outside_the_chassis_renders_the_unavailabl
     device.save()
     VirtualChassis.objects.filter(pk=chassis.pk).update(master=make_device("capture-junos-outside-master-other"))
 
-    response = _run_capture(_view_with_api(api), server, device)
-
-    html = unescape(response.content.decode())
-    assert response.status_code == 200
-    assert UNAVAILABLE_MASTER_LINK in html
-    assert "Anonymized recording" not in html
+    with pytest.raises(MappingOwnerError):
+        _run_capture(_view_with_api(api), server, device)
+    assert server.requests == []
 
 
 @pytest.mark.django_db
