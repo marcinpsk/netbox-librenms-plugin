@@ -17,7 +17,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
     transactional_db_with_all_apps,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping, seed_unmapped
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 
 SERVER_KEY = "test-server"
@@ -1315,10 +1315,8 @@ class TestValidateDeviceForImport:
 
     def test_a_serial_match_with_an_oob_os_offers_no_host_promotion(self):
         """An OOB OS is evidence: the row that is the controller is never offered as the host."""
-        device = make_device(
-            "validation-oob-os-serial-host",
-            serial="SHARED-CHASSIS-SN",
-            librenms_cf={SERVER_KEY: {"id": 6001}},
+        device = seed_mapping(
+            make_device("validation-oob-os-serial-host", serial="SHARED-CHASSIS-SN"), SERVER_KEY, own=6001
         )
         payload = _device_payload(
             5433, hostname="validation-oob-os-serial-bmc", hardware="iDRAC9", os="idrac", serial="SHARED-CHASSIS-SN"
@@ -1356,7 +1354,7 @@ class TestValidateDeviceForImport:
         host = make_device("validation-merge-oob-host")
         host.oob_ip = make_ip("198.18.21.46/32", assigned_object=make_interface(host, "mgmt"))
         host.save()
-        make_device("validation-merge-oob-peer", serial="MERGE-OOB-SN", librenms_cf={SERVER_KEY: {"id": 9146}})
+        seed_mapping(make_device("validation-merge-oob-peer", serial="MERGE-OOB-SN"), SERVER_KEY, own=9146)
         payload = _device_payload(5446, hostname=host.name, sysName=host.name, serial="MERGE-OOB-SN", ip="198.18.21.46")
 
         result = self._validate(payload)
@@ -1531,9 +1529,7 @@ class TestValidateDeviceForImport:
 
     def test_a_second_validation_keeps_the_ambiguous_serial_role_offer(self):
         """The host is linked to another LibreNMS ID, so the serial role still offers both roles."""
-        host = make_device(
-            "validation-serial-role-kept-host", serial="A164-KEPT", librenms_cf={SERVER_KEY: {"id": 9164}}
-        )
+        host = seed_mapping(make_device("validation-serial-role-kept-host", serial="A164-KEPT"), SERVER_KEY, own=9164)
         payload = _device_payload(5465, hostname="validation-serial-role-kept-row", serial="A164-KEPT", ip="")
         result = self._validate(payload)
         assert (result["serial_action"], result["row_is_oob_controller"]) == ("oob_candidate", False)
@@ -1597,7 +1593,7 @@ class TestValidateDeviceForImport:
         payload = _device_payload(5474, hostname="validation-already-linked-row", os="idrac", serial="A174-SN", ip="")
         result = self._validate(payload)
         assert result["serial_action"] == "oob_already_linked"
-        seed_stored_mapping(host, {}, save=True)
+        seed_unmapped(host, SERVER_KEY)
 
         result = self._validate({**payload, "os": "linux"})
 
@@ -1735,7 +1731,7 @@ class TestValidateDeviceForImport:
         payload = _device_payload(5502, hostname="validation-owner-change-row", os="idrac", serial="A202-SN", ip="")
         result = self._validate(payload)
         assert result["oob_candidate"]["device"] == first_owner
-        seed_stored_mapping(first_owner, {}, save=True)
+        seed_unmapped(first_owner, SERVER_KEY)
         seed_mapping(second_owner, SERVER_KEY, own=7203)
 
         result = self._validate(payload)
@@ -2023,7 +2019,9 @@ class TestValidateDeviceForImport:
 
         from netbox_librenms_plugin.import_utils.device_operations import VALIDATION_ERROR_ISSUE_PREFIX
 
-        device = make_device("validation-legacy-type-drift", serial="LEGACY-TYPE-SN", librenms_cf=5438)
+        device = seed_stored_mapping(
+            make_device("validation-legacy-type-drift", serial="LEGACY-TYPE-SN"), 5438, save=True
+        )
         _broken_serial_rule("legacy-type-drift")
         manufacturer = Manufacturer.objects.create(name="Legacy drift maker", slug="legacy-drift-maker")
         reported_type = DeviceType.objects.create(

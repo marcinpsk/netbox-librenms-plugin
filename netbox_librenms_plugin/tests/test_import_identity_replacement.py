@@ -160,7 +160,7 @@ def test_a_blocked_action_offers_a_bound_replacement_confirmation(client, second
 @pytest.mark.django_db
 def test_a_renamed_host_matched_by_serial_alone_can_replace_its_host_id(client, secondary_server):
     """No OOB evidence: the ambiguous oob_candidate default leaves the row free to replace the host ID."""
-    device = make_device("replace-renamed-host-old", serial="SN-RENAMED-HOST", librenms_cf={"secondary": 51501})
+    device = seed_mapping(make_device("replace-renamed-host-old", serial="SN-RENAMED-HOST"), "secondary", own=51501)
     client.force_login(make_superuser("identity-replacement-renamed"))
     server = _serve_secondary(secondary_server, 51502, "replace-renamed-host-new", serial="SN-RENAMED-HOST")
 
@@ -169,7 +169,7 @@ def test_a_renamed_host_matched_by_serial_alone_can_replace_its_host_id(client, 
 
     assert response.status_code == 200
     device.refresh_from_db()
-    assert stored_mapping_for_test(device) == {"secondary": 51502}
+    assert mapping_summary(device) == {"secondary": {"own": 51502}}
 
 
 @pytest.mark.django_db

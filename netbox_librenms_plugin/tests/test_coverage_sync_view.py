@@ -316,7 +316,7 @@ class TestSyncPageRouting:
     ):
         """A list or an object is no serial: the page renders, and it offers no conversion and no serial sync."""
         _configure_servers(settings, librenms_server, SERVER_KEY)
-        device = make_device("sync-legacy-malformed", serial="LEGACY-SERIAL", librenms_cf=6616)
+        device = seed_stored_mapping(make_device("sync-legacy-malformed", serial="LEGACY-SERIAL"), 6616, save=True)
         _register_device(librenms_server, 6616, device.name, serial=librenms_serial)
 
         response = logged_in_client.get(_sync_url(device))
@@ -467,7 +467,9 @@ class TestSyncPageRouting:
     ):
         """The conversion needs the sole holder of the serial; the badge still compares the pair."""
         _configure_servers(settings, librenms_server, SERVER_KEY)
-        device = make_device(f"sync-legacy-shared-{shared}", serial="SHARED-LEGACY", librenms_cf=6617)
+        device = seed_stored_mapping(
+            make_device(f"sync-legacy-shared-{shared}", serial="SHARED-LEGACY"), 6617, save=True
+        )
         if shared:
             make_device("sync-legacy-shared-peer", serial="SHARED-LEGACY")
         _register_device(librenms_server, 6617, device.name, serial="SHARED-LEGACY")
@@ -492,7 +494,7 @@ class TestSyncPageRouting:
     ):
         """The writer refuses a serial without an identity, so the page shows the text and offers no sync."""
         _configure_servers(settings, librenms_server, SERVER_KEY)
-        device = make_device(f"sync-no-identity-{offered}", serial="STORED-SERIAL", librenms_cf={SERVER_KEY: 6618})
+        device = seed_mapping(make_device(f"sync-no-identity-{offered}", serial="STORED-SERIAL"), SERVER_KEY, own=6618)
         _register_device(librenms_server, 6618, device.name, serial=reported)
 
         response = logged_in_client.get(_sync_url(device))
@@ -510,7 +512,7 @@ class TestSyncPageRouting:
     ):
         """A serial without an identity matches nothing, so the page must not mark a different text as a mismatch."""
         _configure_servers(settings, librenms_server, SERVER_KEY)
-        device = make_device(f"sync-mismatch-{mismatch}", serial=stored, librenms_cf={SERVER_KEY: 6620})
+        device = seed_mapping(make_device(f"sync-mismatch-{mismatch}", serial=stored), SERVER_KEY, own=6620)
         _register_device(librenms_server, 6620, device.name, serial=reported)
 
         response = logged_in_client.get(_sync_url(device))
@@ -525,7 +527,7 @@ class TestSyncPageRouting:
         from netbox_librenms_plugin.models import NormalizationRule, RuleConfigurationError
 
         _configure_servers(settings, librenms_server, SERVER_KEY)
-        device = make_device("sync-broken-serial-rule", serial="BROKEN-RULE", librenms_cf={SERVER_KEY: 6619})
+        device = seed_mapping(make_device("sync-broken-serial-rule", serial="BROKEN-RULE"), SERVER_KEY, own=6619)
         rule = NormalizationRule.objects.create(
             scope="serial",
             match_pattern=r"^S/N\s+(.+)$",

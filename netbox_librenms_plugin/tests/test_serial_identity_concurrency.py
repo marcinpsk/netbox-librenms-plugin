@@ -430,7 +430,7 @@ def test_a_type_change_reads_the_new_type_again_under_its_lock(librenms_server, 
     from netbox_librenms_plugin.tests.view_test_helpers import post as post_view
     from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
 
-    target = make_device(f"type-lock-{surface}-target", serial="XABC", librenms_cf={SERVER_KEY: 9815})
+    target = seed_mapping(make_device(f"type-lock-{surface}-target", serial="XABC"), SERVER_KEY, own=9815)
     make_device(f"type-lock-{surface}-holder", serial="ABC")
     plain_maker = Manufacturer.objects.create(name=f"Type lock plain {surface}", slug=f"type-lock-plain-{surface}")
     strip_maker = Manufacturer.objects.create(name=f"Type lock strip {surface}", slug=f"type-lock-strip-{surface}")
@@ -563,7 +563,7 @@ def test_a_type_and_serial_update_admits_the_serial_under_the_locked_new_type(li
     from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
 
     tag = f"stale-admission-{action}".replace("_", "-")
-    target = make_device(tag, serial="OLD12345", librenms_cf={SERVER_KEY: 9817})
+    target = seed_mapping(make_device(tag, serial="OLD12345"), SERVER_KEY, own=9817)
     empty_maker = Manufacturer.objects.create(name=f"{tag} empty", slug=f"{tag}-empty")
     NormalizationRule.objects.create(
         scope="serial", match_pattern=r"^SN-ABC123()$", replacement=r"\1", manufacturer=empty_maker
