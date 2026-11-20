@@ -1045,23 +1045,19 @@ def _storable_text(value) -> bool:
     return "\x00" not in text
 
 
-def preload_import_objects(
-    libre_devices, server_key: str, *, existing=(), resolved_names=(), serial_rules: SerialRules | None = None
-) -> dict:
+def preload_import_objects(libre_devices, server_key: str, *, serial_rules: SerialRules | None = None) -> dict:
     """
     Load the NetBox objects that the import rows can match, and prefetch their mappings.
 
-    The query is a superset of the matches that :func:`validate_device_for_import` and the cached
-    row refresh make, built from the predicates of their own lookups: the LibreNMS identities, every
-    name the importer can resolve and the raw names, the Devices that the serials resolve to, the
-    owners of the management IP addresses, and the *existing* objects of cached rows. Each model is
-    one query, and the serials one more. The cascade of the validator still chooses the match.
+    The query is a superset of the matches that :func:`validate_device_for_import` makes, built from
+    the predicates of its own lookups: the LibreNMS identities, every name the importer can resolve
+    and the raw names, the Devices that the serials resolve to, and the owners of the management IP
+    addresses. Each model is one query, and the serials one more. The cascade of the validator still
+    chooses the match.
 
     Args:
         libre_devices (Iterable[dict]): The LibreNMS device rows of the import list.
         server_key (str): The LibreNMS server key of the identities.
-        existing (Iterable[tuple[type, int]]): The ``(model, pk)`` of each cached row's matched object.
-        resolved_names (Iterable[str]): The resolved names of the cached rows.
         serial_rules (SerialRules | None): The batch's serial rules, which the validator resolves the
             serials with; None reads them when a row has a serial.
 
@@ -1076,12 +1072,12 @@ def preload_import_objects(
     identities = sorted(
         {librenms_id for row in libre_devices if (librenms_id := coerce_librenms_id(row.get("device_id"))) is not None}
     )
-    names = {name for name in resolved_names if isinstance(name, str) and name}
+    names = set()
     for row in libre_devices:
         names.update(name for name in _name_candidates(row) if name)
         names.update(variant["name"] for variant in import_name_variants(row).values() if variant["name"])
     names = {name for name in names if _storable_text(name)}
-    # The validator and the cached-row refresh resolve the LibreNMS text, so the preload resolves it too.
+    # The validator resolves the LibreNMS text, so the preload resolves it too.
     # A serial that no stored row can hold is an issue of its row in the validator, so the preload leaves it out.
     serials = [row["serial"] for row in libre_devices if _storable_text(row.get("serial"))]
     try:
@@ -1099,15 +1095,12 @@ def preload_import_objects(
                 # The row validator refuses an address it cannot parse.
                 continue
     ips = host_address_ips(sorted(hosts))
-    existing_pks = {}
-    for model, pk in existing:
-        existing_pks.setdefault(model, set()).add(pk)
     objects = []
     for model, interface_model, owner_field in (
         (Device, Interface, "device_id"),
         (VirtualMachine, VMInterface, "virtual_machine_id"),
     ):
-        match = Q(pk__in=existing_pks.get(model, set()))
+        match = Q(pk__in=[])
         for name in sorted(names):
             match |= Q(name__iexact=name)
         assigned = ips.filter(assigned_object_type=ContentType.objects.get_for_model(interface_model))

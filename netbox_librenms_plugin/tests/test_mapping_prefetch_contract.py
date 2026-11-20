@@ -843,7 +843,7 @@ def test_the_device_status_list_sql_names_each_listed_device_once(client, settin
 
 @pytest.mark.django_db
 def test_the_import_list_prefetches_every_matched_object(live_librenms):
-    """Validation and the cached-row refresh read the mapping of each matched device; one preload serves both."""
+    """Validation reads the mapping of each matched device; one preload serves the fresh and the warm search."""
     from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
     from netbox_librenms_plugin.tests.test_coverage_bulk_import import _libre_device
 
