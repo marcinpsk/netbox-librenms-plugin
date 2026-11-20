@@ -1104,12 +1104,10 @@ class TestMergeTransceiverDataPortIdentity:
             }
         ]
 
-        inventory, error = view._merge_transceiver_data(
-            deepcopy(inventory_seed), serial_context=SerialRules.load().context(None)
-        )
+        inventory, error = _assess_inventory(view, deepcopy(inventory_seed))
 
         assert error is None
-        assert inventory[:1] == inventory_seed
+        assert inventory[:1] == [{**row, "_source": "main"} for row in inventory_seed]
         assert [
             (item["entPhysicalIndex"], item["entPhysicalSerialNum"], item["_librenms_port_id"])
             for item in inventory[1:]
@@ -1152,12 +1150,10 @@ class TestMergeTransceiverDataPortIdentity:
             }
         ]
 
-        inventory, error = view._merge_transceiver_data(
-            deepcopy(inventory_seed), serial_context=SerialRules.load().context(None)
-        )
+        inventory, error = _assess_inventory(view, deepcopy(inventory_seed))
 
         assert error is None
-        assert inventory == inventory_seed
+        assert inventory == [{**row, "_source": "main"} for row in inventory_seed]
 
     def test_an_entity_index_match_keeps_the_optic_when_both_report_one_short_serial(self, settings, librenms_server):
         """Both APIs report AB-12 for the optic at its own entity index, so the texts name one part."""
@@ -1183,9 +1179,7 @@ class TestMergeTransceiverDataPortIdentity:
             {"entPhysicalIndex": 300, "entPhysicalClass": "port", "entPhysicalSerialNum": "AB-12", "ifIndex": 9}
         ]
 
-        inventory, error = view._merge_transceiver_data(
-            deepcopy(inventory_seed), serial_context=SerialRules.load().context(None)
-        )
+        inventory, error = _assess_inventory(view, deepcopy(inventory_seed))
 
         assert error is None
         assert [(item["entPhysicalModelName"], item["_librenms_port_id"]) for item in inventory] == [("SFP-10G-SR", 42)]
@@ -1664,6 +1658,8 @@ class TestMergeTransceiverDataPortIdentity:
         self, settings, librenms_server
     ):
         """Anonymization keeps a serial without an identity reported, so the port stays apart from the optic."""
+        from dcim.models import Device
+
         from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording
         from netbox_librenms_plugin.serial_identity import SerialRules, display, is_identity
 
@@ -1695,14 +1691,17 @@ class TestMergeTransceiverDataPortIdentity:
             },
         }
 
+        serial_context = SerialRules.load().context(None)
+
         def merged(recording):
             device_id = recording["device_id"]
             librenms_server.load_recording(recording)
             view = _real_api_view(settings, librenms_server, librenms_id=device_id)
             inventory = recording["responses"][f"GET /api/v0/inventory/{device_id}/all"]["inventory"]
-            serial_context = SerialRules.load().context(None)
-            result, error = view._merge_transceiver_data(deepcopy(inventory), serial_context=serial_context)
+            result, error = _assess_inventory(view, deepcopy(inventory))
             assert error is None
+            # Each replay assesses through its own device, and the two recordings can keep one device ID.
+            Device.objects.filter(name=f"assess-inventory-{device_id}").delete()
             return [
                 (
                     item["entPhysicalIndex"],

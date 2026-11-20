@@ -535,6 +535,12 @@ def test_vc_discovery_keeps_a_known_devices_empty_inventory_404_policy(live_libr
         ("transceivers", {"entity_physical_index": True}),
         ("transceivers", {"port_id": []}),
         ("transceivers", {"model": {}}),
+        # A module writer locks and resolves the raw serial, so only text or a number reaches it.
+        pytest.param("inventory", {"entPhysicalSerialNum": ["SERIAL-A"]}, id="list-inventory-serial"),
+        pytest.param("inventory", {"entPhysicalSerialNum": {"serial": "SERIAL-A"}}, id="object-inventory-serial"),
+        pytest.param("inventory", {"entPhysicalSerialNum": True}, id="bool-inventory-serial"),
+        pytest.param("transceivers", {"serial": ["SERIAL-A"]}, id="list-transceiver-serial"),
+        pytest.param("transceivers", {"serial": True}, id="bool-transceiver-serial"),
         pytest.param("ports", {"ifIndex": 0.0}, id="float-zero-ifindex"),
         pytest.param("transceivers", {"port_id": 0.0}, id="float-zero-port-id"),
     ],
