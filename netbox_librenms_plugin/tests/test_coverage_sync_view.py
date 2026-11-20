@@ -335,8 +335,9 @@ class TestSyncPageRouting:
         )
         _configure_servers(settings, librenms_server, SERVER_KEY)
         device_id = 6612 if matches else 6613
-        device = seed_mapping(
-            make_device(f"sync-keyed-serial-{device_id}", serial="ABC-SYNC"), SERVER_KEY, own=device_id
+        # The conversion confirmation reads a legacy bare LibreNMS ID.
+        device = seed_stored_mapping(
+            make_device(f"sync-keyed-serial-{device_id}", serial="ABC-SYNC"), device_id, save=True
         )
         _register_device(librenms_server, device_id, device.name, serial=librenms_serial)
 
@@ -357,7 +358,8 @@ class TestSyncPageRouting:
     ):
         """A key needs three letters or digits in a row, so a one-digit serial confirms nothing."""
         _configure_servers(settings, librenms_server, SERVER_KEY)
-        device = seed_mapping(make_device(f"sync-numeric-serial-{stored}", serial=stored), SERVER_KEY, own=6614)
+        # The conversion confirmation reads a legacy bare LibreNMS ID.
+        device = seed_stored_mapping(make_device(f"sync-numeric-serial-{stored}", serial=stored), 6614, save=True)
         _register_device(librenms_server, 6614, device.name, serial=reported)
 
         response = logged_in_client.get(_sync_url(device))

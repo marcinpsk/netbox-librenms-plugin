@@ -10365,7 +10365,7 @@ class TestConflictActionsObjectScope:
         """The user may see the sync sibling but not change it, so the attach is refused before any write."""
         from dcim.models import Device
 
-        sync, selected = self._vc_pair("scope-oob-vc-view", sync_cf={"default": {"id": 30}})
+        sync, selected = self._vc_pair("scope-oob-vc-view", sync_own=30)
         user = self._scoped_writer(selected, "scoped-oob-vc-viewer")
         user = grant_view_permission(user, "view", Device, constraints={"pk": sync.pk})
 
