@@ -1079,7 +1079,8 @@ class TestVirtualChassisInventory:
 
         result = view._get_vc_inventory_serials(members[0], _all_members(members[0]))
 
-        assert [item["librenms_serial"] for item in result] == ["VC-REAL-SERIAL"]
+        # The inventory contract refuses the whole payload, so the dialog offers no row.
+        assert result == []
 
     def test_the_dialog_stores_the_raw_serial_and_shows_the_member_as_assigned(self, logged_in_client, librenms_server):
         """The dialog posts and shows the LibreNMS serial, and finds the member on the next render."""
