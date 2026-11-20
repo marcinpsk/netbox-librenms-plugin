@@ -868,7 +868,8 @@ def test_a_junos_stack_under_a_master_outside_the_chassis_renders_the_unavailabl
 
 
 @pytest.mark.django_db
-def test_a_capture_pseudonymizes_a_list_valued_serial(recording_server):
+def test_a_capture_refuses_a_list_valued_serial_without_showing_it(recording_server):
+    """The inventory contract refuses a serial that is not text or a number, so no capture can publish it."""
     recording = deepcopy(load_recording("iosxe-c8300"))
     route = next(key for key, body in recording["responses"].items() if "/inventory/" in key and body.get("inventory"))
     recording["responses"][route]["inventory"][0]["entPhysicalSerialNum"] = ["ASSET123"]
@@ -877,8 +878,10 @@ def test_a_capture_pseudonymizes_a_list_valued_serial(recording_server):
 
     response = _run_capture(_view_with_api(api), server, device)
 
+    content = response.content.decode()
     assert response.status_code == 200
-    assert "ASSET123" not in json.dumps(_captured_recording(response))
+    assert "Capture failed" in content
+    assert "ASSET123" not in content
 
 
 def _junos_fpc_recording(root_serial, fpc_serials):

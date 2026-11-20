@@ -420,6 +420,20 @@ def test_numeric_inventory_names_render_through_refresh_and_cached_get(client, l
 
 
 @pytest.mark.django_db
+def test_a_module_serial_with_a_nul_renders_through_refresh_and_cached_get(client, live_librenms):
+    """PostgreSQL text cannot hold a NUL, so the serial has no identity and no lookup sends it to the database."""
+    subject = device("module-tab-nul-serial")
+    client.force_login(make_superuser("module-tab-nul-serial-user"))
+    serve(live_librenms.server, inventory=[INVENTORY[0], {**INVENTORY[1], "entPhysicalSerialNum": "ABC\x00DEF"}])
+
+    response = refresh(client, subject)
+
+    assert response.status_code == 200
+    assert response.context["module_sync"]["table"] is not None
+    assert fragment(client, subject).context["module_sync"]["table"] is not None
+
+
+@pytest.mark.django_db
 def test_a_librenms_without_the_transceiver_route_still_shows_the_module_rows(client, live_librenms):
     from netbox_librenms_plugin.acquisition.snapshot import Outcome
 

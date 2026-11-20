@@ -1085,12 +1085,9 @@ def test_module_serial_writes_wait_for_a_type_change_of_their_device(librenms_se
     first.refresh_from_db()
     second.refresh_from_db()
     assert (first.serial, second.serial) == ("OLD111", "OLD222")
-    # The snapshot was merged under the old type's serial context, so a refresh stores it again under the new one.
+    # A refresh stores the source again. The read assesses it under the new type's context.
     device.refresh_from_db()
-    cache.set(
-        CacheMixin().get_cache_key(device, "inventory", SERVER_KEY),
-        trusted_module_inventory_payload(device, rows, librenms_id=9841),
-    )
+    seed_mapped_modules(device, rows, server_key=SERVER_KEY, librenms_id=9841)
     fresh = render_module_tab(device, user=user)
     levels = []
     for index in (7, 8):

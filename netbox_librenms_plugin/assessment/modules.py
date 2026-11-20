@@ -7,7 +7,7 @@ from netbox_librenms_plugin.acquisition.resources import blocked_scopes
 from netbox_librenms_plugin.acquisition.snapshot import Outcome
 from netbox_librenms_plugin.constants import MAIN_INVENTORY_SOURCE, OOB_INVENTORY_SOURCE, is_librenms_placeholder
 from netbox_librenms_plugin.inventory_tree import repair_dangling_parents
-from netbox_librenms_plugin.serial_identity import Comparison, SerialContext, compare, group, is_identity
+from netbox_librenms_plugin.serial_identity import Comparison, SerialContext, compare, display, group, is_identity
 from netbox_librenms_plugin.server_mappings import MappingRole
 from netbox_librenms_plugin.utils import librenms_text
 
@@ -81,15 +81,33 @@ def clean_librenms_value(value) -> str:
 
 
 def _names_another_part(item: dict, transceiver: dict, context: SerialContext) -> bool:
-    """Return whether an entity and a transceiver both have a real serial and the serials differ."""
-    return compare(item.get("entPhysicalSerialNum"), transceiver.get("serial"), context) is Comparison.DIFFERENT
+    """Return whether an entity and a transceiver both report a serial and the serials name two parts."""
+    entity_serial, optic_serial = item.get("entPhysicalSerialNum"), transceiver.get("serial")
+    if is_identity(entity_serial, context) and is_identity(optic_serial, context):
+        return compare(entity_serial, optic_serial, context) is Comparison.DIFFERENT
+    entity_text, optic_text = display(entity_serial), display(optic_serial)
+    # A reported serial without an identity still names a part: only the same text names the same part.
+    return bool(entity_text) and bool(optic_text) and entity_text != optic_text
+
+
+# ENTITY-MIB classes of hardware that is never an optic; a port, module, container or other entity can be.
+_NON_OPTIC_CLASSES = frozenset({"backplane", "chassis", "cpu", "fan", "powerSupply", "sensor", "stack"})
+
+
+def _never_an_optic(item: dict) -> bool:
+    """Return whether an entity's class names hardware that is never a transceiver, whatever its serial."""
+    return librenms_text(item.get("entPhysicalClass")) in _NON_OPTIC_CLASSES
 
 
 def _ifindex_entity_is_the_optic(item: dict, transceiver: dict, context: SerialContext) -> bool:
     """Return whether an entity matched only by port ifIndex has the optic's serial, or neither model nor serial."""
-    if is_identity(item.get("entPhysicalSerialNum"), context):
-        return compare(item.get("entPhysicalSerialNum"), transceiver.get("serial"), context) is Comparison.SAME
-    return not clean_librenms_value(item.get("entPhysicalModelName"))
+    if _never_an_optic(item) or _names_another_part(item, transceiver, context):
+        return False
+    serial = item.get("entPhysicalSerialNum")
+    if is_identity(serial, context):
+        return compare(serial, transceiver.get("serial"), context) is Comparison.SAME
+    # Only a blank entity is the holder of the optic: a reported serial without an identity names a part.
+    return not display(serial) and not clean_librenms_value(item.get("entPhysicalModelName"))
 
 
 def _merge_transceiver_data(inventory_data, transceivers, ports, *, serial_context: SerialContext):  # noqa: C901
@@ -117,7 +135,8 @@ def _merge_transceiver_data(inventory_data, transceivers, ports, *, serial_conte
         existing = inv_by_index.get(ent_idx)
         index_taken = existing is not None
         if existing is not None and (
-            _names_another_part(existing, txr, serial_context)
+            _never_an_optic(existing)
+            or _names_another_part(existing, txr, serial_context)
             or (
                 port_ifindex is not None
                 and (int(existing["ifIndex"]) if existing.get("ifIndex") is not None else None)
