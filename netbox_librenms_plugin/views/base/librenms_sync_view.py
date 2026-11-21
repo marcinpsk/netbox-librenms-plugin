@@ -565,6 +565,7 @@ class BaseLibreNMSSyncView(
             "librenms_device_location": "-",
             "librenms_device_hardware_match": None,
             "vc_inventory_serials": [],
+            "vc_inventory_unavailable": False,
             "vc_serial_members": [],
         }
 
@@ -644,8 +645,10 @@ class BaseLibreNMSSyncView(
                 if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
                     # The dialog names, links and offers only the members that the viewer may view.
                     viewable = list(obj.virtual_chassis.members.restrict(getattr(request, "user", None), "view"))
+                    serials = self._get_vc_inventory_serials(obj, viewable)
                     librenms_device_details["vc_serial_members"] = viewable
-                    librenms_device_details["vc_inventory_serials"] = self._get_vc_inventory_serials(obj, viewable)
+                    librenms_device_details["vc_inventory_serials"] = serials or []
+                    librenms_device_details["vc_inventory_unavailable"] = serials is None
 
                 # Device was retrieved successfully via librenms_id — trust the ID
                 found_in_librenms = True
@@ -839,7 +842,7 @@ class BaseLibreNMSSyncView(
             viewable: The chassis members that the viewer may view; only these are named.
 
         Returns:
-            list: [
+            list | None: None if the read failed, or a list of:
                 {
                     'description': 'Member component description',
                     'serial': 'the LibreNMS serial, as the dialog shows it',
@@ -848,12 +851,11 @@ class BaseLibreNMSSyncView(
                     'assigned_member': the viewable member that holds the serial, or None,
                     'assigned_hidden': whether a member outside *viewable* holds the serial
                 }
-            ]
 
         """
         success, inventory = self.librenms_api.get_device_inventory(self.librenms_id)
         if not success:
-            return []
+            return None
 
         # Each member reads its own serial context, so load the rows that decide it with the members.
         vc_members = obj.virtual_chassis.members.select_related("device_type", "virtual_chassis__master__device_type")
