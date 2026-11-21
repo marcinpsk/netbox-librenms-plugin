@@ -1141,6 +1141,22 @@ class TestVirtualChassisInventory:
 
         assert [item["librenms_serial"] for item in result] == ["VC-REAL-SERIAL"]
 
+    def test_the_dialog_skips_an_invalid_serial_and_keeps_a_valid_one(self, logged_in_client, librenms_server):
+        """The form submits the valid serial and omits the boolean serial."""
+        _vc, (member, _) = make_virtual_chassis_members("inventory-boolean", count=2)
+        inventory = _stack_inventory({"entPhysicalSerialNum": True}, {"entPhysicalSerialNum": "VC-REAL-SERIAL"})
+        seed_mapping(member, SERVER_KEY, own=6649)
+        _register_device(librenms_server, 6649, member.name, inventory=inventory)
+
+        response = logged_in_client.get(_sync_url(member))
+
+        assert response.status_code == 200
+        assert [row["serial"] for row in response.context["vc_inventory_serials"]] == ["VC-REAL-SERIAL"]
+        assert response.context["vc_inventory_unavailable"] is False
+        assert b"data-vc-inventory-error" not in response.content
+        assert b'id="vc-serials-form"' in response.content
+        assert re.findall(rb'name="librenms_serial_\d+" value="([^"]+)"', response.content) == [b"VC-REAL-SERIAL"]
+
     def test_the_dialog_stores_the_raw_serial_and_shows_the_member_as_assigned(self, logged_in_client, librenms_server):
         """The dialog posts and shows the LibreNMS serial, and finds the member on the next render."""
         from netbox_librenms_plugin.models import NormalizationRule
