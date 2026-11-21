@@ -2,8 +2,8 @@
 The package writes in ``atomic_with_events()`` or ``row_savepoint()``, not in a plain ``transaction.atomic``.
 
 NetBox queues an event when a row saves, and a rollback does not undo it, so a plain block that rolls
-back still sends the events of its rolled-back writes. Only the runner and the helper in
-``transactions.py`` open a plain block. The scan skips ``migrations/`` and ``tests/``.
+back still sends the events of its rolled-back writes. The transaction helpers and an isolated
+serial-rule read open plain blocks. The scan skips ``migrations/`` and ``tests/``.
 Limits: it finds ``transaction.atomic``, and ``atomic`` through any import alias, not through ``getattr``, an
 assignment or a re-export.
 """
@@ -14,8 +14,12 @@ from pathlib import Path
 import pytest
 
 PACKAGE = Path(__file__).resolve().parents[1]
-# The runner's attempt and the helper itself own the only plain blocks.
-EXEMPT = {("transactions.py", "_run_attempt"), ("transactions.py", "atomic_with_events")}
+EXEMPT = {
+    ("transactions.py", "_run_attempt"),
+    ("transactions.py", "atomic_with_events"),
+    # The cache key reads serial rules in a savepoint. The read writes no rows.
+    ("import_utils/virtual_chassis.py", "_cached_virtual_chassis_data"),
+}
 
 
 def _aliases(tree):
