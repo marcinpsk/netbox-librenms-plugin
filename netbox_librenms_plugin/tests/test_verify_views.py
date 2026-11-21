@@ -800,9 +800,9 @@ class TestVerifyEndpointsServerKeyGuard:
         captured = []
         original_read = source_cache.read
 
-        def spy(subject, resource, server_key):
+        def spy(subject, resource, server_key, *, user=None):
             captured.append(server_key)
-            return original_read(subject, resource, server_key)
+            return original_read(subject, resource, server_key, user=user)
 
         monkeypatch.setattr(source_cache, "read", spy)
 

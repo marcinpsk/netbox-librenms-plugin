@@ -292,15 +292,8 @@ def test_module_bind_and_interface_sync_of_one_device_leave_one_holder(settings,
             ],
         )
     else:
-        assert second_messages == [
-            (
-                "warning",
-                f"Interface '{SHORT_NAME}' kept its current name because the reported name is in use "
-                f"on the same interface owner: '{LONG_NAME}'.",
-            ),
-            ("success", "Selected interfaces synced successfully."),
-            ("info", "Other sync tabs were cleared because you synchronized data from LibreNMS."),
-        ]
+        # The module bind changed the port holder while the interface writer waited for the device lock.
+        assert second_messages == [("warning", f"1 interface(s) skipped: {LONG_NAME} ({APPROVED_ROW_CHANGED}).")]
     assert _persisted(loser) == before
     # A change record for the winner shows that both writers run with change logging on.
     assert _persisted(winner)[1] > winner_changes

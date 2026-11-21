@@ -168,6 +168,7 @@ def _drive_grouped_sync(device, user, vid, librenms_name, *, intent=None, draft=
 
     data = {"action": "create_vlans", "server_key": "default", **(draft or {})}
     if intent is not None:
+        persist_test_server_mapping(device, "default")
         seed_source_snapshot(device, Resource.VLANS, "default", vlans=[{"vlan_vlan": vid, "vlan_name": librenms_name}])
         data.update(
             {
