@@ -4,7 +4,12 @@ import pytest
 
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip, make_superuser
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
-from netbox_librenms_plugin.tests.source_snapshot_helpers import link_row, port_row, seed_cables_snapshot, seed_modules_snapshot
+from netbox_librenms_plugin.tests.source_snapshot_helpers import (
+    link_row,
+    port_row,
+    seed_cables_snapshot,
+    seed_modules_snapshot,
+)
 
 pytestmark = pytest.mark.django_db
 

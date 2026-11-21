@@ -332,7 +332,6 @@ def test_cable_cache_fragment_does_not_rewrite_the_snapshot(client, settings, pr
 @pytest.mark.django_db
 def test_module_cache_status_reads_the_inventory_snapshot_like_the_tab(client, settings):
     """A snapshot from an older inventory writer is one the Modules tab rejects, so status must not call it ready."""
-    from netbox_librenms_plugin.serial_identity import SerialRules
 
     _configure_servers(settings)
     device = make_device("cache-status-module-version", librenms_cf={"primary": {"id": 6406}})
@@ -359,7 +358,6 @@ def test_module_cache_status_reads_the_inventory_snapshot_like_the_tab(client, s
 def test_module_cache_status_reports_tab_states_when_an_applicable_serial_rule_is_broken(client, settings):
     """A broken serial rule does not stop the tab states: the Modules status reads the source snapshot only."""
     from netbox_librenms_plugin.models import NormalizationRule
-    from netbox_librenms_plugin.serial_identity import SerialRules
 
     _configure_servers(settings)
     device = make_device("cache-status-module-broken-rule", librenms_cf={"primary": {"id": 6409}})
@@ -421,7 +419,6 @@ def test_module_cache_status_rejects_a_snapshot_of_another_oob_link_like_the_tab
 @pytest.mark.parametrize("remap", ["save", "concurrent_row_write"])
 def test_module_cache_status_agrees_with_the_tab_after_the_host_mapping_changes(client, settings, remap):
     """A snapshot of the old host id is one the Modules tab discards, so status must not call it ready."""
-    from netbox_librenms_plugin.serial_identity import SerialRules
     from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping_row
 
     _configure_servers(settings)
@@ -457,7 +454,6 @@ def test_module_cache_status_agrees_with_the_tab_after_the_host_mapping_changes(
 @pytest.mark.django_db
 def test_module_cache_fragment_does_not_discover_a_missing_host_id(client, settings, primary_librenms):
     """An OOB-mapped module fragment must not discover a missing host identity."""
-    from netbox_librenms_plugin.serial_identity import SerialRules
 
     _configure_servers(settings)
     device = make_device(
@@ -1271,8 +1267,6 @@ def test_unchanged_module_serial_preserves_other_snapshots(client, settings, dja
     """Submitting the existing serial must not publish a cache mutation."""
     from django.contrib.messages import get_messages
 
-    from netbox_librenms_plugin.serial_identity import SerialRules
-
     _configure_servers(settings)
     device = make_device("cache-module-unchanged", librenms_cf={"primary": {"id": 641}})
     bay = ModuleBay.objects.create(device=device, name="Slot 1")
@@ -1308,7 +1302,6 @@ def test_module_mutation_without_posted_server_uses_active_namespace(
     django_capture_on_commit_callbacks,
 ):
     """A module writer must resolve its active namespace before it mutates."""
-    from netbox_librenms_plugin.serial_identity import SerialRules
 
     _configure_servers(settings)
     device = make_device("cache-module-missing-server", librenms_cf={"primary": {"id": 642}})

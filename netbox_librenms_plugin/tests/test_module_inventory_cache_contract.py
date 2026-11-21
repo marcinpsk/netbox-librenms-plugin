@@ -363,7 +363,6 @@ class TestTrustedPayloadMatchesTheDeviceMapping:
 
     def test_a_written_mapping_still_returns_the_payload(self):
         """Positive control: the guard must not reject the ordinary path."""
-        from netbox_librenms_plugin.serial_identity import SerialRules
         from netbox_librenms_plugin.tests.conftest import make_device
 
         device = make_device("trusted-payload-ok", librenms_cf={"default": 3})
@@ -376,7 +375,6 @@ class TestTrustedPayloadMatchesTheDeviceMapping:
 
     def test_a_written_mapping_refreshes_the_cached_custom_field_value(self):
         """The helper must verify a write against current custom field data."""
-        from netbox_librenms_plugin.serial_identity import SerialRules
         from netbox_librenms_plugin.tests.conftest import make_device
 
         device = make_device("trusted-payload-cached")
