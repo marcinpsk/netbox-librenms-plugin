@@ -688,12 +688,16 @@ def test_the_migration_card_lists_only_visible_addresses_on_visible_interfaces(c
     hidden = make_ip(
         "198.18.118.20/24", assigned_object=eth2, status=HIDDEN_STATUS if hidden_by == "address" else "active"
     )
-    _seed(donor, [("198.18.118.10", 24, 7118, "eth1")])
     interface_view = {"name": "eth1"} if hidden_by == "interface" else None
     client.force_login(_reader(f"ip-scope-move-{hidden_by}", interface_view=interface_view))
 
-    html = _fragment(client, donor)
+    response = client.get(
+        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": donor.pk}),
+        {"server_key": SERVER_KEY, "tab": "ipaddresses"},
+    )
 
+    assert response.status_code == 200
+    html = response.content.decode()
     card = html.partition('id="librenms-ipaddress-migrate-table"')[2]
     assert str(shown.address) in card
     assert "198.18.118.20" not in html
