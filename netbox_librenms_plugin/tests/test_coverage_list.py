@@ -214,6 +214,61 @@ class TestCompletedJobResults:
     """Completed jobs are resolved through the real Job model and cache."""
 
     @pytest.mark.django_db
+    def test_completed_job_refreshes_matches_with_a_fixed_number_of_identity_queries(
+        self, client, django_user_model, librenms_server
+    ):
+        from core.models import Job
+        from dcim.models import Device
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        from virtualization.models import VirtualMachine
+
+        from netbox_librenms_plugin.import_utils import get_import_device_cache_key
+        from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+
+        user = _create_user(django_user_model, "completed-job-identity-refresh")
+        client.force_login(user)
+        devices = [_device(device_id) for device_id in range(4620, 4632)]
+        _register_devices(librenms_server, devices)
+        device_ids = [device["device_id"] for device in devices]
+        cache.set_many({get_import_device_cache_key(device["device_id"], SERVER_KEY): device for device in devices})
+        jobs = [
+            Job.objects.create(
+                name="Completed import search",
+                user=user,
+                job_id=uuid4(),
+                status="completed",
+                data={"device_ids": ids, "server_key": SERVER_KEY},
+            )
+            for ids in (device_ids[:2], device_ids)
+        ]
+        mapped = seed_mapping(make_device("completed-job-late-link"), SERVER_KEY, own=device_ids[0])
+        seed_mapping(make_device("completed-job-host-link"), SERVER_KEY, own=device_ids[1])
+        seed_mapping(make_device("completed-job-oob-link"), SERVER_KEY, oob=device_ids[1])
+
+        identity_tables = tuple(f'FROM "{model._meta.db_table}"' for model in (Device, VirtualMachine))
+        counts = []
+        for job in jobs:
+            with CaptureQueriesContext(connection) as queries:
+                response = client.get(_import_url(), {"job_id": job.pk})
+
+            assert response.status_code == 200
+            rows = {row["device_id"]: row["_validation"] for row in response.context["table"].data}
+            assert set(rows) == set(job.data["device_ids"])
+            assert rows[device_ids[0]]["existing_device"] == mapped
+            assert rows[device_ids[0]]["existing_match_type"] == "librenms_id"
+            assert rows[device_ids[1]]["existing_device"] is None
+            assert rows[device_ids[1]]["ambiguous_librenms_id"] is True
+            counts.append(
+                sum(
+                    "librenms_id" in query["sql"] and any(table in query["sql"] for table in identity_tables)
+                    for query in queries.captured_queries
+                )
+            )
+
+        assert counts[0] == counts[1], counts
+
+    @pytest.mark.django_db
     def test_completed_job_loads_only_live_cached_rows_and_restores_its_options(
         self,
         django_user_model,

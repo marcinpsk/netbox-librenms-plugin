@@ -81,6 +81,7 @@ from netbox_librenms_plugin.server_mappings import (
     assign_own,
     find_mapping,
     identity_q,
+    is_server_key,
     lock_librenms_id_assignment,
     persist_mapping,
     prefetch_mappings,
@@ -941,7 +942,35 @@ def _storable_text(value) -> bool:
     return "\x00" not in text
 
 
-def preload_import_objects(libre_devices, server_key: str, *, serial_rules: SerialRules | None = None) -> dict:
+class _ImportObjects(NamedTuple):
+    """The objects and mapping matches loaded for one batch of import rows."""
+
+    by_pk: dict[tuple[type, int], Device | VirtualMachine]
+    by_identity: dict[tuple[type, int], list[Device | VirtualMachine]]
+
+    def find_identity(self, model, identity):
+        matches = self.by_identity.get((model, coerce_librenms_id(identity)), ())
+        if len(matches) > 1:
+            raise AmbiguousLibreNMSIdError(f"LibreNMS ID {identity!r} matches multiple {model.__name__} records.")
+        return matches[0] if matches else None
+
+
+def _index_import_objects(objects, server_key) -> _ImportObjects:
+    objects = prefetch_mappings(objects)
+    by_pk = {(type(obj), obj.pk): obj for obj in objects}
+    matches = {}
+    if is_server_key(server_key):
+        for obj in objects:
+            mapping = read_mapping(obj)
+            own_id = mapping.legacy.queryable_id if mapping.legacy.is_legacy else mapping.own_id(server_key)
+            for identity in {own_id, mapping.oob_id(server_key)} - {None}:
+                matches.setdefault((type(obj), identity), []).append(obj)
+    return _ImportObjects(by_pk, matches)
+
+
+def preload_import_objects(
+    libre_devices, server_key: str, *, serial_rules: SerialRules | None = None
+) -> _ImportObjects:
     """
     Load the NetBox objects that the import rows can match, and prefetch their mappings.
 
@@ -958,7 +987,7 @@ def preload_import_objects(libre_devices, server_key: str, *, serial_rules: Seri
             serials with; None reads them when a row has a serial.
 
     Returns:
-        dict: Each loaded object keyed by ``(model, pk)``.
+        _ImportObjects: The loaded objects by primary key and the mapping matches by identity.
 
     """
     from django.contrib.contenttypes.models import ContentType
@@ -1015,7 +1044,7 @@ def preload_import_objects(libre_devices, server_key: str, *, serial_rules: Seri
                 roles=(MappingRole.OWN, MappingRole.OOB),
             )
         objects.extend(queryset.filter(match))
-    return {(type(obj), obj.pk): obj for obj in prefetch_mappings(objects)}
+    return _index_import_objects(objects, server_key)
 
 
 def validate_device_for_import(
@@ -1059,7 +1088,7 @@ def validate_device_for_import(
         preloaded_device_type_rules: Optional device-type normalization rules keyed for lookup.
         serial_rules: The batch's :class:`SerialRules`; None reads them once for this device.
         numbering_rules: The batch's VC member numbering rules; None reads them for a stack.
-        known_objects: The :func:`preload_import_objects` of a batch; a matched object found there is that instance.
+        known_objects: The batch's preloaded objects and LibreNMS identity matches.
 
     Returns:
         dict: Validation result with structure (the key set is pinned by
@@ -1288,7 +1317,7 @@ def _match_and_validate(  # noqa: C901
 
     def known(obj):
         # A batch reads the preloaded instance, whose mapping it prefetched.
-        return obj if obj is None or known_objects is None else known_objects.get((type(obj), obj.pk), obj)
+        return obj if obj is None or known_objects is None else known_objects.by_pk.get((type(obj), obj.pk), obj)
 
     try:
         serial_rules = serial_rules or SerialRules.load()
@@ -1317,19 +1346,19 @@ def _match_and_validate(  # noqa: C901
             f"hostname={hostname}"
         )
 
-        # Check for existing VM first (by librenms_id custom field).
-        # find_mapping() covers both the new per-server JSON format
-        # and legacy bare-integer values so neither is missed. An ambiguous id
-        # (matching multiple records) blocks the import — see _flag_ambiguous_librenms_id.
-        try:
-            existing_vm = known(
-                find_mapping(
-                    VirtualMachine.objects.all(),
-                    server=server_key,
-                    identity=librenms_id,
-                    roles=(MappingRole.OWN, MappingRole.OOB),
-                )
+        def mapped(model):
+            if known_objects is not None:
+                return known_objects.find_identity(model, librenms_id)
+            return find_mapping(
+                model.objects.all(),
+                server=server_key,
+                identity=librenms_id,
+                roles=(MappingRole.OWN, MappingRole.OOB),
             )
+
+        # Check both scoped and legacy mappings for a VM first.
+        try:
+            existing_vm = mapped(VirtualMachine)
         except AmbiguousLibreNMSIdError as exc:
             existing_vm = None
             _flag_ambiguous_librenms_id(result, librenms_id, exc)
@@ -1339,12 +1368,7 @@ def _match_and_validate(  # noqa: C901
         # binding to the VM. Detect it and fail closed (the device block is gated on the flag).
         if existing_vm is not None:
             try:
-                _device_collision = find_mapping(
-                    Device.objects.all(),
-                    server=server_key,
-                    identity=librenms_id,
-                    roles=(MappingRole.OWN, MappingRole.OOB),
-                )
+                _device_collision = mapped(Device)
             except AmbiguousLibreNMSIdError as exc:
                 # An ambiguous device lookup is itself a fail-closed condition: drop the
                 # VM binding too so the block below cannot rebind it as a definitive
@@ -1382,20 +1406,10 @@ def _match_and_validate(  # noqa: C901
                 result["name_sync_available"] = True
                 result["suggested_name"] = hostname
 
-        # Check for existing Device (by librenms_id custom field).
-        # find_mapping() covers both the new per-server JSON format
-        # and legacy bare-integer values so neither is missed. Skip when an ambiguity
-        # (intra-model or cross-model) was already flagged — binding must fail closed.
+        # Check Device mappings only when the VM check found no match or ambiguity.
         if not result["existing_device"] and not result["ambiguous_librenms_id"]:
             try:
-                existing_device = known(
-                    find_mapping(
-                        Device.objects.all(),
-                        server=server_key,
-                        identity=librenms_id,
-                        roles=(MappingRole.OWN, MappingRole.OOB),
-                    )
-                )
+                existing_device = mapped(Device)
             except AmbiguousLibreNMSIdError as exc:
                 existing_device = None
                 _flag_ambiguous_librenms_id(result, librenms_id, exc)
