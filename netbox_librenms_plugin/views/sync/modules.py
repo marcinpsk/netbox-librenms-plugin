@@ -93,6 +93,7 @@ from netbox_librenms_plugin.utils import (
     rewrite_interface_name_for_vc_member,
     exception_text_for,
 )
+from netbox_librenms_plugin.sync_view_scope import SyncViewScope
 from netbox_librenms_plugin.utils import coerce_positive_int as _coerce_positive_int
 from netbox_librenms_plugin.views.base.modules_view import (
     BaseModuleTableView,
@@ -374,6 +375,12 @@ def _authorize_module_grant(page_device, server_key, action, token, *, user):
     inventory = assessed["inventory"]
     grant = read_module_grant(token, action=action, page_device_id=page_device.pk, server_key=server_key)
     grant.check_state(inventory, policy, source=snapshot)
+    # A row on a member the actor may not view is written for no member, whatever render signed it.
+    withheld = BaseModuleTableView.withheld_indices(
+        inventory, policy, SyncViewScope.for_request(user, page_device).chassis
+    )
+    if grant.ent_index in withheld or any(row[0] in withheld for row in grant.rows or ()):
+        raise GrantRefused(GrantRefusal.DESTINATION)
     return _GrantedInventory(grant, inventory, _inventory_index_map(inventory), policy, snapshot)
 
 

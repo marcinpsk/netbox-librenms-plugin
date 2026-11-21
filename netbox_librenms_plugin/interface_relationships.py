@@ -61,6 +61,8 @@ class RelationshipResolutionContext:
     source_index: dict
     actionable_owner_ids: set
     changeable_interface_ids: set
+    # The interfaces that a row may show as its LAG, parent or bridge: a hidden target reads as none.
+    viewable_interface_ids: set
     can_write: bool
 
 
@@ -823,6 +825,10 @@ def relationship_diagnostics_report(assessment, interface_name_field="ifName"):
     }
 
 
+# The relationship FK columns of each owner's interface model; a VMInterface has no LAG.
+_RELATION_ID_FIELDS = {Device: ("lag_id", "parent_id", "bridge_id"), VirtualMachine: ("parent_id", "bridge_id")}
+
+
 def build_candidate_relationship_context(obj, server_key, user, can_write, port_ids, names):
     """Build one permission-aware relationship context for a bounded row set."""
     interface_queryset = interface_queryset_for_object(obj)
@@ -840,9 +846,25 @@ def build_candidate_relationship_context(obj, server_key, user, can_write, port_
     )
     permitted_queryset = candidate_queryset.filter(**{f"{owner_field}__in": actionable_owner_ids})
     viewable_ids = set(permitted_queryset.restrict(user, "view").values_list("pk", flat=True))
-    changeable_ids = set(permitted_queryset.restrict(user, "change").values_list("pk", flat=True))
-    display_index = build_interface_index(obj, server_key, allowed_ids=viewable_ids | changeable_ids)
+    # A change grant does not show an interface: an action needs both grants.
+    changeable_ids = viewable_ids & set(permitted_queryset.restrict(user, "change").values_list("pk", flat=True))
+    display_index = build_interface_index(obj, server_key, allowed_ids=viewable_ids)
     source_index = filter_interface_index(display_index, changeable_ids)
+    # The current LAG, parent and bridge of each shown interface, so that the row can project them.
+    target_ids = {
+        target_id
+        for row in permitted_queryset.filter(pk__in=viewable_ids).values(*_RELATION_ID_FIELDS[owner_model])
+        for target_id in row.values()
+        if target_id is not None
+    }
+    # A target is shown when the user may view it and its owner, whatever owners the candidates have.
+    viewable_target_ids = set(
+        interface_queryset.filter(
+            pk__in=target_ids, **{f"{owner_field}__in": owner_model.objects.restrict(user, "view").values("pk")}
+        )
+        .restrict(user, "view")
+        .values_list("pk", flat=True)
+    )
     return RelationshipResolutionContext(
         obj=obj,
         server_key=server_key,
@@ -852,6 +874,7 @@ def build_candidate_relationship_context(obj, server_key, user, can_write, port_
         source_index=source_index,
         actionable_owner_ids=actionable_owner_ids,
         changeable_interface_ids=changeable_ids,
+        viewable_interface_ids=viewable_ids | viewable_target_ids,
         can_write=can_write,
     )
 
@@ -861,8 +884,15 @@ def enrich_port_relationships(
     relationship_maps,
     interface_name_field="ifName",
     server_key="",
+    *,
+    viewable_interface_ids,
 ):
-    """Add LAG, parent, and bridge comparison fields to a cached port row."""
+    """
+    Add LAG, parent, and bridge comparison fields to a cached port row.
+
+    A NetBox LAG, parent or bridge outside *viewable_interface_ids* counts as no target, so no
+    status tells that a hidden interface exists.
+    """
     port_id = normalize_librenms_port_id(port.get("port_id"))
     netbox_interface = port.get("netbox_interface")
 
@@ -886,7 +916,8 @@ def enrich_port_relationships(
         related_port_id = normalize_librenms_port_id(port_id_to_related.get(port_id)) if port_id else None
         related_port = relationship_maps.ports_by_id.get(related_port_id) if related_port_id else None
         related_name = related_port.get(interface_name_field) if related_port else None
-        netbox_related = getattr(netbox_interface, related_attribute, None) if netbox_interface else None
+        related_id = getattr(netbox_interface, f"{related_attribute}_id", None) if netbox_interface else None
+        netbox_related = getattr(netbox_interface, related_attribute) if related_id in viewable_interface_ids else None
         if related_port_id and netbox_interface:
             if netbox_related and related_interface_matches(netbox_related, related_port):
                 status = "match"
@@ -1048,7 +1079,13 @@ def resolve_relationship_row(
         expected_owner=expected_owner,
     )
 
-    enrich_port_relationships(port, relationship_maps, interface_name_field, context.server_key)
+    enrich_port_relationships(
+        port,
+        relationship_maps,
+        interface_name_field,
+        context.server_key,
+        viewable_interface_ids=context.viewable_interface_ids,
+    )
     for relation in ("lag", "parent", "bridge"):
         related_port_id = port.get(f"librenms_{relation}_port_id")
         related_port = relationship_maps.ports_by_id.get(related_port_id)

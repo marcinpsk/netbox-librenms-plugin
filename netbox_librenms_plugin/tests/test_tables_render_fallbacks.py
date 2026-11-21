@@ -91,7 +91,9 @@ class TestRelationshipPillWithoutALibreNMSName:
         no_relationships = dict.fromkeys(("lag_members", "sub_interfaces", "bridge_members", "stacked_ports"), {})
         maps = build_relationship_maps({"ports": [record], "port_stack_relationships": no_relationships})
 
-        enrich_port_relationships(record, maps, interface_name_field="ifName", server_key="default")
+        enrich_port_relationships(
+            record, maps, interface_name_field="ifName", server_key="default", viewable_interface_ids={lag.pk}
+        )
         html = str(_interface_table(device).render_parent(None, record))
 
         assert record["lag_sync_status"] == "missing_lnms"
@@ -124,21 +126,27 @@ class TestInterfaceTypeComparison:
 
 @pytest.mark.django_db
 class TestVcCableMemberSelection:
-    def test_a_port_name_without_a_matching_member_falls_back_to_the_viewed_device(self):
+    def test_a_row_without_an_attributed_member_falls_back_to_the_viewed_device(self):
+        """The view attributes each row's local owner; the table only selects it, or the viewed device."""
         from netbox_librenms_plugin.tables.cables import VCCableTable
+        from netbox_librenms_plugin.tests.view_test_helpers import superuser_chassis
 
         first = make_device("vc-cable-fallback-1")
         second = make_device("vc-cable-fallback-2")
         make_virtual_chassis("vc-cable-fallback", first, second)
-        table = VCCableTable([], device=first)
+        table = VCCableTable([], device=first, chassis=superuser_chassis(first))
         # row_id is carried alongside local_port_id: branches above this one key the rendered
         # select on row_id, so a row without it renders here but breaks there.
-        matched = {"local_port": "Ethernet2", "local_port_id": 11, "row_id": 11}
-        # Position 7 has no member, so the row keeps the device whose page is being viewed.
+        matched = {"local_port": "Ethernet2", "local_port_id": 11, "row_id": 11, "local_owner_id": second.pk}
+        # The view attributed no owner, so the row keeps the device whose page is being viewed.
         unmatched = {"local_port": "Ethernet7", "local_port_id": 12, "row_id": 12}
+        withheld = {"local_port": "Ethernet3", "local_port_id": 13, "row_id": 13, "member_withheld": True}
 
         matched_html = str(table.render_device_selection(None, matched))
         unmatched_html = str(table.render_device_selection(None, unmatched))
+        withheld_html = str(table.render_device_selection(None, withheld))
 
         assert f'value="{second.pk}" selected' in matched_html
         assert f'value="{first.pk}" selected' in unmatched_html
+        assert '<option value="" selected>' in withheld_html
+        assert " disabled" in withheld_html

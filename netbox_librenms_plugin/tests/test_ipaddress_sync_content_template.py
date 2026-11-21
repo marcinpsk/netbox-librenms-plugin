@@ -115,7 +115,7 @@ class TestIpAddressSyncContentTemplateMigratedMode:
             has_write=True,
         )
 
-        assert "migration winner is unavailable" in html.lower()
+        assert 'role="alert"' in html
         assert "winner missing" in html
 
     def test_move_button_degrades_to_read_only_when_url_unregistered(self):

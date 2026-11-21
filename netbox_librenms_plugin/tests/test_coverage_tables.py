@@ -21,6 +21,7 @@ from netbox_librenms_plugin.tests.conftest import (
     stamp_rule_decision,
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+from netbox_librenms_plugin.tests.view_test_helpers import superuser_chassis
 
 
 def _import_record(device_id=4101, **validation):
@@ -1539,11 +1540,18 @@ class TestVirtualChassisInterfaceTable:
         make_virtual_chassis(f"{tag}-vc", first, second)
         return first, second
 
-    def test_each_header_names_its_column_for_the_table_fit_script(self):
+    @staticmethod
+    def _table(device, **kwargs):
         from netbox_librenms_plugin.tables.interfaces import VCInterfaceTable
 
+        kwargs.setdefault("data", [])
+        return VCInterfaceTable(
+            device=device, chassis=superuser_chassis(device), interface_name_field="ifName", **kwargs
+        )
+
+    def test_each_header_names_its_column_for_the_table_fit_script(self):
         first, _second = self._members("vc-fit-headers")
-        table = VCInterfaceTable(data=[], device=first, interface_name_field="ifName")
+        table = self._table(first)
 
         headers = {column.name: column.attrs["th"] for column in table.columns}
 
@@ -1563,25 +1571,26 @@ class TestVirtualChassisInterfaceTable:
             assert "device-selection-col" in td.get("class", "").split(), table_class.__name__
             assert td["data-col"] == "device_selection"
 
-    def test_physical_rows_select_the_named_member_and_logical_rows_use_the_viewed_member(self):
-        from netbox_librenms_plugin.tables.interfaces import VCInterfaceTable
-
+    def test_a_row_selects_the_owner_the_view_attributed_and_a_withheld_row_selects_none(self):
+        """The view attributes every row; the table never re-attributes one from its name."""
         first, second = self._members("vc-selection")
-        table = VCInterfaceTable(data=[], device=first, interface_name_field="ifName")
+        table = self._table(first)
 
-        physical = str(table.render_device_selection(None, _port(ifName="Ethernet2", ifDescr="Ethernet2")))
-        logical = str(table.render_device_selection(None, _port(ifName="Vlan2", ifType="l3ipvlan")))
+        owned = str(table.render_device_selection(None, _port(ifName="Ethernet1", selected_object_id=second.pk)))
+        withheld = str(
+            table.render_device_selection(
+                None, _port(ifName="Ethernet2", selected_object_id=None, member_withheld=True)
+            )
+        )
 
-        assert f'value="{second.pk}" selected' in physical
-        assert f'value="{first.pk}" selected' in logical
-        assert f'value="{second.pk}" selected' not in logical
+        assert f'value="{second.pk}" selected' in owned
+        assert '<option value="" selected>' in withheld
+        assert " selected>" not in withheld.replace('<option value="" selected>', "")
 
     def test_real_matched_interface_keeps_button_and_dropdown_on_the_same_owner(self):
-        from netbox_librenms_plugin.tables.interfaces import VCInterfaceTable
-
         first, second = self._members("vc-owner")
         interface = make_interface(second, "Vlan100", iface_type="virtual")
-        table = VCInterfaceTable(data=[], device=first, interface_name_field="ifName")
+        table = self._table(first)
         record = _port(
             ifName="Vlan100",
             ifType="l3ipvlan",
@@ -1597,18 +1606,17 @@ class TestVirtualChassisInterfaceTable:
         assert f'value="{second.pk}" selected' in dropdown
         assert f'data-object-id="{second.pk}"' in relationship
 
-    def test_member_query_is_reused_across_rows(self, django_assert_num_queries):
-        from netbox_librenms_plugin.tables.interfaces import VCInterfaceTable
-
+    def test_rows_read_no_member_from_the_database(self, django_assert_num_queries):
+        """The chassis scope holds the members, so a row never reads one."""
         first, second = self._members("vc-query")
-        table = VCInterfaceTable(data=[], device=first, interface_name_field="ifName")
+        table = self._table(first)
 
-        with django_assert_num_queries(1):
+        with django_assert_num_queries(0):
             owners = [
-                table._resolve_row_member_id(_port(ifName=f"Ethernet{position}", ifDescr=f"Ethernet{position}"))
-                for position in (1, 2, 1, 2)
+                table._resolve_row_member_id(_port(ifName=f"Ethernet{position}", selected_object_id=member.pk))
+                for position, member in ((1, first), (2, second), (1, first), (2, second))
             ]
-            table.render_device_selection(None, _port(ifName="Ethernet2"))
+            table.render_device_selection(None, _port(ifName="Ethernet2", selected_object_id=second.pk))
 
         assert owners == [first.pk, second.pk, first.pk, second.pk]
 
@@ -1620,7 +1628,9 @@ class TestVirtualChassisInterfaceTable:
             _port(10, ifName="Ethernet1", ifDescr="Ethernet"),
             _port(11, ifName="Ethernet2", ifDescr="Ethernet"),
         ]
-        table = VCInterfaceTable(data=records, device=first, interface_name_field="ifDescr")
+        table = VCInterfaceTable(
+            data=records, device=first, chassis=superuser_chassis(first), interface_name_field="ifDescr"
+        )
 
         selections = [str(row.get_cell("selection")) for row in table.rows]
         dropdowns = [str(table.render_device_selection(None, record)) for record in records]
@@ -1631,10 +1641,8 @@ class TestVirtualChassisInterfaceTable:
         assert 'name="device_selection_11"' in dropdowns[1]
 
     def test_missing_port_id_does_not_render_literal_none_dropdown_key(self):
-        from netbox_librenms_plugin.tables.interfaces import VCInterfaceTable
-
         first, _second = self._members("vc-missing-port-id")
-        table = VCInterfaceTable(data=[], device=first, interface_name_field="ifName")
+        table = self._table(first)
 
         html = str(table.render_device_selection(None, _port(port_id=None)))
 
@@ -1642,12 +1650,10 @@ class TestVirtualChassisInterfaceTable:
         assert 'name="device_selection_"' in html
 
     def test_member_names_are_escaped_in_dropdown_options(self):
-        from netbox_librenms_plugin.tables.interfaces import VCInterfaceTable
-
         first = make_device("vc-escape-first")
         hostile = make_device('<script>alert("xss")</script>')
         make_virtual_chassis("vc-escape", first, hostile)
-        table = VCInterfaceTable(data=[], device=first, interface_name_field="ifName")
+        table = self._table(first)
 
         html = str(table.render_device_selection(None, _port(ifType="l3ipvlan")))
 
@@ -1655,10 +1661,8 @@ class TestVirtualChassisInterfaceTable:
         assert "&lt;script&gt;" in html
 
     def test_formatting_adds_the_real_member_selector(self):
-        from netbox_librenms_plugin.tables.interfaces import VCInterfaceTable
-
         first, _second = self._members("vc-format")
-        table = VCInterfaceTable(data=[], device=first, interface_name_field="ifName")
+        table = self._table(first)
 
         result = table.format_interface_data(_port(), first)
 
