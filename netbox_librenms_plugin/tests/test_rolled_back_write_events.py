@@ -283,11 +283,10 @@ def test_a_refused_platform_mapping_sends_no_event_and_the_assigned_platform_doe
     assert sorted(flushed_events) == sorted([("platform", device.platform_id), ("device", device.pk)])
 
 
-def test_a_chassis_that_the_master_rename_refuses_sends_no_event_and_the_imported_device_does(
-    client, live_librenms, flushed_events
-):
-    """The chassis is saved, then the renamed master is too long for its column: only the chassis rolls back."""
+def test_a_failed_stack_import_sends_no_event_and_the_next_device_does(client, live_librenms, flushed_events, caplog):
+    """The master rename exceeds the column limit, so the stack rolls back and the next device commits."""
     from dcim.models import Device, VirtualChassis
+    from django.db import DataError
 
     from netbox_librenms_plugin.tests.test_bulk_import_job_control import (
         _chassis,
@@ -310,6 +309,15 @@ def test_a_chassis_that_the_master_rename_refuses_sends_no_event_and_the_importe
         location=prerequisites["location"],
     )
     _register_stack(live_librenms, device_id, row, members)
+    standalone_id = 96392
+    standalone = _libre_device(
+        standalone_id,
+        "events-standalone",
+        hardware=prerequisites["hardware"],
+        location=prerequisites["location"],
+    )
+    live_librenms.server.register(f"/api/v0/devices/{standalone_id}", {"status": "ok", "devices": [standalone]})
+    live_librenms.server.vc_inventory_callable(standalone_id, [], {})
     client.force_login(make_superuser("events-chassis-user"))
     flushed_events.clear()
 
@@ -317,15 +325,23 @@ def test_a_chassis_that_the_master_rename_refuses_sends_no_event_and_the_importe
         reverse("plugins:netbox_librenms_plugin:bulk_import_devices"),
         {
             "server_key": "default",
-            "select": [str(device_id)],
+            "select": [str(device_id), str(standalone_id)],
             f"role_{device_id}": str(prerequisites["device_role_id"]),
+            f"role_{standalone_id}": str(prerequisites["device_role_id"]),
         },
         HTTP_HX_REQUEST="true",
     )
 
-    assert f"Failed to create VC for device {device_id}" in response.content.decode()
-    imported = Device.objects.get(name=hostname, virtual_chassis__isnull=True)
+    assert "Failed to import 1 device" in response.content.decode()
+    assert any(
+        record.getMessage().startswith(f"Virtual Chassis creation failed for device {hostname}:")
+        and record.exc_info is not None
+        and isinstance(record.exc_info[1], DataError)
+        for record in caplog.records
+    )
+    assert not Device.objects.filter(serial__in=("SN-EVENTS-A", "SN-EVENTS-B")).exists()
     assert not VirtualChassis.objects.exists()
+    imported = Device.objects.get(name=standalone["hostname"], virtual_chassis__isnull=True)
     assert flushed_events == [("device", imported.pk)]
 
 
