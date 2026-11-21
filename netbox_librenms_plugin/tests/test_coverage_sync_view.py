@@ -1182,8 +1182,9 @@ def test_vc_name_sync_uses_the_serial_rule_only_for_serial_suffixes(
 ):
     from netbox_librenms_plugin.models import LibreNMSSettings, NormalizationRule
 
-    chassis, (master, member) = make_virtual_chassis_members("rename-rule")
-    chassis.master = master
+    chassis, (_first, member) = make_virtual_chassis_members("rename-rule")
+    # The device information sync card is on the chassis master.
+    chassis.master = member
     chassis.save(update_fields=["master"])
     member.name = "stack-ABC123"
     member.serial = "ABC123"
@@ -1193,7 +1194,7 @@ def test_vc_name_sync_uses_the_serial_rule_only_for_serial_suffixes(
     settings_row.vc_member_name_pattern = pattern
     settings_row.save()
     rule = NormalizationRule.objects.create(
-        scope="serial", match_pattern=r"^TAG (.+)$", replacement=r"\1", manufacturer=master.device_type.manufacturer
+        scope="serial", match_pattern=r"^TAG (.+)$", replacement=r"\1", manufacturer=member.device_type.manufacturer
     )
     NormalizationRule.objects.filter(pk=rule.pk).update(match_pattern="(")
     _register_device(librenms_server, 6650, "stack")
@@ -1259,8 +1260,9 @@ def test_vc_name_sync_keeps_both_pages_in_agreement_when_the_reported_serial_cha
 ):
     from netbox_librenms_plugin.models import LibreNMSSettings
 
-    chassis, (master, member) = make_virtual_chassis_members("rename-serial-drift")
-    chassis.master = master
+    chassis, (_first, member) = make_virtual_chassis_members("rename-serial-drift")
+    # Import validates the mapping owner, so make the member at position 2 the master.
+    chassis.master = member
     chassis.save(update_fields=["master"])
     member.serial = "OLD123"
     member.save(update_fields=["serial"])
