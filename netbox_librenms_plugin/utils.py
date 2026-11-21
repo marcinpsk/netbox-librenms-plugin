@@ -11,7 +11,7 @@ import psycopg
 from dcim.models import Device, Interface
 from django.core.exceptions import NON_FIELD_ERRORS, FieldDoesNotExist, ObjectDoesNotExist, ValidationError
 from django.core.paginator import EmptyPage, PageNotAnInteger
-from django.db import DatabaseError, IntegrityError, transaction
+from django.db import DatabaseError, IntegrityError
 from django.db.models import Count, Max
 from django.http import HttpRequest
 from django.utils.functional import SimpleLazyObject
@@ -51,7 +51,12 @@ from netbox_librenms_plugin.server_mappings import (
     prefetch_mappings,
     read_mapping,
 )
-from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE, classify_conflict, nearest_database_error
+from netbox_librenms_plugin.transactions import (
+    TRY_AGAIN_MESSAGE,
+    atomic_with_events,
+    classify_conflict,
+    nearest_database_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +132,7 @@ def acquire_advisory_transaction_lock(lock_identity: str, *, using: str | None =
         RuntimeError: If the selected database connection has no open transaction.
 
     """
-    # Resolve the alias the caller's transaction.atomic(using=...) opened; the default
+    # Resolve the alias of the caller's atomic block (its using=...); the default
     # connection can be in autocommit, where the lock would release immediately.
     from django.db import DEFAULT_DB_ALIAS, connections
 
@@ -1518,7 +1523,7 @@ def save_user_pref(request, path, value, order=None):
     config = getattr(user, "config", None) if user is not None else None
     if config is None or config.pk is None:
         return
-    with transaction.atomic():
+    with atomic_with_events():
         user_config = UserConfig.objects.select_for_update().get(pk=config.pk)
         orders = user_config.get(PREFERENCE_ORDER)
         orders = dict(orders) if isinstance(orders, dict) else {}

@@ -202,6 +202,64 @@ def test_a_change_that_removes_no_host_id_writes_at_once(client, servers, seed, 
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("typed", "action", "expected"),
+    [
+        ({"own_id": "14039"}, "relink", {"own": 14039, "oob": 14038, "oob_type": "ilo"}),
+        ({"own_id": ""}, "relink", {"oob": 14038, "oob_type": "ilo"}),
+        ({"oob_id": "14040", "oob_type": "ipmi"}, "change_oob", {"own": 14037, "oob": 14040, "oob_type": "ipmi"}),
+        ({"oob_id": ""}, "change_oob", {"own": 14037}),
+        ({"own_id": "", "oob_id": ""}, "unlink", None),
+    ],
+    ids=["own-replaced", "own-cleared", "oob-replaced", "oob-cleared", "both-cleared"],
+)
+def test_a_replacement_or_a_clear_renders_its_confirmation_and_writes_nothing(client, servers, typed, action, expected):
+    from netbox_librenms_plugin.tests.view_test_helpers import domain_state
+
+    target = seed_mapping(make_device(f"edit-confirm-{next(_names)}"), "primary", own=14037, oob=14038, oob_type="ilo")
+    client.force_login(make_superuser("edit-confirm-writer"))
+    before = domain_state()
+
+    confirmation = _submit(client, target, "primary", **typed)
+
+    assert confirmation.status_code == 200
+    assert domain_state() == before
+    assert confirmation.context["action"] == action
+    _apply_confirmation(client, confirmation)
+    target.refresh_from_db()
+    assert mapping_summary(target) == ({"primary": expected} if expected else {})
+
+
+@pytest.mark.django_db
+def test_a_change_of_both_ids_at_once_is_refused(client, servers):
+    target = seed_mapping(make_device("edit-both"), "primary", own=14041, oob=14042, oob_type="ilo")
+    client.force_login(make_superuser("edit-both-writer"))
+
+    response = _submit(client, target, "primary", own_id="14043", oob_id="14044")
+
+    assert response.status_code == 302
+    assert len(_messages(response)) == 1
+    target.refresh_from_db()
+    assert mapping_summary(target) == {"primary": {"own": 14041, "oob": 14042, "oob_type": "ilo"}}
+
+
+@pytest.mark.django_db
+def test_a_new_own_id_with_a_new_oob_type_is_refused(client, servers):
+    """A relink keeps the stored OOB controller, so the type change would be lost: each change is its own."""
+    from netbox_librenms_plugin.tests.view_test_helpers import domain_state
+
+    target = seed_mapping(make_device("edit-own-and-type"), "primary", own=14045, oob=14046, oob_type="ilo")
+    client.force_login(make_superuser("edit-own-and-type-writer"))
+    before = domain_state()
+
+    response = _submit(client, target, "primary", own_id="14047", oob_type="idrac")
+
+    assert response.status_code == 302
+    assert len(_messages(response)) == 1
+    assert domain_state() == before
+
+
+@pytest.mark.django_db
 def test_an_unchanged_form_writes_nothing(client, servers):
     target = seed_mapping(make_device("edit-unchanged"), "primary", own=14031, oob=14032, oob_type="ilo")
     client.force_login(make_superuser("edit-unchanged-writer"))
@@ -258,9 +316,8 @@ def test_an_id_that_another_object_owns_is_refused(client, servers, field, owner
         {"oob_id": "1.5", "oob_type": "idrac"},
         {"oob_id": "14051", "oob_type": "toaster"},
         {"oob_id": "14051", "oob_type": ""},
-        {"own_id": "", "oob_id": ""},
     ],
-    ids=["text", "zero", "negative", "above-bigint", "oob-fraction", "unknown-type", "no-type", "nothing"],
+    ids=["text", "zero", "negative", "above-bigint", "oob-fraction", "unknown-type", "no-type"],
 )
 def test_a_bad_value_is_refused(client, servers, typed):
     target = seed_mapping(make_device(f"edit-bad-{next(_names)}"), "primary", own=14050)
@@ -470,6 +527,7 @@ def test_a_change_between_the_render_and_the_lock_is_a_conflict(client, servers)
     client.force_login(make_superuser("edit-concurrent-writer"))
     action, fields = _editor_forms(client, target)["primary"]
     other_writer = seed_mapping(type(target)(), "primary", own=14091, save=False)
+    # An OOB add on an empty OOB writes at once, so the editor locks the row.
 
     with second_connection() as other:
         committed = []
@@ -482,26 +540,13 @@ def test_a_change_between_the_render_and_the_lock_is_a_conflict(client, servers)
             return execute(sql, params, many, context)
 
         with connection.execute_wrapper(commit_before_the_lock):
-            response = client.post(action, {**fields, "own_id": "14092"})
+            response = client.post(action, {**fields, "oob_id": "14092", "oob_type": "idrac"})
 
     assert committed
     assert response.status_code == 302
     assert _messages(response) == [TRY_AGAIN_MESSAGE]
     target.refresh_from_db()
     assert mapping_summary(target) == {"primary": {"own": 14091}}
-
-
-@pytest.mark.django_db
-def test_an_own_id_cannot_be_cleared_in_the_editor(client, servers):
-    target = seed_mapping(make_device("edit-clear-own"), "primary", own=14028, oob=14029, oob_type="cimc")
-    client.force_login(make_superuser("edit-clear-own-writer"))
-
-    response = _submit(client, target, "primary", own_id="")
-
-    assert response.status_code == 302
-    assert len(_messages(response)) == 1
-    target.refresh_from_db()
-    assert mapping_summary(target) == {"primary": {"own": 14028, "oob": 14029, "oob_type": "cimc"}}
 
 
 @pytest.mark.django_db
@@ -673,59 +718,3 @@ def test_a_confirmed_host_change_clears_only_its_servers_ports(client, servers, 
         assert _change_records(interface) == records[interface.pk] + 1
     outside.refresh_from_db()
     assert mapping_summary(outside) == {"primary": {"own": 15700}}
-
-
-@pytest.mark.django_db
-def test_a_change_of_both_ids_at_once_is_refused(client, servers):
-    target = seed_mapping(make_device("edit-both"), "primary", own=14041, oob=14042, oob_type="ilo")
-    client.force_login(make_superuser("edit-both-writer"))
-
-    response = _submit(client, target, "primary", own_id="14043", oob_id="14044")
-
-    assert response.status_code == 302
-    assert len(_messages(response)) == 1
-    target.refresh_from_db()
-    assert mapping_summary(target) == {"primary": {"own": 14041, "oob": 14042, "oob_type": "ilo"}}
-
-
-@pytest.mark.django_db
-def test_a_new_own_id_with_a_new_oob_type_is_refused(client, servers):
-    """A relink keeps the stored OOB controller, so the type change would be lost: each change is its own."""
-    from netbox_librenms_plugin.tests.view_test_helpers import domain_state
-
-    target = seed_mapping(make_device("edit-own-and-type"), "primary", own=14045, oob=14046, oob_type="ilo")
-    client.force_login(make_superuser("edit-own-and-type-writer"))
-    before = domain_state()
-
-    response = _submit(client, target, "primary", own_id="14047", oob_type="idrac")
-
-    assert response.status_code == 302
-    assert len(_messages(response)) == 1
-    assert domain_state() == before
-
-
-@pytest.mark.django_db
-@pytest.mark.parametrize(
-    ("typed", "action", "expected"),
-    [
-        ({"own_id": "14039"}, "relink", {"own": 14039, "oob": 14038, "oob_type": "ilo"}),
-        ({"oob_id": "14040", "oob_type": "ipmi"}, "change_oob", {"own": 14037, "oob": 14040, "oob_type": "ipmi"}),
-        ({"oob_id": ""}, "change_oob", {"own": 14037}),
-    ],
-    ids=["own-replaced", "oob-replaced", "oob-cleared"],
-)
-def test_a_replacement_or_a_clear_renders_its_confirmation_and_writes_nothing(client, servers, typed, action, expected):
-    from netbox_librenms_plugin.tests.view_test_helpers import domain_state
-
-    target = seed_mapping(make_device(f"edit-confirm-{next(_names)}"), "primary", own=14037, oob=14038, oob_type="ilo")
-    client.force_login(make_superuser("edit-confirm-writer"))
-    before = domain_state()
-
-    confirmation = _submit(client, target, "primary", **typed)
-
-    assert confirmation.status_code == 200
-    assert domain_state() == before
-    assert confirmation.context["action"] == action
-    _apply_confirmation(client, confirmation)
-    target.refresh_from_db()
-    assert mapping_summary(target) == ({"primary": expected} if expected else {})

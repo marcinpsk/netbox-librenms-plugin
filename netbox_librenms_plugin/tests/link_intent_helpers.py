@@ -1,7 +1,8 @@
 """
-Drive the Link confirmation through its real routes.
+Drive the mapping lifecycle confirmations through their real routes.
 
-The sync page or a status list offers the token, and the lifecycle routes apply it.
+The sync page, a status list, the unlink confirmation or the mapping editor offers the token, and
+the lifecycle routes apply it.
 """
 
 import re
@@ -71,33 +72,16 @@ def page_token(client, obj):
     return link["token"]
 
 
-def link(client, obj, tokens, *, server_key="default"):
-    """POST *tokens* to the Link route of *obj*, as the sync page form does, and return the response."""
-    url = reverse(
-        "plugins:netbox_librenms_plugin:mapping_lifecycle", kwargs={"object_type": model_name(obj), "pk": obj.pk}
-    )
-    return client.post(url, {"server_key": server_key, FIELD: list(tokens)})
-
-
-def status_list(client, object_type, **filters):
-    """Render a status list as the logged-in user, with *filters*, and return the response."""
-    name = "device_status_list" if object_type == "device" else "vm_status_list"
-    response = client.get(reverse(f"plugins:netbox_librenms_plugin:{name}"), filters)
-    assert response.status_code == 200, response.content
-    return response
-
-
-def link_selected(client, object_type, tokens, *, server_key="default"):
-    """POST *tokens* to the "Link selected" route of a status list and return the response."""
-    url = reverse("plugins:netbox_librenms_plugin:link_selected", kwargs={"object_type": object_type})
-    return client.post(url, {"server_key": server_key, FIELD: list(tokens)})
-
-
 def lifecycle_url(obj):
-    """Return the lifecycle route of *obj*: its POST applies the host change token."""
+    """Return the lifecycle route of *obj*: its GET shows the unlink confirmation, its POST applies a token."""
     return reverse(
         "plugins:netbox_librenms_plugin:mapping_lifecycle", kwargs={"object_type": model_name(obj), "pk": obj.pk}
     )
+
+
+def unlink_page(client, obj, server_key="default", **query):
+    """Request the unlink confirmation of *obj* on *server_key*, as the Unlink action of the sync page does."""
+    return client.get(lifecycle_url(obj), {"action": "unlink", "server_key": server_key, **query})
 
 
 def edit_mapping(client, obj, server_key="default", **typed):
@@ -120,6 +104,28 @@ def offered_token(response):
     """Return the token of a rendered host change confirmation."""
     assert response.status_code == 200, (response.status_code, message_texts(response))
     return response.context["token"]
+
+
+def link(client, obj, tokens, *, server_key="default"):
+    """POST *tokens* to the Link route of *obj*, as the sync page form does, and return the response."""
+    url = reverse(
+        "plugins:netbox_librenms_plugin:mapping_lifecycle", kwargs={"object_type": model_name(obj), "pk": obj.pk}
+    )
+    return client.post(url, {"server_key": server_key, FIELD: list(tokens)})
+
+
+def status_list(client, object_type, **filters):
+    """Render a status list as the logged-in user, with *filters*, and return the response."""
+    name = "device_status_list" if object_type == "device" else "vm_status_list"
+    response = client.get(reverse(f"plugins:netbox_librenms_plugin:{name}"), filters)
+    assert response.status_code == 200, response.content
+    return response
+
+
+def link_selected(client, object_type, tokens, *, server_key="default"):
+    """POST *tokens* to the "Link selected" route of a status list and return the response."""
+    url = reverse("plugins:netbox_librenms_plugin:link_selected", kwargs={"object_type": object_type})
+    return client.post(url, {"server_key": server_key, FIELD: list(tokens)})
 
 
 def message_texts(response):

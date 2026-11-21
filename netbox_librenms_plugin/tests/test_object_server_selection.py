@@ -253,7 +253,7 @@ def test_cache_only_endpoints_reject_malformed_server_keys(
 
 
 @pytest.mark.django_db
-def test_unconfigured_mapping_is_removable_but_not_selectable(client, servers):
+def test_unconfigured_mapping_can_be_unlinked_but_not_selected(client, servers):
     device = seed_mapping(make_device("stale-server-mapping"), "retired", own=13407)
     client.force_login(make_superuser("object-server-stale-user"))
 
@@ -263,7 +263,7 @@ def test_unconfigured_mapping_is_removable_but_not_selectable(client, servers):
     html = response.content.decode()
     assert "LibreNMS server &#x27;retired&#x27; is not an available mapping" in html
     assert "Not configured" in html
-    assert 'name="server_key" value="retired"' in html
+    assert 'data-unlink-server="retired"' in html
     selector = selector_html(html)
     assert '<span class="dropdown-item disabled"' in selector
     assert "server_key=retired" not in selector
