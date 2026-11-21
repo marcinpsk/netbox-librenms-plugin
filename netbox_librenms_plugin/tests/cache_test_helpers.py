@@ -43,37 +43,43 @@ def seed_every_tab(obj, server_key="default"):
     return keys
 
 
-def seed_inventory(view, device, inventory, *, librenms_id, server_key="default"):
-    """Write one inventory payload the way ``BaseModuleTableView.post`` writes it.
+def seed_inventory(
+    device, inventory, *, librenms_id, server_key="default", ports=(), transceivers=(), oob_inventory=None, oob_id=None
+):
+    """Store explicit raw module facts under the requested source binding."""
+    from netbox_librenms_plugin import source_cache
+    from netbox_librenms_plugin.acquisition.registry import Resource
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_modules_snapshot
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
-    ``librenms_id`` is required: the reader rejects a payload whose id is missing, so a defaulted
-    ``None`` would seed a cache entry that can never be read back and silently pass as a miss.
-    """
-    from django.core.cache import cache
-
-    from netbox_librenms_plugin.serial_identity import SerialRules
-    from netbox_librenms_plugin.sync_cache import module_inventory_cache_payload
-
-    key = view.get_cache_key(device, "inventory", server_key=server_key)
-    payload = module_inventory_cache_payload(
-        inventory, librenms_id, None, serial_context=SerialRules.load().for_device(device)
+    if oob_id is not None:
+        seed_mapping(device, server_key, oob=oob_id)
+    seed_modules_snapshot(
+        device,
+        inventory,
+        ports,
+        transceivers,
+        server_key=server_key,
+        oob_inventory=oob_inventory,
+        source_id=librenms_id,
     )
-    cache.set(key, payload, timeout=300)
-    return key
+    return source_cache.snapshot_key(device, Resource.MODULES, server_key)
 
 
 def seed_module_rows(device, inventory, *, librenms_id, bound_ports=()):
     """Seed the Modules tab of *device*; each ``(entPhysicalIndex, port_id, ifName)`` of *bound_ports* binds a row's port."""
-    from netbox_librenms_plugin.views.mixins import CacheMixin
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import transceiver_row
 
-    bindings = {index: (port_id, name) for index, port_id, name in bound_ports}
-    rows = [
-        {**row, "_librenms_port_id": bindings[index][0], "_librenms_ifname": bindings[index][1]}
-        if (index := row["entPhysicalIndex"]) in bindings
-        else row
-        for row in inventory
-    ]
-    return seed_inventory(CacheMixin(), device, rows, librenms_id=librenms_id)
+    models = {row["entPhysicalIndex"]: row.get("entPhysicalModelName") for row in inventory}
+    return seed_inventory(
+        device,
+        inventory,
+        librenms_id=librenms_id,
+        ports=[{"port_id": port_id, "ifName": name} for _index, port_id, name in bound_ports],
+        transceivers=[
+            transceiver_row(index, port_id=port_id, model=models[index]) for index, port_id, _name in bound_ports
+        ],
+    )
 
 
 def clear_snapshots(keys):

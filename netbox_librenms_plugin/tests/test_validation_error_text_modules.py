@@ -9,6 +9,8 @@ real grants, and the view's own permission gate. A restricted viewer gets the re
 model, and a superuser gets the message.
 """
 
+from netbox_librenms_plugin.tests.source_snapshot_helpers import transceiver_row
+
 import pytest
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
@@ -86,11 +88,11 @@ def _assert_shown(texts, hidden, superuser, restricted_text):
         assert hidden.name not in texts, texts
 
 
-def _drive(view_class, device, data, user, live_librenms, inventory=None):
+def _drive(view_class, device, data, user, live_librenms, inventory=None, **source_facts):
     """POST into a bound view with a real request, and return the message texts; a callable *data* reads the page."""
     view = view_class()
     view._librenms_api = live_librenms.api
-    key = None if inventory is None else seed_inventory(view, device, inventory, librenms_id=device.pk)
+    key = None if inventory is None else seed_inventory(device, inventory, librenms_id=device.pk, **source_facts)
     try:
         fields = data(device, user) if callable(data) else data
         request = make_request("post", {"server_key": "default", **fields}, user=user, path="/modules/")
@@ -179,9 +181,7 @@ class TestAModuleActionShowsNetBoxsMessageOnlyToASuperuser:
         device, hidden = _linked(make_device_with_module_bays(tag, ["Slot 1"])), make_device(f"{tag}-hidden")
         interface = make_interface(device, "Te1/1/1")
         model = make_module_type(f"CARD-{tag}").model
-        rows = _bulk_rows(
-            view_name, [_row(10, model, "Slot 1", _librenms_port_id=7301, _librenms_ifname=interface.name)], tag
-        )
+        rows = _bulk_rows(view_name, [_row(10, model, "Slot 1")], tag)
         refuse = _refuse_the_bind_of(interface, hidden)
 
         pre_save.connect(refuse, sender=Interface, weak=False)
@@ -193,6 +193,8 @@ class TestAModuleActionShowsNetBoxsMessageOnlyToASuperuser:
                 _viewer(tag, superuser, device),
                 live_librenms,
                 rows,
+                ports=[{"port_id": 7301, "ifName": interface.name}],
+                transceivers=[transceiver_row(10, port_id=7301, model=model)],
             )
         finally:
             pre_save.disconnect(refuse, sender=Interface)

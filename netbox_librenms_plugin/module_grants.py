@@ -19,7 +19,7 @@ from netbox_librenms_plugin.utils import coerce_positive_int
 
 _SALT = "netbox_librenms_plugin.module_write_grant"
 # Change this when the payload changes: a token of another version refuses as stale.
-GRANT_VERSION = 1
+GRANT_VERSION = 2
 
 RENDER_ATTRIBUTED = "attributed"
 RENDER_PINNED = "pinned"
@@ -107,11 +107,17 @@ class GrantRefused(Exception):
         super().__init__(refusal.name)
 
 
-def module_inventory_snapshot_digest(inventory) -> str:
-    """Return a canonical digest for a complete cached LibreNMS inventory snapshot."""
+def module_inventory_snapshot_digest(inventory, *, source) -> str:
+    """Return a canonical digest of assessed inventory and its bound acquisition source."""
     if not isinstance(inventory, list) or any(not isinstance(item, dict) for item in inventory):
         raise TypeError("inventory must be a list of dictionaries")
-    serialized = json.dumps({"inventory": inventory}, sort_keys=True, separators=(",", ":"))
+    from netbox_librenms_plugin.acquisition.registry import Resource
+
+    serialized = json.dumps(
+        {"inventory": inventory, "source": source.binding(Resource.MODULES).to_payload()},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return hashlib.sha256(serialized.encode()).hexdigest()
 
 
@@ -156,9 +162,9 @@ class ModuleGrant:
             return ()
         return tuple(row[columns.index("target")] for row in self.rows or ())
 
-    def check_state(self, inventory, policy):
+    def check_state(self, inventory, policy, *, source):
         """Raise a refusal unless the grant was signed for this snapshot, this policy and its current devices."""
-        if module_inventory_snapshot_digest(inventory) != self.inventory_digest:
+        if module_inventory_snapshot_digest(inventory, source=source) != self.inventory_digest:
             raise GrantRefused(GrantRefusal.SNAPSHOT)
         if policy.fingerprint != self.policy_fingerprint:
             raise GrantRefused(GrantRefusal.POLICY)

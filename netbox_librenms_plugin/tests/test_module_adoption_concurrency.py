@@ -1,7 +1,8 @@
 """Concurrency coverage for automatic module interface adoption."""
 
 from threading import Event
-from types import SimpleNamespace
+
+from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
 import pytest
 from django.apps import apps
@@ -91,7 +92,7 @@ def test_concurrent_hidden_interface_is_not_adopted(commit_point):
                 user=thread_user,
             )
             view = InstallModuleView()
-            view._librenms_api = SimpleNamespace(server_key="default")
+            view._librenms_api = LibreNMSAPI(server_key="default")
             view.setup(request, pk=thread_device.pk)
             with connection.execute_wrapper(pause_at_the_commit_point):
                 return view.post(request, pk=thread_device.pk)

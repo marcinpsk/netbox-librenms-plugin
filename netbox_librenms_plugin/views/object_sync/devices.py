@@ -751,8 +751,11 @@ class VerifyVlanSyncGroupView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
             # No group = global VLANs
             netbox_vlan = visible_vlans.filter(vid=vid, group__isnull=True).first()
 
-        exists_in_netbox = bool(netbox_vlan)
-        name_matches = netbox_vlan.name == librenms_name if netbox_vlan else False
+        from netbox_librenms_plugin.assessment.vlans import compare_vlan
+
+        comparison = compare_vlan(netbox_vlan, librenms_name)
+        exists_in_netbox = comparison["exists_in_netbox"]
+        name_matches = comparison["name_matches"]
         css_class = get_vlan_sync_css_class(exists_in_netbox, name_matches)
         sync_actions = data.get("sync_actions", True)
         status_html = render_vlan_sync_action(

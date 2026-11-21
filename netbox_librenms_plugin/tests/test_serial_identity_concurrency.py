@@ -22,12 +22,8 @@ from netbox_librenms_plugin.tests.conftest import (
     transactional_db_with_all_apps,
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
-from netbox_librenms_plugin.tests.view_test_helpers import (
-    messages_on,
-    rendered_module_form,
-    render_module_tab,
-    trusted_module_inventory_payload,
-)
+from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_mapped_modules
+from netbox_librenms_plugin.tests.view_test_helpers import messages_on, rendered_module_form, render_module_tab
 
 SERVER_KEY = "default"
 
@@ -250,10 +246,8 @@ def test_a_failed_install_after_its_save_leaves_events_only_for_the_committed_si
 ):
     """The second install saves its module, then fails; its savepoint drops the module and the module's events."""
     from dcim.models import InterfaceTemplate, Module
-    from django.core.cache import cache
     from django.urls import reverse
 
-    from netbox_librenms_plugin.views.mixins import CacheMixin
     from netbox_librenms_plugin.views.sync import modules as module_views
 
     device = make_device("event-safe-branch")
@@ -281,9 +275,7 @@ def test_a_failed_install_after_its_save_leaves_events_only_for_the_committed_si
             for number in (1, 2)
         ),
     ]
-    cache.set(
-        CacheMixin().get_cache_key(device, "inventory", SERVER_KEY), trusted_module_inventory_payload(device, rows)
-    )
+    seed_mapped_modules(device, rows, server_key=SERVER_KEY)
     user = make_superuser("event-safe-branch-user")
     _url, data = rendered_module_form(render_module_tab(device, user=user), "install-branch", 1)
     normalize = module_views._normalize_module_interface_names_for_vc_member
@@ -316,9 +308,6 @@ def test_a_failed_install_after_its_save_leaves_events_only_for_the_committed_si
 def test_a_legacy_module_serial_heals_to_the_librenms_text(client):
     """An update of a module whose stored rule output names the LibreNMS hardware writes the LibreNMS text."""
     from dcim.models import Module
-    from django.core.cache import cache
-
-    from netbox_librenms_plugin.views.mixins import CacheMixin
 
     _seeded_rule()
     device = make_device_with_module_bays("module-heal", ["Slot 1"])
@@ -333,9 +322,7 @@ def test_a_legacy_module_serial_heals_to_the_librenms_text(client):
             "entPhysicalContainedIn": 0,
         }
     ]
-    cache.set(
-        CacheMixin().get_cache_key(device, "inventory", SERVER_KEY), trusted_module_inventory_payload(device, rows)
-    )
+    seed_mapped_modules(device, rows, server_key=SERVER_KEY)
     user = make_superuser("module-heal-user")
     # The row matches, and the page offers the update because the stored form differs.
     url, data = rendered_module_form(render_module_tab(device, user=user), "update-module-serial", 7)
@@ -1002,13 +989,11 @@ def test_module_serial_writes_wait_for_a_type_change_of_their_device(librenms_se
     from threading import Event
 
     from dcim.models import Device, DeviceType, Manufacturer, Module
-    from django.core.cache import cache
     from django.test import Client
     from django.urls import reverse
 
     from netbox_librenms_plugin.models import NormalizationRule
     from netbox_librenms_plugin.tests.lock_conflict_helpers import wait_for_lock_wait
-    from netbox_librenms_plugin.views.mixins import CacheMixin
     from netbox_librenms_plugin.views.sync import device_fields
 
     device = make_device_with_module_bays("ctx-module-race", ["Slot 1", "Slot 2"])
@@ -1032,10 +1017,7 @@ def test_module_serial_writes_wait_for_a_type_change_of_their_device(librenms_se
         }
         for index, bay, module, serial in ((7, "Slot 1", first, "ABC"), (8, "Slot 2", second, "XABC"))
     ]
-    cache.set(
-        CacheMixin().get_cache_key(device, "inventory", SERVER_KEY),
-        trusted_module_inventory_payload(device, rows, librenms_id=9841),
-    )
+    seed_mapped_modules(device, rows, server_key=SERVER_KEY, librenms_id=9841)
     librenms_server.device_info_response(device_id=9841, hostname=device.name, hardware=new_type.part_number)
     user = make_superuser("ctx-module-race-user")
     rendered = render_module_tab(device, user=user)
@@ -1103,12 +1085,9 @@ def test_module_serial_writes_wait_for_a_type_change_of_their_device(librenms_se
     first.refresh_from_db()
     second.refresh_from_db()
     assert (first.serial, second.serial) == ("OLD111", "OLD222")
-    # The snapshot was merged under the old type's serial context, so a refresh stores it again under the new one.
+    # A refresh stores the source again. The read assesses it under the new type's context.
     device.refresh_from_db()
-    cache.set(
-        CacheMixin().get_cache_key(device, "inventory", SERVER_KEY),
-        trusted_module_inventory_payload(device, rows, librenms_id=9841),
-    )
+    seed_mapped_modules(device, rows, server_key=SERVER_KEY, librenms_id=9841)
     fresh = render_module_tab(device, user=user)
     levels = []
     for index in (7, 8):
@@ -1207,12 +1186,10 @@ def test_a_module_writer_claims_its_old_identity_before_its_row_lock(client, lib
     from threading import Event
 
     from dcim.models import Module
-    from django.core.cache import cache
     from django.db import DatabaseError, transaction
     from django.test import Client
 
     from netbox_librenms_plugin.serial_identity import SerialRules, assignment_lock, locked_type_context, resolve_module
-    from netbox_librenms_plugin.views.mixins import CacheMixin
     from netbox_librenms_plugin.views.sync.modules import _module_already_on_device
 
     device = seed_mapping(make_device_with_module_bays("old-identity-writer", ["Slot 1"]), SERVER_KEY, own=9871)
@@ -1225,10 +1202,7 @@ def test_a_module_writer_claims_its_old_identity_before_its_row_lock(client, lib
         "entPhysicalSerialNum": "CCC",
         "entPhysicalContainedIn": 0,
     }
-    cache.set(
-        CacheMixin().get_cache_key(device, "inventory", SERVER_KEY),
-        trusted_module_inventory_payload(device, [row], librenms_id=9871),
-    )
+    seed_mapped_modules(device, [row], librenms_id=9871)
     user = make_superuser("old-identity-writer-user")
     rendered = render_module_tab(device, user=user)
     if actor == "replace":
@@ -1386,13 +1360,11 @@ def test_a_replacement_claims_the_serials_of_children_it_deletes(
     from threading import Event
 
     from dcim.models import Module
-    from django.core.cache import cache
     from django.db import DatabaseError
     from django.test import Client
 
     from netbox_librenms_plugin.models import NormalizationRule
     from netbox_librenms_plugin.tests.view_test_helpers import rendered_preview_url
-    from netbox_librenms_plugin.views.mixins import CacheMixin
 
     NormalizationRule.objects.create(scope="serial", match_pattern=r"^REJECTED:(.*)$", replacement=r"\1")
     device = seed_mapping(make_device_with_module_bays("remove-child-identities", ["Slot 1"]), SERVER_KEY, own=9872)
@@ -1422,10 +1394,7 @@ def test_a_replacement_claims_the_serials_of_children_it_deletes(
             "entPhysicalContainedIn": 7,
         },
     ]
-    cache.set(
-        CacheMixin().get_cache_key(device, "inventory", SERVER_KEY),
-        trusted_module_inventory_payload(device, rows, librenms_id=9872),
-    )
+    seed_mapped_modules(device, rows, librenms_id=9872)
     user = make_superuser("remove-child-identities-user")
     client.force_login(user)
     rendered = render_module_tab(device, user=user)
@@ -1434,10 +1403,7 @@ def test_a_replacement_claims_the_serials_of_children_it_deletes(
     replace_action, replace_fields = rendered_module_form(preview.content.decode(), "replace-module", 7)
     if external_conflict:
         external_rows = [{**rows[0], "entPhysicalSerialNum": "DDD"}, rows[1]]
-        cache.set(
-            CacheMixin().get_cache_key(child_device, "inventory", SERVER_KEY),
-            trusted_module_inventory_payload(child_device, external_rows),
-        )
+        seed_mapped_modules(child_device, external_rows)
         rendered = render_module_tab(child_device, user=user)
     update_action, update_fields = rendered_module_form(rendered, "update-module-serial", 8)
     replacing_client, updating_client = Client(), Client()
@@ -1513,11 +1479,9 @@ def test_a_replacement_claims_the_serials_of_children_it_deletes(
 def test_replacement_refuses_a_child_reparented_within_the_observed_tree(client):
     """The subtree keeps its identities, but a child changes bay before the owner lock."""
     from dcim.models import Module, ModuleBay
-    from django.core.cache import cache
 
     from netbox_librenms_plugin.tests.lock_conflict_helpers import commit_row_change, second_connection
     from netbox_librenms_plugin.tests.view_test_helpers import rendered_preview_url
-    from netbox_librenms_plugin.views.mixins import CacheMixin
 
     device = make_device_with_module_bays("replacement-topology", ["Slot 1"])
     parent = install_module(device, "Slot 1", "TOPOLOGY-PARENT", serial="TOPOLOGY-OLD", child_bays=("Sub 1", "Sub 2"))
@@ -1531,9 +1495,7 @@ def test_replacement_refuses_a_child_reparented_within_the_observed_tree(client)
         "entPhysicalSerialNum": "TOPOLOGY-NEW",
         "entPhysicalContainedIn": 0,
     }
-    cache.set(
-        CacheMixin().get_cache_key(device, "inventory", SERVER_KEY), trusted_module_inventory_payload(device, [row])
-    )
+    seed_mapped_modules(device, [row])
     user = make_superuser("replacement-topology-user")
     client.force_login(user)
     preview = client.get(rendered_preview_url(render_module_tab(device, user=user), 7))
@@ -1561,7 +1523,6 @@ def test_replacement_refuses_a_child_reparented_within_the_observed_tree(client)
 def test_replacement_refuses_a_new_conflict_owner_without_locking_its_module(client):
     """A conflict found after observation must not extend the locked Device set."""
     from dcim.models import Module
-    from django.core.cache import cache
 
     from netbox_librenms_plugin.module_writes import _CHANGED
     from netbox_librenms_plugin.tests.lock_conflict_helpers import (
@@ -1572,7 +1533,6 @@ def test_replacement_refuses_a_new_conflict_owner_without_locking_its_module(cli
         second_connection,
     )
     from netbox_librenms_plugin.tests.view_test_helpers import rendered_preview_url
-    from netbox_librenms_plugin.views.mixins import CacheMixin
 
     target = make_device_with_module_bays("unplanned-conflict-target", ["Slot 1"])
     other = make_device_with_module_bays("unplanned-conflict-other", ["Slot 1"])
@@ -1587,9 +1547,7 @@ def test_replacement_refuses_a_new_conflict_owner_without_locking_its_module(cli
         "entPhysicalSerialNum": "NEW123",
         "entPhysicalContainedIn": 0,
     }
-    cache.set(
-        CacheMixin().get_cache_key(target, "inventory", SERVER_KEY), trusted_module_inventory_payload(target, [row])
-    )
+    seed_mapped_modules(target, [row])
     user = make_superuser("unplanned-conflict-user")
     client.force_login(user)
     preview = client.get(rendered_preview_url(render_module_tab(target, user=user), 7))

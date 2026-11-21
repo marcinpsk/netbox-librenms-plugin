@@ -23,7 +23,9 @@ from netbox_librenms_plugin.data_shapes.anonymize import (
     find_pii,
     has_serial_input,
 )
-from netbox_librenms_plugin.data_shapes.capture import capture_device_recording
+from netbox_librenms_plugin.data_shapes.capture import CAPTURE_RESOURCES, capture_device_recording
+from netbox_librenms_plugin import source_cache
+from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.data_shapes.compress import compress_recording
 from netbox_librenms_plugin.data_shapes.signature import (
     classify_novelty,
@@ -32,8 +34,6 @@ from netbox_librenms_plugin.data_shapes.signature import (
 )
 from netbox_librenms_plugin.models import RuleConfigurationError
 from netbox_librenms_plugin.serial_identity import SerialRules, plain_context
-from netbox_librenms_plugin.server_mappings import read_mapping
-from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.views.mixins import (
     LibreNMSAPIMixin,
     LibreNMSPermissionMixin,
@@ -67,27 +67,14 @@ class CaptureDataShapeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
         if server_key is None:
             return self._error(request, device, "Selected LibreNMS server is no longer configured.")
 
-        sync_device = get_librenms_sync_device(device, server_key=server_key) or device
-        sync_device = self.restrict_object_or_404(Device, pk=sync_device.pk)
-        librenms_id = self.librenms_api.get_stored_librenms_id(sync_device, server_key=server_key)
-        if not librenms_id:
-            return self._error(
-                request, device, "This device is not linked to LibreNMS, so there is no data shape to capture."
-            )
-
-        # Include a linked OOB controller's ports (a separate LibreNMS device the interfaces view
-        # merges into the host) so the submitted shape is complete for OOB hosts.
-        sync_mapping = read_mapping(sync_device)
-        oob_id = sync_mapping.oob_id(server_key)
-        if sync_mapping.has_oob(server_key) and oob_id is None:
-            return self._error(request, device, "The linked OOB controller has an invalid LibreNMS id.")
+        plan = source_cache.authorized_plan(request, device, server_key=server_key, resources=CAPTURE_RESOURCES)
+        sync_device = plan.owner(Resource.MODULES)
         try:
             recording = capture_device_recording(
-                self.librenms_api,
-                librenms_id,
+                plan,
                 name=f"{device.name}-shape",
                 description=f"Captured from {device.name}.",
-                oob_id=oob_id,
+                include_serial=True,
             )
             # Trim redundant high-cardinality ports BEFORE anonymizing — on the raw port names,
             # which is exactly what relationship resolution reads — so the shape stays intact while

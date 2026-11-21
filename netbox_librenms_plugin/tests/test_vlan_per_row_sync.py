@@ -1,5 +1,7 @@
 """End-to-end coverage for per-row VLAN synchronization."""
 
+from netbox_librenms_plugin.assessment.vlans import compare_rows
+
 import json
 from html.parser import HTMLParser
 
@@ -71,10 +73,8 @@ def test_usable_vlan_vid_spellings_round_trip_through_rendered_controls(client, 
     existing = VLAN.objects.create(vid=501, group=group, name="Application")
     source_rows = [{"vlan_vlan": source_vid, "vlan_name": existing.name}]
     comparison_view = DeviceVLANTableView()
-    compared_rows = comparison_view.compare_vlans(
-        source_rows,
-        comparison_view._build_vlan_lookup_maps([group]),
-        device=device,
+    compared_rows = compare_rows(
+        source_rows, lookup_maps=comparison_view._build_vlan_lookup_maps([group]), subject=device
     )
     table = LibreNMSVLANTable(compared_rows, vlan_groups=[group])
     request = RequestFactory().get("/")
@@ -147,7 +147,7 @@ def test_invalid_vlan_vid_rows_render_as_inert_escaped_diagnostics(source_vid, d
     VLAN.objects.create(vid=1, name="Boolean alias guard")
     VLAN.objects.create(vid=501, name="Float alias guard")
     comparison_view = DeviceVLANTableView()
-    compared_rows = comparison_view.compare_vlans(
+    compared_rows = compare_rows(
         [
             {
                 "vlan_vlan": source_vid,
@@ -156,7 +156,8 @@ def test_invalid_vlan_vid_rows_render_as_inert_escaped_diagnostics(source_vid, d
                 "vlan_state": "active",
             }
         ],
-        comparison_view._build_vlan_lookup_maps([]),
+        lookup_maps=comparison_view._build_vlan_lookup_maps([]),
+        subject=None,
     )
     table = LibreNMSVLANTable(compared_rows)
     request = RequestFactory().get("/")
@@ -198,7 +199,7 @@ def test_duplicate_canonical_vlan_vid_rows_are_blocked_on_render_and_post(client
         {"vlan_vlan": "0501", "vlan_name": "Second duplicate"},
     ]
     comparison_view = DeviceVLANTableView()
-    compared_rows = comparison_view.compare_vlans(source_rows, comparison_view._build_vlan_lookup_maps([]))
+    compared_rows = compare_rows(source_rows, lookup_maps=comparison_view._build_vlan_lookup_maps([]), subject=None)
     table = LibreNMSVLANTable(compared_rows)
     request = RequestFactory().get("/")
     request.user = AnonymousUser()
@@ -594,13 +595,14 @@ def test_vlan_table_renders_each_per_row_action_state():
     VLAN.objects.create(vid=402, name="Current update")
     VLAN.objects.create(vid=403, name="Already synced")
     comparison_view = DeviceVLANTableView()
-    compared_rows = comparison_view.compare_vlans(
+    compared_rows = compare_rows(
         [
             {"vlan_vlan": 401, "vlan_name": "Create row"},
             {"vlan_vlan": 402, "vlan_name": "Updated name"},
             {"vlan_vlan": 403, "vlan_name": "Already synced"},
         ],
-        comparison_view._build_vlan_lookup_maps([]),
+        lookup_maps=comparison_view._build_vlan_lookup_maps([]),
+        subject=None,
     )
     request = RequestFactory().get("/")
     request.user = AnonymousUser()
@@ -636,9 +638,10 @@ def test_vlan_table_row_without_usable_vid_has_no_action(vid):
     from netbox_librenms_plugin.views.object_sync.devices import DeviceVLANTableView
 
     comparison_view = DeviceVLANTableView()
-    compared_row = comparison_view.compare_vlans(
+    compared_row = compare_rows(
         [{"vlan_vlan": vid, "vlan_name": "Missing identity"}],
-        comparison_view._build_vlan_lookup_maps([]),
+        lookup_maps=comparison_view._build_vlan_lookup_maps([]),
+        subject=None,
     )[0]
     table = LibreNMSVLANTable([compared_row])
 
@@ -658,10 +661,11 @@ def test_vlan_status_action_escapes_the_reported_vid():
     from netbox_librenms_plugin.tables.vlans import LibreNMSVLANTable
     from netbox_librenms_plugin.views.object_sync.devices import DeviceVLANTableView
 
-    comparison_view = DeviceVLANTableView()
-    compared_rows = comparison_view.compare_vlans(
+    DeviceVLANTableView()
+    compared_rows = compare_rows(
         [{"vlan_vlan": """"><script>alert(1)</script>""", "vlan_name": "Unsafe identity"}],
-        {"vid_to_groups": {}, "vid_to_vlans": {}},
+        lookup_maps={"vid_to_groups": {}, "vid_to_vlans": {}},
+        subject=None,
     )
     request = RequestFactory().get("/")
     request.user = AnonymousUser()

@@ -132,11 +132,13 @@ def oob_source(fetch, resource, mapping, server_key):
         role=MappingRole.OOB,
         librenms_id=link.librenms_id,
         state=link.state,
-        parts=_part_keys(OOB_ACQUIRERS[resource](oob_fetch, link.librenms_id)),
+        parts=_part_keys(
+            OOB_ACQUIRERS[resource](oob_fetch, link.librenms_id if link.state is MappingState.RESOLVED else "oob")
+        ),
     )
 
 
-def _resource_source(fetch, resource, owner, server_key, *, include_serial=False):
+def _resource_source(fetch, resource, owner, server_key, *, include_serial=False, inventory_probes=False):
     """Acquire one resource from the owner's own mapping and, when it links one, its OOB controller."""
     mapping = read_mapping(owner)
     librenms_id = stored_librenms_id(owner, server_key)
@@ -146,7 +148,11 @@ def _resource_source(fetch, resource, owner, server_key, *, include_serial=False
         raise SubjectNotMapped(owner, server_key)
     host = None
     if librenms_id is not None:
-        parts = ACQUIRERS[resource](fetch, librenms_id, **spec.acquisition_options(include_serial=include_serial))
+        parts = ACQUIRERS[resource](
+            fetch,
+            librenms_id,
+            **spec.acquisition_options(include_serial=include_serial, inventory_probes=inventory_probes),
+        )
         host = MappingSource(
             role=MappingRole.OWN,
             librenms_id=librenms_id,
@@ -220,7 +226,7 @@ def plan_acquisition(subject, *, server_key, resources):
     )
 
 
-def acquire(plan, *, include_serial=False):
+def acquire(plan, *, include_serial=False, inventory_probes=False):
     """
     Acquire the planned owners' current stored or cached identities from one configured server.
 
@@ -237,7 +243,14 @@ def acquire(plan, *, include_serial=False):
         owner = type(planned_owner).objects.filter(pk=planned_owner.pk).first()
         if owner is None:
             raise SubjectNotMapped(planned_owner, plan.server_key)
-        sources[resource] = _resource_source(fetch, resource, owner, plan.server_key, include_serial=include_serial)
+        sources[resource] = _resource_source(
+            fetch,
+            resource,
+            owner,
+            plan.server_key,
+            include_serial=include_serial,
+            inventory_probes=inventory_probes,
+        )
     return SourceSnapshot(
         snapshot_id=uuid4().hex,
         server_key=plan.server_key,
