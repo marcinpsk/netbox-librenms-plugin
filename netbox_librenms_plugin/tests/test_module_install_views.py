@@ -531,23 +531,18 @@ def test_batch_install_checks_serial_length_only_for_creation(live_librenms, act
     if occupant:
         Interface.objects.filter(pk=interface.pk).update(module=occupant)
     serial = "TAG ABC123 " + "X" * Module._meta.get_field("serial").max_length
-    rows = [
-        _item(
-            10,
-            module_type.model,
-            "Slot 1",
-            entPhysicalSerialNum=serial,
-            _librenms_port_id=7401,
-            _librenms_ifname=interface.name,
-        )
-    ]
+    rows = [_item(10, module_type.model, "Slot 1", entPhysicalSerialNum=serial)]
+    source_facts = {
+        "ports": [{"port_id": 7401, "ifName": interface.name}],
+        "transceivers": [transceiver_row(10, port_id=7401, model=module_type.model)],
+    }
 
     if action == "branch":
         child_type = make_module_type("BATCH-SERIAL-LENGTH-CHILD")
         rows.append(_item(11, child_type.model, "Child Bay", parent=10))
-        _post_branch(device, rows, 10, 74, live_librenms)
+        _post_branch(device, rows, 10, 74, live_librenms, **source_facts)
     else:
-        _post_selected(device, rows, [10], 74, live_librenms)
+        _post_selected(device, rows, [10], 74, live_librenms, **source_facts)
 
     interface.refresh_from_db()
     if occupant:

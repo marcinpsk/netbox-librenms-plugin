@@ -666,7 +666,6 @@ class TestMergeTransceiverDataPortIdentity:
     """Transceiver merge should preserve stable port identity metadata."""
 
     def test_synthetic_item_includes_port_identity_metadata(self, settings, librenms_server):
-        from netbox_librenms_plugin.serial_identity import SerialRules
 
         view = _real_api_view(settings, librenms_server, librenms_id=100)
         librenms_server.register(
@@ -705,7 +704,6 @@ class TestMergeTransceiverDataPortIdentity:
         assert "with" not in port_requests[0]["query"]
 
     def test_existing_inventory_item_gets_port_identity_metadata(self, settings, librenms_server):
-        from netbox_librenms_plugin.serial_identity import SerialRules
 
         view = _real_api_view(settings, librenms_server, librenms_id=101)
         librenms_server.register(
@@ -750,7 +748,6 @@ class TestMergeTransceiverDataPortIdentity:
 
     def test_numeric_transceiver_serial_is_coerced_to_a_string(self, settings, librenms_server):
         """An all-digit transceiver serial arrives as an int; the merge must coerce it before stripping instead of raising."""
-        from netbox_librenms_plugin.serial_identity import SerialRules
 
         view = _real_api_view(settings, librenms_server, librenms_id=104)
         librenms_server.register(
@@ -783,7 +780,6 @@ class TestMergeTransceiverDataPortIdentity:
 
     def test_zero_transceiver_serial_is_preserved(self, settings, librenms_server):
         """A transceiver serial of JSON number 0 is a real serial and must survive as "0", not be dropped as falsey."""
-        from netbox_librenms_plugin.serial_identity import SerialRules
 
         view = _real_api_view(settings, librenms_server, librenms_id=104)
         librenms_server.register(
@@ -816,7 +812,6 @@ class TestMergeTransceiverDataPortIdentity:
 
     def test_numeric_transceiver_model_and_type_are_coerced_to_strings(self, settings, librenms_server):
         """An all-digit model/type arrives as a JSON number too; stripping it raw would 500 the modules refresh."""
-        from netbox_librenms_plugin.serial_identity import SerialRules
 
         view = _real_api_view(settings, librenms_server, librenms_id=105)
         librenms_server.register(
@@ -850,7 +845,6 @@ class TestMergeTransceiverDataPortIdentity:
 
     def test_numeric_entity_values_on_the_existing_item_are_coerced(self, settings, librenms_server):
         """The ENTITY-MIB side of the merge can carry numeric model/serial values as well."""
-        from netbox_librenms_plugin.serial_identity import SerialRules
 
         view = _real_api_view(settings, librenms_server, librenms_id=106)
         librenms_server.register(
@@ -938,7 +932,6 @@ class TestMergeTransceiverDataPortIdentity:
 
     def test_shared_entity_ifindex_links_the_transceiver_to_neither_entity(self, settings, librenms_server):
         """Two entities with the port's ifIndex leave the transceiver as its own synthetic row."""
-        from netbox_librenms_plugin.serial_identity import SerialRules
 
         view = _real_api_view(settings, librenms_server, librenms_id=104)
         librenms_server.register(
@@ -967,7 +960,6 @@ class TestMergeTransceiverDataPortIdentity:
 
     def test_entity_index_of_an_unrelated_entity_adds_no_row(self, settings, librenms_server):
         """A transceiver whose entity index names another port's entity adds no row with that index."""
-        from netbox_librenms_plugin.serial_identity import SerialRules
 
         view = _real_api_view(settings, librenms_server, librenms_id=105)
         librenms_server.register(
@@ -997,7 +989,6 @@ class TestMergeTransceiverDataPortIdentity:
         self, settings, librenms_server, port_ifindex, transceiver_serial
     ):
         """An entity at the transceiver's index that has a different serial is another part and keeps its data."""
-        from netbox_librenms_plugin.serial_identity import SerialRules
 
         view = _real_api_view(settings, librenms_server, librenms_id=108)
         librenms_server.register(
@@ -1033,7 +1024,6 @@ class TestMergeTransceiverDataPortIdentity:
     @pytest.mark.parametrize(("entity_index", "added"), [(77, [(77, "TX-77", 9)]), (12, [])])
     def test_port_ifindex_alone_does_not_merge_another_serial(self, settings, librenms_server, entity_index, added):
         """An entity that has the port's ifIndex but a different serial is not the optic."""
-        from netbox_librenms_plugin.serial_identity import SerialRules
 
         view = _real_api_view(settings, librenms_server, librenms_id=107)
         librenms_server.register(
@@ -1074,7 +1064,6 @@ class TestMergeTransceiverDataPortIdentity:
 
     def test_port_ifindex_alone_does_not_merge_onto_a_short_reported_serial(self, settings, librenms_server):
         """An entity that reports a serial without an identity and no model is not a blank holder of the optic."""
-        from netbox_librenms_plugin.serial_identity import SerialRules
 
         view = _real_api_view(settings, librenms_server, librenms_id=109)
         librenms_server.register(
@@ -1120,7 +1109,6 @@ class TestMergeTransceiverDataPortIdentity:
         self, settings, librenms_server, port_serial, optic_serial
     ):
         """Junos reports the port ifIndex as the optic index; a short serial on either side names another part."""
-        from netbox_librenms_plugin.serial_identity import SerialRules
 
         view = _real_api_view(settings, librenms_server, librenms_id=110)
         librenms_server.register(
@@ -1155,7 +1143,6 @@ class TestMergeTransceiverDataPortIdentity:
 
     def test_an_entity_index_match_keeps_the_optic_when_both_report_one_short_serial(self, settings, librenms_server):
         """Both APIs report AB-12 for the optic at its own entity index, so the texts name one part."""
-        from netbox_librenms_plugin.serial_identity import SerialRules
 
         view = _real_api_view(settings, librenms_server, librenms_id=111)
         librenms_server.register(
@@ -1220,7 +1207,6 @@ class TestMergeTransceiverDataPortIdentity:
         }
 
         def merged(recording):
-            from netbox_librenms_plugin.serial_identity import SerialRules
 
             device_id = recording["device_id"]
             librenms_server.load_recording(recording)
@@ -6645,11 +6631,10 @@ def test_vc_install_checks_conflicts_on_the_row_target(client, live_librenms, ta
     from django.urls import reverse
 
     from netbox_librenms_plugin.models import NormalizationRule
-    from netbox_librenms_plugin.tests.cache_test_helpers import seed_inventory
     from netbox_librenms_plugin.tests.conftest import install_module, make_module_bay, make_module_type, make_superuser
     from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_modules_snapshot
     from netbox_librenms_plugin.tests.view_test_helpers import module_tab_forms
-    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
     target, other, other_maker = _make_mixed_manufacturer_chassis("install-conflict")
     seed_mapping(target, "default", own=9312)
@@ -6677,7 +6662,7 @@ def test_vc_install_checks_conflicts_on_the_row_target(client, live_librenms, ta
         }
     ]
     inventory = stack_inventory(inventory, [target, other], on_member={81: target.vc_position})
-    seed_inventory(DeviceModuleTableView(), target, inventory, librenms_id=9312)
+    seed_modules_snapshot(target, inventory)
     client.force_login(make_superuser("install-conflict-user"))
 
     response = client.get(
