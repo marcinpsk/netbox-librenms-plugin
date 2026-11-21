@@ -2442,6 +2442,15 @@ class DeviceConflictActionView(
                         fields.append("device_type")
                     if err := _retype_refusal(existing_device, librenms_device_type, serial_rules, retyped):
                         return err
+                    if serial_matched and retyped and retyped.devices:
+                        new_context = serial_rules.for_device_type(librenms_device_type)
+                        if not is_sole_holder(
+                            existing_device,
+                            libre_device.get("serial"),
+                            rules=serial_rules,
+                            contexts_by_pk={pk: new_context for pk, _serial in retyped.devices},
+                        ):
+                            return _htmx_error_response(_SERIAL_MATCH_LOST)
                     if err := _save_device(
                         existing_device, update_fields=fields, request=request, mapping=mapping_change
                     ):
