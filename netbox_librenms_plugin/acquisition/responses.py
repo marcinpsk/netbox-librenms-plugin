@@ -253,7 +253,7 @@ def _is_non_negative_inventory_index(value):
     return isinstance(value, str) and value.isascii() and value.isdigit() and inventory_index(value) is not None
 
 
-def _inventory_contract(status, body, *, missing_is_empty=False):
+def _inventory_contract(status, body, *, missing_is_empty=False, validate_serials=True):
     if status == HTTP_NOT_FOUND and missing_is_empty:
         return Decoded(Outcome.OBTAINED, value=[])
     decoded = _rows_contract("inventory")(status, body)
@@ -265,22 +265,21 @@ def _inventory_contract(status, body, *, missing_is_empty=False):
         return Decoded(
             Outcome.FAILED, reason="Inventory indices must be non-negative integers, ASCII digit strings, or absent."
         )
+    text_fields = ("entPhysicalName", "entPhysicalModelName", "entPhysicalDescr", "entPhysicalClass")
+    if validate_serials:
+        text_fields += ("entPhysicalSerialNum",)
     if decoded.outcome is Outcome.OBTAINED and not all(
-        _optional_index(row.get("ifIndex"))
-        and _optional_scalar(
-            row,
-            ("entPhysicalName", "entPhysicalModelName", "entPhysicalSerialNum", "entPhysicalDescr", "entPhysicalClass"),
-        )
-        for row in decoded.value
+        _optional_index(row.get("ifIndex")) and _optional_scalar(row, text_fields) for row in decoded.value
     ):
         return Decoded(Outcome.FAILED, reason="Inventory rows contain an invalid index or text field.")
     return decoded
 
 
-def inventory(device_id, *, missing_is_empty=False):
+def inventory(device_id, *, missing_is_empty=False, validate_serials=True):
     """Return physical inventory; a known device can opt into an empty 404 answer."""
     return Endpoint(
-        SourceRequest(f"inventory/{device_id}/all"), partial(_inventory_contract, missing_is_empty=missing_is_empty)
+        SourceRequest(f"inventory/{device_id}/all"),
+        partial(_inventory_contract, missing_is_empty=missing_is_empty, validate_serials=validate_serials),
     )
 
 
