@@ -6,6 +6,8 @@ Junos numbers its members from 0 and names their ports ``ge-<member>/0/0``. NetB
 that its interface names carry. A 1-based stack keeps its numbering unchanged.
 """
 
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+
 import pytest
 
 from netbox_librenms_plugin.data_shapes.envelope import unwrap_response
@@ -188,29 +190,33 @@ class TestOneBasedStackKeepsPortZeroLocal:
         assert rewrite_interface_name_for_vc_member("GigabitEthernet0/0", 2, positions) is None
         assert rewrite_interface_name_for_vc_member("GigabitEthernet1/0/1", 2, positions) == "GigabitEthernet2/0/1"
 
-    def test_interface_sync_rows_keep_port_zero_on_the_viewed_device(self):
+    def test_interface_sync_rows_keep_port_zero_on_the_viewed_device(self, settings):
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server
+        from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_interfaces_snapshot
         from netbox_librenms_plugin.tests.view_test_helpers import make_request
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
+        configure_default_librenms_server(settings)
         _chassis, members = make_virtual_chassis_members("cat9300-rows", count=3)
         viewed = members[0]
-        snapshot = {
-            "ports": [
+        seed_mapping(viewed, "default", own=63001)
+        seed_interfaces_snapshot(
+            viewed,
+            [
                 {"port_id": 9601, "ifName": "GigabitEthernet0/0", "ifType": "ethernetCsmacd"},
                 {"port_id": 9602, "ifName": "GigabitEthernet3/0/1", "ifType": "ethernetCsmacd"},
-            ]
-        }
+            ],
+        )
         view = DeviceInterfaceTableView()
-        api = object.__new__(LibreNMSAPI)
-        api.server_key = "default"
-        view._librenms_api = api
+        view._librenms_api = LibreNMSAPI(server_key="default")
         view.request = make_request("get", user=make_superuser("cat9300-rows-user"))
 
-        view.get_context_data(view.request, viewed, "ifName", "default", fresh_data=snapshot, sync_device=viewed)
+        context = view.get_context_data(view.request, viewed, "ifName", "default")
 
-        assert snapshot["ports"][0]["selected_object_id"] == viewed.pk
-        assert snapshot["ports"][1]["selected_object_id"] == members[2].pk
+        rows = {row["port_id"]: row for row in context["table"].data}
+        assert rows[9601]["selected_object_id"] == viewed.pk
+        assert rows[9602]["selected_object_id"] == members[2].pk
 
 
 class TestZeroBasedMemberRename:

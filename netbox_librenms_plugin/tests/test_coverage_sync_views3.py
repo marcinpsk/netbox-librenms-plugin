@@ -10,6 +10,8 @@ Targets:
 
 import pytest
 
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+
 from netbox_librenms_plugin.tests.conftest import (
     configure_default_librenms_server,
     make_device,
@@ -18,7 +20,6 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
 )
 from netbox_librenms_plugin.tests.interface_sync_post_helpers import post_interface_sync, seed_ports
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.view_test_helpers import (
     grant,
     make_request,
@@ -152,7 +153,8 @@ class TestSyncInterface:
         from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
 
         _vc, (host, _sibling) = make_virtual_chassis_members("sync-vc-outsider")
-        outsider = make_device("sync-vc-outsider-x")
+        seed_mapping(host, "default", own=501)
+        outsider = seed_mapping(make_device("sync-vc-outsider-x"), "default", own=501)
 
         response = _post_sync(
             client,
@@ -173,7 +175,7 @@ class TestSyncInterface:
         """A natural-key match must not bypass the caller's constrained change grant."""
         from dcim.models import Device, Interface
 
-        device = make_device("sync-interface-change-scope")
+        device = seed_mapping(make_device("sync-interface-change-scope"), "default", own=501)
         hidden = make_interface(device, "eth0")
         allowed = make_interface(device, "eth1")
         user = make_user_with_perms(
@@ -192,7 +194,7 @@ class TestSyncInterface:
         """The permission-scoped skip must disappear when the existing interface is changeable."""
         from dcim.models import Device, Interface
 
-        device = make_device("sync-interface-change-control")
+        device = seed_mapping(make_device("sync-interface-change-control"), "default", own=501)
         existing = make_interface(device, "eth0")
         make_interface(device, "eth1")
         user = make_user_with_perms(

@@ -47,16 +47,16 @@ class TestConfiguredServerCacheScoping:
     """A configured requested server reads only that server's snapshot."""
 
     def test_interfaces_render_the_requested_servers_snapshot(self, configured_servers):
-        from django.core.cache import cache
-
+        from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_interfaces_snapshot
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
-        device = make_device("multiserver-interface")
+        device = seed_mapping(make_device("multiserver-interface"), "production", own=22)
         make_interface(device, "Ethernet1")
         view = DeviceInterfaceTableView()
         request = _request("production")
-        key = view.get_cache_key(device, "ports", "production")
-        cache.set(key, {"ports": [{"port_id": 11, "ifName": "Ethernet1", "ifAdminStatus": "up"}]})
+        seed_interfaces_snapshot(
+            device, [{"port_id": 11, "ifName": "Ethernet1", "ifAdminStatus": "up"}], server_key="production"
+        )
 
         context = _bind(view, request).get_context_data(request, device, "ifName")
 
@@ -203,12 +203,16 @@ class TestRemovedServerFailsClosed:
 
         from netbox_librenms_plugin import source_cache
         from netbox_librenms_plugin.acquisition.registry import Resource
-        from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_ip_snapshot, seed_source_snapshot
+        from netbox_librenms_plugin.tests.source_snapshot_helpers import (
+            seed_interfaces_snapshot,
+            seed_ip_snapshot,
+            seed_source_snapshot,
+        )
 
         view_class = import_string(view_path)
         device = make_device(
             f"removed-{data_type}",
-            librenms_cf={"removed": 22} if data_type in {"ip_addresses", "vlans"} else None,
+            librenms_cf={"removed": 22} if data_type in {"ip_addresses", "vlans", "ports"} else None,
         )
         if data_type == "ports":
             make_interface(device, "Ethernet4")
@@ -217,6 +221,9 @@ class TestRemovedServerFailsClosed:
         if data_type == "vlans":
             snapshot = seed_source_snapshot(device, Resource.VLANS, "removed", source_id=22, vlans=payload)
             assert source_cache.read(device, Resource.VLANS, "removed", user=request.user) == snapshot
+        elif data_type == "ports":
+            snapshot = seed_interfaces_snapshot(device, payload["ports"], server_key="removed", source_id=22)
+            assert source_cache.read(device, Resource.INTERFACES, "removed", user=request.user) == snapshot
         elif data_type == "ip_addresses":
             snapshot = seed_ip_snapshot(device, payload, server_key="removed")
             assert source_cache.read(device, Resource.IP_ADDRESSES, "removed", user=request.user) == snapshot

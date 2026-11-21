@@ -6,7 +6,6 @@ from urllib.parse import urlencode
 
 import pytest
 from dcim.models import Interface
-from django.core.cache import cache
 from django.urls import reverse
 from virtualization.models import VMInterface
 
@@ -19,7 +18,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
-from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_interfaces_snapshot
 
 SERVER_KEY = "default"
 FIRST_PORT = 5000
@@ -46,8 +45,7 @@ def _ports():
 
 
 def _seed(owner, ports):
-    payload = {"ports": ports, "port_stack_relationships": {}}
-    cache.set(SyncInterfacesView().get_cache_key(owner, "ports", SERVER_KEY), payload, timeout=300)
+    seed_interfaces_snapshot(owner, ports, server_key=SERVER_KEY)
 
 
 def _url(name, owner, object_type, **query):
@@ -153,7 +151,7 @@ class TestHtmxSync:
         assert not Interface.objects.filter(device=device).exists()
 
     def test_a_virtual_machine_gets_its_own_fragment(self, client):
-        vm = make_vm("htmx-sync-vm")
+        vm = seed_mapping(make_vm("htmx-sync-vm"), "default", own=501)
         _seed(vm, _ports())
         client.force_login(make_superuser("htmx-sync-vm-user"))
 

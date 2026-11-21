@@ -1,7 +1,6 @@
 """Shared interface relationship discovery and row resolution."""
 
 import logging
-import re
 from dataclasses import dataclass, field
 
 from dcim.models import Device, Interface
@@ -15,15 +14,8 @@ from netbox_librenms_plugin.constants import (
     RELATIONSHIP_KINDS,
 )
 from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
-from netbox_librenms_plugin.models import PortStackLagPattern
 from netbox_librenms_plugin.server_mappings import MappingRole, identity_q, name_match_may_be_port, read_mapping
-from netbox_librenms_plugin.utils import (
-    REGEX_COMPILE_ERRORS,
-    invert_relationship_edges,
-    is_list_of_dicts,
-    normalize_relationship_maps,
-    normalize_stacked_ports,
-)
+from netbox_librenms_plugin.utils import invert_relationship_edges
 
 RELATIONSHIP_CANDIDATE_BATCH_SIZE = 64
 
@@ -308,27 +300,27 @@ def resolve_port_relationships(  # noqa: C901
     ports: list,
     port_stack: list,
     *,
-    lag_patterns: dict | None = None,
-    device_os: str | None = None,
+    lag_patterns,
+    sap_patterns,
+    bridge_patterns,
     interface_name_field: str = "ifName",
-    compiled_lag_patterns: list | None = None,
-    compiled_sap_patterns: list | None = None,
-    bridge_patterns: dict | None = None,
-    compiled_bridge_patterns: list | None = None,
 ) -> dict:
     """
     Resolve LAG, parent, and bridge relationships from LibreNMS port-stack data.
 
+    The resolver reads no database: the caller loads the name rules, usually the stored
+    PortStackLagPattern rules of the device's OS.
+
     Universal rules (vendor-agnostic, hardcoded):
       1. The LAG aggregate is normally the 'low' entry in a port_stack pair, but the
          aggregate side is determined authoritatively by _is_lag_aggregate() (ifType
-         ieee8023adLag or a configured name pattern), not by position, so a pair whose
+         ieee8023adLag or a LAG name pattern), not by position, so a pair whose
          aggregate is on the 'high' side is still mapped member->aggregate correctly.
       2. Skip a pair when a SAP pattern matches either port's ifName or ifDescr.
       3. Strip a '.N' suffix in the active name field to resolve a physical-level port.
       4. A pair in the active name field where one name is the other plus a numeric '.N'
          suffix is a parent/child pair. The child may be on either side.
-      5. A configured bridge-name pattern identifies the bridge side from ifName or ifDescr.
+      5. A bridge-name pattern identifies the bridge side from ifName or ifDescr.
          This classification is stable across name-field fallback, so one pair cannot be
          reinterpreted as a different relationship kind.
       6. A port with ifType 'ipForward' is an L3 interface: never a LAG member or aggregate.
@@ -336,40 +328,20 @@ def resolve_port_relationships(  # noqa: C901
          ifType is a sub-interface of that partner as reported (no '.N' stripping). A pair
          of two ipForward ports stays unclassified.
 
-    Configurable via PortStackLagPattern model:
-      - Per-OS regex patterns identify LAG aggregates when ifType is not 'ieee8023adLag'.
-
     Args:
-        ports: Port dicts from get_ports(), each with port_id, ifName, ifType keys.
-        port_stack: Port stack dicts from get_port_stack(), each with
+        ports: Port dicts from the ports endpoint, each with port_id, ifName, ifType keys.
+        port_stack: Port stack dicts from the port_stack endpoint, each with
                     high_port_id and low_port_id keys.
-        lag_patterns: Optional dict of {librenms_os: pattern_str} overriding DB lookup.
-                      Pass an empty dict to disable name-pattern matching entirely.
-                      When None (default), patterns are fetched from PortStackLagPattern,
-                      scoped to device_os when that is provided.
-        device_os: LibreNMS OS of the device being resolved. When set (and lag_patterns
-                   is None), only that OS's pattern is loaded so a vendor-specific regex
-                   can't misclassify an interface on another platform. When None, all
-                   stored patterns are loaded (legacy, unscoped behaviour).
+        lag_patterns: Compiled regexes that name a LAG aggregate whose ifType is not
+                      'ieee8023adLag'. An empty sequence matches no name.
+        sap_patterns: Compiled regexes that name a service access point. A port_stack row
+                      whose ifName or ifDescr names a SAP describes a service, not an
+                      interface relationship, so it is skipped.
+        bridge_patterns: Compiled regexes that name a bridge.
         interface_name_field: Interface-name field selected for this device
                               ('ifName' or 'ifDescr'). Each relationship map is built from
                               this field alone. A map this field leaves empty is taken from
                               the other field alone.
-        compiled_lag_patterns: Optional list of pre-compiled name-pattern regexes. When
-                               provided, the PortStackLagPattern DB read and per-call
-                               compile are skipped and this list is used directly, taking
-                               priority over lag_patterns/device_os.
-        compiled_sap_patterns: Optional list of pre-compiled SAP-name regexes. A port_stack
-                               row whose ifName or ifDescr names a SAP describes a service,
-                               not an interface relationship, so it is skipped. Read from the
-                               rows stored for device_os only when the LAG patterns are read
-                               from there too, so a caller that supplies its own patterns
-                               stays DB-free; an empty list disables the skip.
-        bridge_patterns: Optional dict of ``{librenms_os: pattern_str}`` that overrides the
-                         bridge-pattern database lookup. Pass an empty dict to disable bridge
-                         matching.
-        compiled_bridge_patterns: Optional pre-compiled bridge-name regexes. These take
-                                  priority over bridge_patterns and the database lookup.
 
     Returns:
         dict with keys (port_ids are canonical normalized positive ints, so every
@@ -413,42 +385,9 @@ def resolve_port_relationships(  # noqa: C901
         by_id[port_id] = port
     ports_with_id = list(by_id.values())
 
-    if compiled_lag_patterns is not None:
-        compiled_patterns = compiled_lag_patterns
-    elif lag_patterns is None:
-        compiled_patterns = PortStackLagPattern.compiled_patterns_for_os(device_os)
-    else:
-        compiled_patterns = []
-        for pattern_str in lag_patterns.values():
-            # A caller-supplied recording pattern, not a stored rule; the stored rules come in compiled.
-            # nosemgrep: regex-error-must-raise
-            try:
-                compiled_patterns.append(re.compile(pattern_str))
-            except (*REGEX_COMPILE_ERRORS, TypeError) as exc:
-                logger.warning("Skipping invalid LAG name pattern %r: %s", pattern_str, exc)
-
-    if compiled_sap_patterns is None:
-        if compiled_lag_patterns is None and lag_patterns is None:
-            compiled_sap_patterns = PortStackLagPattern.compiled_sap_patterns_for_os(device_os)
-        else:
-            # A caller that supplies LAG patterns also supplies the SAP policy.
-            compiled_sap_patterns = []
-
-    if compiled_bridge_patterns is None:
-        if bridge_patterns is None and compiled_lag_patterns is None and lag_patterns is None:
-            compiled_bridge_patterns = PortStackLagPattern.compiled_bridge_patterns_for_os(device_os)
-        elif bridge_patterns is None:
-            # A caller that supplies another pattern policy stays database-free.
-            compiled_bridge_patterns = []
-        else:
-            compiled_bridge_patterns = []
-            for pattern_str in bridge_patterns.values():
-                # A caller-supplied recording pattern, not a stored rule; the stored rules come in compiled.
-                # nosemgrep: regex-error-must-raise
-                try:
-                    compiled_bridge_patterns.append(re.compile(pattern_str))
-                except (*REGEX_COMPILE_ERRORS, TypeError) as exc:
-                    logger.warning("Skipping invalid bridge name pattern %r: %s", pattern_str, exc)
+    compiled_patterns = tuple(lag_patterns)
+    compiled_sap_patterns = tuple(sap_patterns)
+    compiled_bridge_patterns = tuple(bridge_patterns)
 
     def _matches_name_patterns(name, patterns) -> bool:
         if not isinstance(name, str):
@@ -779,22 +718,23 @@ def resolve_port_relationships(  # noqa: C901
     }
 
 
-def build_relationship_maps(cached_data):
-    """Normalize relationship maps and index host ports by stable ID."""
-    relationships = cached_data.get("port_stack_relationships")
-    lag_members, sub_interfaces, bridge_members = normalize_relationship_maps(relationships)
-    stacked_ports = normalize_stacked_ports(relationships)
-    ports = cached_data.get("ports", [])
-    if not is_list_of_dicts(ports):
-        ports = []
+def build_relationship_maps(assessment):
+    """Return the relationship maps of an ``assess_interfaces`` result, with its host ports by stable ID."""
+    relationships = assessment["port_stack_relationships"]
     ports_by_id = {}
-    for port in ports:
+    for port in assessment["ports"]:
         if port.get("_source") == OOB_INVENTORY_SOURCE:
             continue
         port_id = normalize_librenms_port_id(port.get("port_id"))
         if port_id is not None:
             ports_by_id[port_id] = port
-    return RelationshipMaps(lag_members, sub_interfaces, ports_by_id, bridge_members, stacked_ports)
+    return RelationshipMaps(
+        relationships["lag_members"],
+        relationships["sub_interfaces"],
+        ports_by_id,
+        relationships["bridge_members"],
+        relationships["stacked_ports"],
+    )
 
 
 # How many unclassified pairs the report names before it stops listing them.
@@ -810,18 +750,6 @@ _KIND_LABELS = {
 
 def _diagnostics_verdict(diagnostics):
     """Return the one sentence that says which of the empty cases this device is in."""
-    # A snapshot cached by an older release can be missing a counter the report now reads.
-    diagnostics = {
-        key: diagnostics.get(key, 0)
-        for key in (
-            "pairs_seen",
-            "pairs_usable",
-            "pairs_unclassified",
-            "pairs_skipped_sap",
-            "pairs_unresolved_end",
-            "pairs_malformed",
-        )
-    }
     if not diagnostics["pairs_seen"]:
         return (
             "LibreNMS reports no port_stack rows for this device, so it has no interface "
@@ -848,43 +776,33 @@ def _diagnostics_verdict(diagnostics):
     return "Every usable pair LibreNMS reported was classified."
 
 
-def relationship_diagnostics_report(cached_data, interface_name_field="ifName"):
+def relationship_diagnostics_report(assessment, interface_name_field="ifName"):
     """
     Summarize what this device's port_stack contained and what each rule made of it.
 
     "The name pattern is wrong" and "LibreNMS has no data for this device" both render as an empty
     Relationships column, and telling them apart used to need the server log (issue #179 item 10).
-    The counts come from the cached snapshot rather than a fresh resolve, so the report describes
-    exactly the rows the table is showing and cannot drift from them.
+    The counts come from the assessment the table shows, so the report cannot drift from the rows.
 
     Args:
-        cached_data (dict): The cached LibreNMS ports snapshot.
+        assessment (dict): An ``assessment.interfaces.assess_interfaces`` result.
         interface_name_field (str): The field the tab names interfaces by.
 
     Returns:
-        dict | None: The template-ready report, or None when the snapshot predates it.
+        dict: The template-ready report.
 
     """
-    if not isinstance(cached_data, dict):
-        return None
-    relationships = cached_data.get("port_stack_relationships")
-    if not isinstance(relationships, dict):
-        return None
-    diagnostics = relationships.get("diagnostics")
-    if not isinstance(diagnostics, dict) or "pairs_seen" not in diagnostics:
-        return None
-
-    ports = cached_data.get("ports", [])
+    relationships = assessment["port_stack_relationships"]
+    diagnostics = relationships["diagnostics"]
     names_by_id = {}
-    if is_list_of_dicts(ports):
-        for port in ports:
-            port_id = normalize_librenms_port_id(port.get("port_id"))
-            name = port.get(interface_name_field)
-            if port_id is not None and isinstance(name, str) and name:
-                names_by_id[port_id] = name
+    for port in assessment["ports"]:
+        port_id = normalize_librenms_port_id(port.get("port_id"))
+        name = port.get(interface_name_field)
+        if port_id is not None and isinstance(name, str) and name:
+            names_by_id[port_id] = name
 
     # Rebuild the pairs from the symmetric adjacency, keeping each one once.
-    stacked_ports = normalize_stacked_ports(relationships)
+    stacked_ports = relationships["stacked_ports"]
     pairs = sorted(
         {
             (min(port_id, partner_id), max(port_id, partner_id))
@@ -896,16 +814,9 @@ def relationship_diagnostics_report(cached_data, interface_name_field="ifName"):
         (names_by_id.get(first_id, f"port {first_id}"), names_by_id.get(second_id, f"port {second_id}"))
         for first_id, second_id in pairs[:UNCLASSIFIED_PAIR_LIMIT]
     ]
-
-    cached_kinds = diagnostics.get("kinds")
-    kinds = [
-        {**kind, "label": _KIND_LABELS.get(kind.get("key"), kind.get("key"))}
-        for kind in (cached_kinds if isinstance(cached_kinds, list) else [])
-        if isinstance(kind, dict)
-    ]
     return {
         **{key: value for key, value in diagnostics.items() if key != "kinds"},
-        "kinds": kinds,
+        "kinds": [{**kind, "label": _KIND_LABELS[kind["key"]]} for kind in diagnostics["kinds"]],
         "unclassified_pairs": named_pairs,
         "unclassified_truncated": max(len(pairs) - UNCLASSIFIED_PAIR_LIMIT, 0),
         "verdict": _diagnostics_verdict(diagnostics),

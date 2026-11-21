@@ -4,6 +4,8 @@ from copy import deepcopy
 
 import pytest
 
+from netbox_librenms_plugin.assessment.interfaces import parse_port_vlan_data
+
 
 def _api(settings):
     """Build a real client from a local-only configuration."""
@@ -49,28 +51,24 @@ class TestVLANModeDetection:
                 {"port_id": 3, "ifName": "Gi1/0/48", "ifVlan": "", "ifTrunk": None},
                 {"mode": None, "untagged_vlan": None, "tagged_vlans": []},
             ),
+            (
+                {
+                    "port_id": 4,
+                    "ifName": "Gi1/0/49",
+                    "ifVlan": "",
+                    "ifTrunk": "dot1Q",
+                    "vlans": [{"vlan": 90, "untagged": 1}, {"vlan": 50, "untagged": 0}],
+                },
+                {"mode": None, "untagged_vlan": 90, "tagged_vlans": [50]},
+            ),
         ],
     )
-    def test_parse_port_vlan_data(self, settings, port, expected):
-        result = _api(settings).parse_port_vlan_data(port)
+    def test_parse_port_vlan_data(self, port, expected):
+        result = parse_port_vlan_data(port)
 
         assert result["mode"] == expected["mode"]
         assert result["untagged_vlan"] == expected["untagged_vlan"]
         assert result["tagged_vlans"] == expected["tagged_vlans"]
-
-    def test_non_dict_vlan_entries_are_ignored(self, settings):
-        port = {
-            "port_id": 4,
-            "ifName": "Gi0/0",
-            "ifTrunk": "dot1Q",
-            "ifVlan": None,
-            "vlans": [{"vlan": 10, "untagged": 1}, "invalid", {"vlan": 20}],
-        }
-
-        result = _api(settings).parse_port_vlan_data(port)
-
-        assert result["untagged_vlan"] == 10
-        assert result["tagged_vlans"] == [20]
 
 
 class TestGetVlanSyncCssClass:

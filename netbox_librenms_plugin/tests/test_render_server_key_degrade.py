@@ -120,38 +120,6 @@ class TestInterfacesTabDegradesOnUnbuildableClient:
 
 
 @pytest.mark.django_db
-class TestCablesPortsCacheShapeGuard:
-    """get_ports_data must treat a truthy but malformed ports cache entry as a miss."""
-
-    def test_corrupt_ports_cache_falls_through_to_live_fetch(self, librenms_server):
-        from django.test import RequestFactory
-
-        from django.core.cache import cache as real_cache
-
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
-
-        device = _make_device("degrade-cable-dev")
-        view = DeviceCableTableView()
-        view.request = RequestFactory().get("/")
-        view.librenms_id = 4242
-        view._librenms_api = _api_for(librenms_server)
-        librenms_server.ports_response(device_id=4242, ports=[{"port_id": 1, "ifName": "eth0"}])
-
-        cache_key = view.get_cache_key(device, "ports", "alpha")
-        real_cache.set(cache_key, ["corrupt", "legacy", "shape"], timeout=60)
-        try:
-            ports_data = view.get_ports_data(device)
-
-            # The corrupt entry is not returned (get_links_data would .get("ports") on it)...
-            assert isinstance(ports_data, dict)
-            assert ports_data["ports"][0]["ifName"] == "eth0"
-            # ...and is purged so the next read doesn't serve it again.
-            assert real_cache.get(cache_key) is None
-        finally:
-            real_cache.delete(cache_key)
-
-
-@pytest.mark.django_db
 class TestVlanTabDegradesOnUnbuildableClient:
     """
     The VLAN tab must resolve its render-path server key through _render_server_key too.

@@ -5,8 +5,13 @@ from functools import partial
 from threading import Event
 
 import pytest
+
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from django.apps import apps
 
+from netbox_librenms_plugin import source_cache
+from netbox_librenms_plugin.acquisition.registry import Resource
+from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.conftest import (
     _PORT_KEYS_UNSET,
@@ -17,6 +22,7 @@ from netbox_librenms_plugin.tests.conftest import (
     run_in_threads,
 )
 from netbox_librenms_plugin.tests.interface_sync_post_helpers import SYNCED, post_interface_sync, seed_ports
+from netbox_librenms_plugin.tests.source_snapshot_helpers import port_pair, port_vlans, seed_interfaces_snapshot
 from netbox_librenms_plugin.tests.view_test_helpers import messages_on
 from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE
 
@@ -70,6 +76,7 @@ def test_selected_vc_target_is_locked_through_interface_sync(settings, monkeypat
 
     configure_default_librenms_server(settings)
     _vc, (page_device, target_device) = make_virtual_chassis_members("sync-target-lock")
+    seed_mapping(page_device, "default", own=501)
     user = make_superuser("sync-target-lock-user")
     validation_done = Event()
     release_sync = Event()
@@ -133,8 +140,6 @@ def test_selected_vc_target_is_locked_through_interface_sync(settings, monkeypat
 
 def _run_vlan_scope_sync(*, move_target, suffix, settings):
     """Run one VLAN-scope sync, optionally commit a target site change inside the lock window, and return its interface."""
-    from types import SimpleNamespace
-
     from dcim.models import Device, Site
     from django.contrib.auth import get_user_model
     from django.contrib.contenttypes.models import ContentType
@@ -162,29 +167,20 @@ def _run_vlan_scope_sync(*, move_target, suffix, settings):
     )
     VLAN.objects.create(vid=100, name="Sync VLAN 100", group=vlan_group, status="active")
     user = make_superuser(f"sync-vlan-scope-{suffix}-user")
-    view_template = SyncInterfacesView()
-    cache_key = view_template.get_cache_key(page_device, "ports", server_key)
-    cache.set(
-        cache_key,
-        {
-            "ports": [
-                {
-                    "port_id": 10,
-                    "ifName": "Ethernet2",
-                    "ifDescr": "Ethernet2",
-                    "ifAlias": "",
-                    "ifType": "ethernetCsmacd",
-                    "ifSpeed": 1_000_000_000,
-                    "ifPhysAddress": "",
-                    "ifMtu": 1500,
-                    "ifAdminStatus": "up",
-                    "untagged_vlan": None,
-                    "tagged_vlans": [100],
-                }
-            ],
-            "port_stack_relationships": {},
-        },
-    )
+    port = {
+        "port_id": 10,
+        "ifName": "Ethernet2",
+        "ifDescr": "Ethernet2",
+        "ifAlias": "",
+        "ifType": "ethernetCsmacd",
+        "ifSpeed": 1_000_000_000,
+        "ifPhysAddress": "",
+        "ifMtu": 1500,
+        "ifAdminStatus": "up",
+        **port_vlans(None, None, [100]),
+    }
+    seed_interfaces_snapshot(page_device, [port], server_key=server_key)
+    cache_key = source_cache.snapshot_key(page_device, Resource.INTERFACES, server_key)
     target_lock_reached = Event()
     release_sync = Event()
 
@@ -215,7 +211,7 @@ def _run_vlan_scope_sync(*, move_target, suffix, settings):
             request.GET = request.GET.copy()
             request.GET["interface_name_field"] = "ifName"
             view = PausingSyncInterfacesView()
-            view._librenms_api = SimpleNamespace(server_key=server_key)
+            view._librenms_api = LibreNMSAPI(server_key=server_key)
             response = post(view, request, object_type="device", object_id=page_device.pk)
             assert response.status_code == 302
         finally:
@@ -276,6 +272,7 @@ def test_auto_selected_owner_is_revalidated_after_vc_position_changes(client, se
         "sync-auto-position",
         count=3,
     )
+    seed_mapping(page_device, "default", own=501)
     port = {
         **_PORT_KEYS_UNSET,
         "port_id": 10,
@@ -308,8 +305,8 @@ def test_inaccessible_selected_target_is_not_locked(settings):
     from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
 
     configure_default_librenms_server(settings)
-    page_device = make_device("restricted-target-page")
-    inaccessible_target = make_device("restricted-target-hidden")
+    page_device = seed_mapping(make_device("restricted-target-page"), "default", own=501)
+    inaccessible_target = seed_mapping(make_device("restricted-target-hidden"), "default", own=501)
     user = make_user_with_perms("restricted-target-user", [("add", Interface), ("change", Interface)])
     user = grant(user, "view", Device, constraints={"id": page_device.pk})
     seed_ports(page_device, [{**_PORT_KEYS_UNSET, "port_id": 10, "ifName": "Ethernet1", "ifAdminStatus": "up"}])
@@ -351,8 +348,8 @@ def test_viewable_outside_selected_target_is_not_locked(settings):
     from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
 
     configure_default_librenms_server(settings)
-    page_device = make_device("outside-target-page")
-    outside_target = make_device("outside-target-device")
+    page_device = seed_mapping(make_device("outside-target-page"), "default", own=501)
+    outside_target = seed_mapping(make_device("outside-target-device"), "default", own=501)
     user = make_superuser("outside-target-user")
     seed_ports(page_device, [{**_PORT_KEYS_UNSET, "port_id": 10, "ifName": "Ethernet1", "ifAdminStatus": "up"}])
 
@@ -392,6 +389,7 @@ def test_selected_vc_targets_lock_chassis_before_devices(client, settings):
 
     configure_default_librenms_server(settings)
     _virtual_chassis, (page_device, target_device) = make_virtual_chassis_members("bulk-lock-order")
+    seed_mapping(page_device, "default", own=501)
     seed_ports(page_device, [{**_PORT_KEYS_UNSET, "port_id": 10, "ifName": "Ethernet1"}])
     client.force_login(make_superuser("bulk-lock-order-user"))
     locked_selects = []
@@ -419,7 +417,7 @@ def test_vm_sync_serializes_duplicate_display_name_resolution(settings, monkeypa
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
     server_key = configure_default_librenms_server(settings)
-    vm = make_vm("vm-duplicate-name-lock")
+    vm = seed_mapping(make_vm("vm-duplicate-name-lock"), "default", own=501)
     VMInterface.objects.create(virtual_machine=vm, name="Ethernet")
     user = make_superuser("vm-duplicate-name-lock-user")
     resolved = {10: Event(), 11: Event()}
@@ -490,8 +488,6 @@ def test_vm_sync_serializes_duplicate_display_name_resolution(settings, monkeypa
 
 def test_relationship_write_locks_virtual_chassis_members_through_validation():
     """A membership update must wait until relationship validation and persistence commit."""
-    from types import SimpleNamespace
-
     from dcim.models import Device
     from django.contrib.auth import get_user_model
     from django.core.cache import cache
@@ -505,6 +501,7 @@ def test_relationship_write_locks_virtual_chassis_members_through_validation():
     server_key = configured_server_key()
 
     _vc, (aggregate_device, member_device) = make_virtual_chassis_members("relationship-scope-lock")
+    seed_mapping(aggregate_device, "default", own=501)
     aggregate = make_interface(aggregate_device, "Port-Channel1", iface_type="lag")
     member = make_interface(member_device, "Ethernet2")
     seed_mapping(aggregate, server_key, own=20, save=False)
@@ -512,17 +509,12 @@ def test_relationship_write_locks_virtual_chassis_members_through_validation():
     aggregate.save()
     member.save()
     user = make_superuser("relationship-scope-lock-user")
-    cache_key = SyncInterfaceLagView().get_cache_key(aggregate_device, "ports", server_key)
-    cache.set(
-        cache_key,
-        {
-            "ports": [
-                {**_PORT_KEYS_UNSET, "port_id": 10, "ifName": member.name},
-                {**_PORT_KEYS_UNSET, "port_id": 20, "ifName": aggregate.name},
-            ],
-            "port_stack_relationships": {"lag_members": {10: 20}, "sub_interfaces": {}},
-        },
-    )
+    ports = [
+        {**_PORT_KEYS_UNSET, "port_id": 10, "ifName": member.name},
+        {**_PORT_KEYS_UNSET, "port_id": 20, "ifName": aggregate.name, "ifType": "ieee8023adLag"},
+    ]
+    seed_interfaces_snapshot(aggregate_device, ports, [port_pair(10, 20)], server_key=server_key)
+    cache_key = source_cache.snapshot_key(aggregate_device, Resource.INTERFACES, server_key)
     validation_reached = Event()
     release_relationship = Event()
     membership_changed = Event()
@@ -540,7 +532,7 @@ def test_relationship_write_locks_virtual_chassis_members_through_validation():
                 user=thread_user,
             )
             view = SyncInterfaceLagView()
-            view._librenms_api = SimpleNamespace(server_key=server_key)
+            view._librenms_api = LibreNMSAPI(server_key=server_key)
             prepare_related = view._prepare_related
 
             def pause_before_validation(related_interface):
@@ -592,8 +584,6 @@ def test_relationship_write_locks_virtual_chassis_members_through_validation():
 
 def test_inline_relationship_rechecks_migrated_donor_after_lock():
     """A donor migrated while the request waits for its lock must stay read-only."""
-    from types import SimpleNamespace
-
     from dcim.models import Device
     from django.contrib.auth import get_user_model
     from django.core.cache import cache
@@ -608,8 +598,8 @@ def test_inline_relationship_rechecks_migrated_donor_after_lock():
 
     server_key = configured_server_key()
 
-    donor = make_device("relationship-migrated-donor")
-    winner = make_device("relationship-migrated-winner")
+    donor = seed_mapping(make_device("relationship-migrated-donor"), "default", own=501)
+    winner = seed_mapping(make_device("relationship-migrated-winner"), "default", own=501)
     child = make_interface(donor, "Ethernet1.100", iface_type="virtual")
     parent = make_interface(donor, "Ethernet1")
     seed_mapping(child, server_key, own=10, save=False)
@@ -617,18 +607,10 @@ def test_inline_relationship_rechecks_migrated_donor_after_lock():
     child.save()
     parent.save()
     user = make_superuser("relationship-migrated-user")
-    view_template = SyncInterfaceParentView()
-    cache_key = view_template.get_cache_key(donor, "ports", server_key)
-    cache.set(
-        cache_key,
-        {
-            "ports": [
-                {"port_id": 10, "ifName": child.name},
-                {"port_id": 20, "ifName": parent.name},
-            ],
-            "port_stack_relationships": {"lag_members": {}, "sub_interfaces": {10: 20}},
-        },
-    )
+    # The child name is the parent name plus ".100", which makes it a sub-interface.
+    ports = [{"port_id": 10, "ifName": child.name}, {"port_id": 20, "ifName": parent.name}]
+    seed_interfaces_snapshot(donor, ports, [port_pair(10, 20)], server_key=server_key)
+    cache_key = source_cache.snapshot_key(donor, Resource.INTERFACES, server_key)
     donor_locked = Event()
     request_checked_cache = Event()
 
@@ -663,7 +645,7 @@ def test_inline_relationship_rechecks_migrated_donor_after_lock():
                 user=thread_user,
             )
             view = PausingSyncInterfaceParentView()
-            view._librenms_api = SimpleNamespace(server_key=server_key)
+            view._librenms_api = LibreNMSAPI(server_key=server_key)
             return post(view, request, object_type="device", object_id=donor.pk)
         finally:
             close_old_connections()
@@ -685,8 +667,6 @@ def test_inline_relationship_rechecks_migrated_donor_after_lock():
 
 def test_inline_relationship_does_not_lock_unrelated_interfaces():
     """A single parent update must not lock every interface on the Device."""
-    from types import SimpleNamespace
-
     from django.contrib.auth import get_user_model
     from django.core.cache import cache
     from django.db import close_old_connections, connection
@@ -698,7 +678,7 @@ def test_inline_relationship_does_not_lock_unrelated_interfaces():
 
     server_key = configured_server_key()
 
-    device = make_device("targeted-inline-lock")
+    device = seed_mapping(make_device("targeted-inline-lock"), "default", own=501)
     child = make_interface(device, "Ethernet1.100", iface_type="virtual")
     parent = make_interface(device, "Ethernet1")
     unrelated = make_interface(device, "Ethernet99")
@@ -707,18 +687,12 @@ def test_inline_relationship_does_not_lock_unrelated_interfaces():
     child.save()
     parent.save()
     user = make_superuser("targeted-inline-lock-user")
-    view_template = SyncInterfaceParentView()
-    cache_key = view_template.get_cache_key(device, "ports", server_key)
-    cache.set(
-        cache_key,
-        {
-            "ports": [
-                {**_PORT_KEYS_UNSET, "port_id": 10, "ifName": child.name},
-                {**_PORT_KEYS_UNSET, "port_id": 20, "ifName": parent.name},
-            ],
-            "port_stack_relationships": {"lag_members": {}, "sub_interfaces": {10: 20}},
-        },
-    )
+    ports = [
+        {**_PORT_KEYS_UNSET, "port_id": 10, "ifName": child.name},
+        {**_PORT_KEYS_UNSET, "port_id": 20, "ifName": parent.name},
+    ]
+    seed_interfaces_snapshot(device, ports, [port_pair(10, 20)], server_key=server_key)
+    cache_key = source_cache.snapshot_key(device, Resource.INTERFACES, server_key)
     validation_reached = Event()
     release_relationship = Event()
     unrelated_updated = Event()
@@ -736,7 +710,7 @@ def test_inline_relationship_does_not_lock_unrelated_interfaces():
                 user=thread_user,
             )
             view = SyncInterfaceParentView()
-            view._librenms_api = SimpleNamespace(server_key=server_key)
+            view._librenms_api = LibreNMSAPI(server_key=server_key)
 
             def pause_before_validation(_related_interface):
                 validation_reached.set()
@@ -789,7 +763,7 @@ def test_bulk_relationship_pass_skips_scope_locks_without_selected_edges(client,
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
     server_key = configure_default_librenms_server(settings)
-    device = make_device("bulk-unrelated-edge")
+    device = seed_mapping(make_device("bulk-unrelated-edge"), "default", own=501)
     selected = make_interface(device, "Ethernet1")
     child = make_interface(device, "Ethernet2.100", iface_type="virtual")
     parent = make_interface(device, "Ethernet2")
@@ -801,7 +775,7 @@ def test_bulk_relationship_pass_skips_scope_locks_without_selected_edges(client,
         {**_PORT_KEYS_UNSET, "port_id": 20, "ifName": child.name},
         {**_PORT_KEYS_UNSET, "port_id": 30, "ifName": parent.name},
     ]
-    seed_ports(device, ports, sub_interfaces={20: 30})
+    seed_ports(device, ports, [port_pair(20, 30)])
     client.force_login(make_superuser("bulk-unrelated-edge-user"))
     pass_locks = []
     real_pass = SyncInterfacesView._sync_interface_relationships
@@ -835,7 +809,7 @@ def test_bulk_relationship_pass_does_not_lock_unrelated_interfaces(settings):
 
     server_key = configure_default_librenms_server(settings)
 
-    device = make_device("bulk-targeted-edge")
+    device = seed_mapping(make_device("bulk-targeted-edge"), "default", own=501)
     child = make_interface(device, "Ethernet1.100", iface_type="virtual")
     parent = make_interface(device, "Ethernet1")
     unrelated = make_interface(device, "Ethernet99")
@@ -848,7 +822,7 @@ def test_bulk_relationship_pass_does_not_lock_unrelated_interfaces(settings):
         {**_PORT_KEYS_UNSET, "port_id": 20, "ifName": parent.name},
         {**_PORT_KEYS_UNSET, "port_id": 30, "ifName": unrelated.name},
     ]
-    seed_ports(device, ports, sub_interfaces={10: 20})
+    seed_ports(device, ports, [port_pair(10, 20)])
 
     def post_the_sync():
         close_old_connections()
@@ -945,7 +919,7 @@ def test_concurrent_cross_model_port_claim_refuses_without_partial_writes(settin
 
     server_key = configure_default_librenms_server(settings)
     device = make_device("claim-device", librenms_cf={server_key: {"id": 71}})
-    vm = make_vm("claim-vm", make_cluster("claim-cluster"))
+    vm = seed_mapping(make_vm("claim-vm", make_cluster("claim-cluster")), "default", own=501)
     winner, loser = (device, vm) if winner_kind == "device" else (vm, device)
     winner_model = Interface if winner_kind == "device" else VMInterface
     loser_model = VMInterface if winner_kind == "device" else Interface
