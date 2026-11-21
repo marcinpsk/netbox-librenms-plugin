@@ -1,9 +1,10 @@
 """
-The IP tab uses only the NetBox objects that the actor may view: the table, the VRF verify and the sync.
+The IP tab uses only the NetBox objects that the actor may view: the table, the row read, the VRF choice and the sync.
 
-Each test stores an IP snapshot, then renders, verifies or syncs it through real requests with real
-object permissions. A hidden object must never reach the HTML, the JSON or a signed payload, and a
-hidden object must block a row instead of letting it fall back to a visible one.
+Each test stores an IP snapshot, then renders, reads, chooses or syncs it through real requests with real
+object permissions. A hidden object must never reach the HTML or a signed payload, and a hidden object
+must block a row instead of letting it fall back to a visible one. The tab offers a blocked row for no
+selection, so the writer's own refusal of such a row is driven directly.
 """
 
 import json
@@ -30,7 +31,14 @@ from netbox_librenms_plugin.tests.conftest import (
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change, seed_mapping, seed_stored_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, seed_ip_snapshot
-from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+from netbox_librenms_plugin.tests.view_test_helpers import (
+    grant,
+    ip_tab,
+    make_user_with_perms,
+    read_ip_row,
+    submit_ip_selection,
+    write_ip_rows,
+)
 from netbox_librenms_plugin.views.sync.ip_addresses import IP_CONFLICT_SIGNING_SALT
 
 pytestmark = pytest.mark.django_db
@@ -104,31 +112,51 @@ def _actions(row_html):
     return any(marker in row_html for marker in ('name="sync_one"', 'name="create_vrf"', "mdi-lightbulb-on-outline"))
 
 
-def _verify(client, subject, address, *, row_id=None, vrf_id=None, server_key=SERVER_KEY):
-    body = {
-        "device_id": subject.pk,
-        "object_type": _object_type(subject),
-        "ip_address": address,
-        "server_key": server_key,
-        "vrf_id": vrf_id,
-    }
-    if row_id is not None:
-        body["row_id"] = row_id
+def _choose(client, subject, row_id, vrf_id, *, server_key=SERVER_KEY):
+    """Post the VRF choice command of one row, as the row's VRF select does."""
+    table = ip_tab(client, subject, server_key=server_key).table
     return client.post(
-        reverse("plugins:netbox_librenms_plugin:verify_ipaddress"), json.dumps(body), content_type="application/json"
+        table["data-choice-url"],
+        {
+            "draft_id": table["data-draft-id"],
+            "expected_revision": table["data-draft-revision"],
+            "row": row_id,
+            "value": vrf_id,
+        },
     )
 
 
-def _sync(client, subject, row_ids, *, server_key=SERVER_KEY, **extra):
-    data = {"server_key": server_key, "select": list(row_ids), "set-primary-ip-toggle": "off", **extra}
+def _sync(client, subject, row_ids, *, server_key=SERVER_KEY, vrfs=None, **extra):
+    """Select *row_ids* through the tab's draft and submit them; with no rows, post *extra* alone (a confirmation)."""
+    extra = {"set-primary-ip-toggle": "off", **extra}
+    if row_ids:
+        return submit_ip_selection(
+            client,
+            subject,
+            list(row_ids),
+            server_key=server_key,
+            vrfs=vrfs,
+            headers={"HTTP_HX_REQUEST": "true"},
+            **extra,
+        )
     return client.post(
         reverse(
             "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
             kwargs={"object_type": _object_type(subject), "pk": subject.pk},
         ),
-        data,
+        {"server_key": server_key, **extra},
         HTTP_HX_REQUEST="true",
     )
+
+
+def _write(subject, user, selected, *, server_key=SERVER_KEY, **extra):
+    """Run the writer on rows the tab offers for no selection: *selected* maps each row ID to its VRF pk or None."""
+    return write_ip_rows(subject, user, selected, server_key=server_key, **{"set-primary-ip-toggle": "off", **extra})
+
+
+def _offered(client, subject, row_id, server_key=SERVER_KEY):
+    """Return whether the tab offers the row for selection: it renders the row's evidence."""
+    return "data-evidence" in ip_tab(client, subject, server_key=server_key).rows[row_id]
 
 
 def _intents(html):
@@ -235,14 +263,17 @@ class TestABlockedAddressRendersNoIdentity:
         client.force_login(user)
 
         html = _fragment(client, device)
-        response = _sync(client, device, ["198.18.104.10/24"])
+        written = _write(device, user, {"198.18.104.10/24": None})
 
         row = _rows(html)["198.18.104.10/24"]
         assert ip.get_absolute_url() not in html
         assert not _selectable(row)
+        assert not _offered(client, device, "198.18.104.10/24")
         assert not _actions(row)
-        for payload in _intents(response.content.decode()):
-            assert payload["ip_state"]["assigned_object_id"] != str(holder.pk)
+        for conflict in written.results["conflicts"]:
+            if conflict["intent"]:
+                payload = signing.loads(conflict["intent"], salt=IP_CONFLICT_SIGNING_SALT)
+                assert payload["ip_state"]["assigned_object_id"] != str(holder.pk)
         ip.refresh_from_db()
         assert ip.assigned_object_id == holder.pk
 
@@ -288,6 +319,7 @@ class TestAWithheldBindingNeverFallsBackByName:
         for action, model in extra:
             user = grant(user, action, model)
         client.force_login(user)
+        self.user = user
         return client
 
     def test_the_table_withholds_the_row(self, client, settings):
@@ -301,17 +333,17 @@ class TestAWithheldBindingNeverFallsBackByName:
         assert not _selectable(row)
         assert not _actions(row)
 
-    def test_the_verify_withholds_the_row(self, client, settings):
+    def test_the_row_read_withholds_the_row(self, client, settings):
         page, visible_eth1 = self._chassis("ip-scope-withheld-verify")
         client = self._client(client, settings, "ip-scope-withheld-verify", page)
 
-        response = _verify(client, page, "198.18.106.10/24", row_id="198.18.106.10/24")
+        row = read_ip_row(client, page, "198.18.106.10/24")
 
-        assert response.status_code == 200
-        row = response.json()["formatted_row"]
-        assert row["selectable"] is False
-        assert 'name="sync_one"' not in row["status"]
-        assert visible_eth1.get_absolute_url() not in response.content.decode()
+        assert row.selectable is False
+        assert 'name="sync_one"' not in row.status
+        assert visible_eth1.get_absolute_url() not in row.html
+        # A withheld row takes no VRF choice either.
+        assert _choose(client, page, "198.18.106.10/24", "").status_code == 404
 
     @pytest.mark.parametrize("create_missing", ["off", "on"])
     def test_the_sync_refuses_the_row_and_creates_nothing(self, client, settings, create_missing):
@@ -325,9 +357,14 @@ class TestAWithheldBindingNeverFallsBackByName:
         )
         interfaces_before = Interface.objects.count()
 
-        response = _sync(client, page, ["198.18.106.10/24"], **{"create-missing-interfaces-toggle": create_missing})
+        assert not _offered(client, page, "198.18.106.10/24")
+        _write(
+            page,
+            self.user,
+            {"198.18.106.10/24": None},
+            **{"create-missing-interfaces-toggle": create_missing},
+        )
 
-        assert response.status_code in (200, 302)
         assert not IPAddress.objects.filter(address="198.18.106.10/24").exists()
         assert Interface.objects.count() == interfaces_before
 
@@ -338,25 +375,26 @@ class TestAWithheldBindingNeverFallsBackByName:
         seed_mapping(visible_if, "beta", own=7202)
         for server_key in ("alpha", "beta"):
             _seed(device, [("198.18.107.10", 24, 7202, "eth1")], server_key=server_key)
-        client.force_login(_reader("ip-scope-two-servers", interface_view={"name": "eth1"}))
+        user = _reader("ip-scope-two-servers", interface_view={"name": "eth1"})
+        client.force_login(user)
 
         on_beta = _rows(_fragment(client, device, "beta"))["198.18.107.10/24"]
         on_alpha = _rows(_fragment(client, device, "alpha"))["198.18.107.10/24"]
-        response = _sync(client, device, ["198.18.107.10/24"], server_key="alpha")
+        assert not _offered(client, device, "198.18.107.10/24", "alpha")
+        _write(device, user, {"198.18.107.10/24": None}, server_key="alpha")
 
         assert visible_if.get_absolute_url() in on_beta
         assert visible_if.get_absolute_url() not in on_alpha
         assert not _selectable(on_alpha)
-        assert response.status_code in (200, 302)
         assert not IPAddress.objects.filter(address="198.18.107.10/24").exists()
 
 
 # =============================================================================
-# The verify
+# The row read and the VRF choice
 # =============================================================================
 
 
-class TestTheVerifyAnswersAsTheTable:
+class TestTheRowReadAndTheChoiceAnswerAsTheTable:
     def test_a_hidden_exact_match_is_not_selectable(self, client, settings):
         _servers(settings, SERVER_KEY)
         device, (eth1,) = _device("ip-scope-verify-hidden", "eth1")
@@ -364,11 +402,10 @@ class TestTheVerifyAnswersAsTheTable:
         _seed(device, [("198.18.108.10", 24, 7108, "eth1")])
         client.force_login(_reader("ip-scope-verify-hidden"))
 
-        response = _verify(client, device, "198.18.108.10/24")
+        row = read_ip_row(client, device, "198.18.108.10/24")
 
-        assert response.status_code == 200
-        assert response.json()["formatted_row"]["selectable"] is False
-        assert hidden.get_absolute_url() not in response.content.decode()
+        assert row.selectable is False
+        assert hidden.get_absolute_url() not in row.html
 
     @pytest.mark.parametrize("which", ["hidden", "missing"])
     def test_a_hidden_or_missing_vrf_answers_404(self, client, settings, which):
@@ -383,7 +420,7 @@ class TestTheVerifyAnswersAsTheTable:
         client.force_login(user)
         vrf_id = secret.pk if which == "hidden" else secret.pk + 1000
 
-        response = _verify(client, device, "198.18.109.10/24", vrf_id=vrf_id)
+        response = _choose(client, device, "198.18.109.10/24", str(vrf_id))
 
         assert response.status_code == 404
         assert secret.name not in response.content.decode()
@@ -394,18 +431,21 @@ class TestTheVerifyAnswersAsTheTable:
         _seed(device, [("198.18.110.10", 24, 7110, "eth1")])
         client.force_login(_reader("ip-scope-verify-vrf-malformed"))
 
-        assert _verify(client, device, "198.18.110.10/24", vrf_id="abc").status_code == 400
+        assert _choose(client, device, "198.18.110.10/24", "abc").status_code == 400
 
     def test_an_address_without_a_cached_row_is_refused(self, client, settings):
         _servers(settings, SERVER_KEY)
         device, (eth1,) = _device("ip-scope-verify-no-row", "eth1")
         _seed(device, [("198.18.111.10", 24, 7111, "eth1")])
         client.force_login(_reader("ip-scope-verify-no-row"))
+        row_url = ip_tab(client, device).rows["198.18.111.10/24"]["hx-get"].replace("198.18.111.10", "198.18.111.99")
 
-        response = _verify(client, device, "198.18.111.99/24")
+        choice = _choose(client, device, "198.18.111.99/24", "")
+        read = client.get(row_url)
 
-        assert response.status_code == 400
-        assert eth1.get_absolute_url() not in response.content.decode()
+        for response in (choice, read):
+            assert response.status_code == 404
+            assert eth1.get_absolute_url() not in response.content.decode()
 
 
 # =============================================================================
@@ -419,9 +459,11 @@ class TestTheWriterRefusesWhatTheActorCannotView:
         device, (eth1,) = _device("ip-scope-writer-unchanged", "eth1")
         hidden = make_ip("198.18.112.10/24", assigned_object=eth1, status=HIDDEN_STATUS)
         _seed(device, [("198.18.112.10", 24, 7112, "eth1")], management_ip="198.18.112.10")
-        client.force_login(grant(_reader("ip-scope-writer-unchanged"), "change", Device))
+        user = grant(_reader("ip-scope-writer-unchanged"), "change", Device)
+        client.force_login(user)
 
-        _sync(client, device, ["198.18.112.10/24"], **{"set-primary-ip-toggle": "on"})
+        assert not _offered(client, device, "198.18.112.10/24")
+        _write(device, user, {"198.18.112.10/24": None}, **{"set-primary-ip-toggle": "on"})
 
         device.refresh_from_db()
         assert device.primary_ip4_id is None
@@ -582,11 +624,13 @@ class TestTheWriterRefusesWhatTheActorCannotView:
         vrf_grant.save()
         client.force_login(user)
 
-        response = _sync(client, device, ["198.18.119.10/24"], **{"vrf_198.18.119.10/24": str(secret.pk)})
+        choice = _choose(client, device, "198.18.119.10/24", str(secret.pk))
+        written = _write(device, user, {"198.18.119.10/24": secret.pk})
 
-        assert response.status_code in (200, 302)
+        assert choice.status_code == 404
         assert not IPAddress.objects.filter(address="198.18.119.10/24").exists()
-        assert secret.name not in response.content.decode()
+        assert secret.name not in choice.content.decode()
+        assert not any(secret.name in message for message in written.messages)
 
     @pytest.mark.parametrize("constrained", ["view", "add"])
     def test_a_create_outside_the_scope_rolls_back_with_the_primary_ip(self, client, settings, constrained):
@@ -617,10 +661,10 @@ class TestTheWriterRefusesWhatTheActorCannotView:
         ip.save()
         _seed(device, [("198.18.116.10", 24, 7116, "eth1")])
         client.force_login(_reader("ip-scope-writer-move", ip_view={"vrf": seen_vrf.pk}))
-        row_vrf = {"vrf_198.18.116.10/24": str(other_vrf.pk)}
+        row_vrf = {"198.18.116.10/24": str(other_vrf.pk)}
         (intent,) = re.findall(
             r'name="conflict_intent" value="([^"]*)"',
-            _sync(client, device, ["198.18.116.10/24"], **row_vrf).content.decode(),
+            _sync(client, device, ["198.18.116.10/24"], vrfs=row_vrf).content.decode(),
         )
 
         _sync(client, device, [], conflict_intent=intent, force_conflict="198.18.116.10/24")
@@ -646,27 +690,28 @@ class TestAVirtualMachineSubject:
 
     def _client(self, client, settings, tag):
         _servers(settings, SERVER_KEY)
-        user = _reader(tag, owner=VirtualMachine, interface=VMInterface)
-        client.force_login(grant(user, "change", VirtualMachine))
+        self.user = grant(_reader(tag, owner=VirtualMachine, interface=VMInterface), "change", VirtualMachine)
+        client.force_login(self.user)
         return client
 
-    def test_the_table_and_the_verify_block_a_hidden_address(self, client, settings):
+    def test_the_table_and_the_row_read_block_a_hidden_address(self, client, settings):
         vm, hidden = self._vm("ip-scope-vm-render")
         client = self._client(client, settings, "ip-scope-vm-render")
 
         html = _fragment(client, vm)
-        response = _verify(client, vm, "198.18.117.10/24")
+        row = read_ip_row(client, vm, "198.18.117.10/24")
 
         assert hidden.get_absolute_url() not in html
         assert not _selectable(_rows(html)["198.18.117.10/24"])
-        assert response.status_code == 200
-        assert response.json()["formatted_row"]["selectable"] is False
+        assert row.selectable is False
+        assert hidden.get_absolute_url() not in row.html
 
     def test_the_sync_never_sets_a_hidden_primary_ip(self, client, settings):
         vm, _hidden = self._vm("ip-scope-vm-sync")
         client = self._client(client, settings, "ip-scope-vm-sync")
 
-        _sync(client, vm, ["198.18.117.10/24"], **{"set-primary-ip-toggle": "on"})
+        assert not _offered(client, vm, "198.18.117.10/24")
+        _write(vm, self.user, {"198.18.117.10/24": None}, **{"set-primary-ip-toggle": "on"})
 
         vm.refresh_from_db()
         assert vm.primary_ip4_id is None

@@ -19,7 +19,7 @@ from netbox_librenms_plugin.tests.source_snapshot_helpers import (
     sensor_row,
 )
 from django.core.cache import cache
-from django.http import Http404
+from django.urls import reverse
 
 from netbox_librenms_plugin.server_mappings import MappingRole, identity_q
 from netbox_librenms_plugin.tests.conftest import (
@@ -28,10 +28,9 @@ from netbox_librenms_plugin.tests.conftest import (
     make_interface,
     make_ip,
     make_superuser,
-    make_vm,
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
-from netbox_librenms_plugin.tests.view_test_helpers import make_request, post as view_post
+from netbox_librenms_plugin.tests.view_test_helpers import make_request, post as view_post, read_ip_row
 
 pytestmark = pytest.mark.django_db
 
@@ -51,13 +50,6 @@ def _request(payload, *, path="/verify/"):
 def _json(response):
     """Decode a direct JsonResponse call."""
     return json.loads(response.content)
-
-
-def _post_ip(payload):
-    """Call the real single-address verification endpoint."""
-    from netbox_librenms_plugin.views.base.ip_addresses_view import SingleIPAddressVerifyView
-
-    return view_post(SingleIPAddressVerifyView(), _request(payload))
 
 
 def _post_cable(
@@ -143,169 +135,61 @@ class TestLibreNMSIdentityQueries:
         assert missing == (None, False, None)
 
 
-class TestIPAddressVerifyHelpers:
-    """Exercise address verification helpers with real models."""
+class TestIPAddressRowRead:
+    """The row read renders one IP row of the warm snapshot, decided in the VRF the user chose for it."""
 
-    def _view(self):
-        from netbox_librenms_plugin.views.base.ip_addresses_view import SingleIPAddressVerifyView
+    def test_an_unknown_device_answers_404(self, client):
+        client.force_login(make_superuser())
 
-        view = SingleIPAddressVerifyView()
-        view.setup(_request({}))
-        return view
-
-    def test_object_lookup_resolves_devices_and_virtual_machines(self):
-        device = make_device("ip-object-device")
-        vm = make_vm("ip-object-vm")
-        view = self._view()
-
-        assert view._get_object(device.pk, "device") == device
-        assert view._get_object(vm.pk, "virtualmachine") == vm
-        assert view._get_object(device.pk) == device
-        with pytest.raises(Http404):
-            view._get_object(2_147_483_647)
-
-    @pytest.mark.parametrize(
-        ("value", "expected"),
-        [
-            ("198.18.1.9/24", ("198.18.1.9", 24)),
-            ("2001:db8::9/64", ("2001:db8::9", 64)),
-        ],
-    )
-    def test_address_parser_preserves_the_host_and_prefix(self, value, expected):
-        assert self._view()._parse_ip_address(value) == expected
-
-    @pytest.mark.parametrize("value", ["198.18.1.9", "198.18.1.9/99", "not-an-address/24"])
-    def test_address_parser_rejects_incomplete_or_invalid_values(self, value):
-        with pytest.raises(ValueError):
-            self._view()._parse_ip_address(value)
-
-    def test_existing_global_address_returns_its_real_url(self):
-        ip = make_ip("198.18.3.1/24")
-
-        exists, in_vrf, url = self._view()._find_existing_ip([ip])
-
-        assert exists is True
-        assert in_vrf is True
-        assert url == ip.get_absolute_url()
-
-    def test_existing_address_in_another_vrf_does_not_match_global(self):
-        from ipam.models import VRF
-
-        vrf = VRF.objects.create(name="verify-isolated", rd="64512:8")
-        ip = make_ip("198.18.4.1/24")
-        ip.vrf = vrf
-        ip.save(update_fields=["vrf"])
-
-        exists, in_vrf, url = self._view()._find_existing_ip([ip])
-
-        assert exists is True
-        assert in_vrf is False
-        assert url == ip.get_absolute_url()
-
-    @pytest.mark.parametrize(
-        ("exists", "specific", "original_vrf", "selected_vrf", "expected"),
-        [
-            (True, True, None, None, "matched"),
-            (True, False, None, 8, "update"),
-            (False, False, 8, 8, "matched"),
-            (False, False, 8, 9, "sync"),
-            (False, False, None, None, "sync"),
-        ],
-    )
-    def test_status_matrix(self, exists, specific, original_vrf, selected_vrf, expected):
-        status = self._view()._determine_status(exists, specific, original_vrf, selected_vrf)
-
-        assert status == expected
-
-
-class TestIPAddressVerifyEndpoint:
-    """Verify request validation and rendered status through the real endpoint."""
-
-    def test_invalid_json_and_non_object_json_return_specific_400_responses(self):
-        from netbox_librenms_plugin.views.base.ip_addresses_view import SingleIPAddressVerifyView
-
-        malformed = view_post(SingleIPAddressVerifyView(), _request("{"))
-        non_object = view_post(SingleIPAddressVerifyView(), _request("[1, 2]"))
-
-        assert malformed.status_code == 400
-        assert _json(malformed)["message"] == "Invalid JSON payload"
-        assert non_object.status_code == 400
-        assert _json(non_object)["message"] == "JSON payload must be an object"
-
-    @pytest.mark.parametrize(
-        ("changes", "message"),
-        [
-            ({"ip_address": None}, "No IP address provided"),
-            ({"device_id": True}, "Invalid object ID"),
-            ({"device_id": 1.5}, "Invalid object ID"),
-            ({"device_id": "invalid"}, "Invalid object ID"),
-            ({"vrf_id": True}, "Invalid VRF ID"),
-            ({"vrf_id": 1.5}, "Invalid VRF ID"),
-            ({"vrf_id": "invalid"}, "Invalid VRF ID"),
-        ],
-    )
-    def test_invalid_fields_return_specific_400_responses(self, changes, message):
-        payload = {
-            "device_id": 2_147_483_647,
-            "object_type": "device",
-            "ip_address": "198.18.5.1/24",
-            **changes,
-        }
-
-        response = _post_ip(payload)
-
-        assert response.status_code == 400
-        assert _json(response)["message"] == message
-
-    def test_unknown_device_returns_404(self):
-        response = _post_ip(
-            {
-                "device_id": 2_147_483_647,
-                "object_type": "device",
-                "ip_address": "198.18.6.1/24",
-            }
+        response = client.get(
+            reverse(
+                "plugins:netbox_librenms_plugin:ip_row",
+                kwargs={"object_type": "device", "pk": 2_147_483_647, "row_key": "198.18.6.1/24"},
+            ),
+            {"server_key": "default"},
         )
 
         assert response.status_code == 404
-        assert _json(response)["message"] == "Object with ID 2147483647 not found"
 
-    def test_existing_address_in_selected_vrf_renders_synced(self):
+    def test_existing_address_in_the_shown_vrf_renders_synced(self, client):
+        client.force_login(make_superuser())
         device = make_device("ip-existing", librenms_cf={"default": {"id": 48}})
         interface = make_interface(device, "Ethernet8")
         make_ip("198.18.8.1/24", assigned_object=interface)
         seed_ip_snapshot(device, [ip_address_row("198.18.8.1", 8)], [{"port_id": 8, "ifName": "Ethernet8"}])
 
-        response = _post_ip(
-            {
-                "device_id": device.pk,
-                "object_type": "device",
-                "ip_address": "198.18.8.1/24",
-            }
-        )
+        row = read_ip_row(client, device, "198.18.8.1/24", vrf="")
 
-        assert response.status_code == 200
-        assert "Synced" in _json(response)["formatted_row"]["status"]
+        assert "Synced" in row.status
 
-    def test_existing_address_in_a_different_vrf_renders_update(self):
+    def test_existing_address_in_a_different_vrf_renders_update(self, client):
         from ipam.models import VRF
 
+        client.force_login(make_superuser())
         device = make_device("ip-update", librenms_cf={"default": {"id": 49}})
         interface = make_interface(device, "Ethernet9")
         make_ip("198.18.9.1/24", assigned_object=interface)
         seed_ip_snapshot(device, [ip_address_row("198.18.9.1", 9)], [{"port_id": 9, "ifName": "Ethernet9"}])
         vrf = VRF.objects.create(name="new-vrf", rd="64512:10")
 
-        response = _post_ip(
-            {
-                "device_id": device.pk,
-                "object_type": "device",
-                "ip_address": "198.18.9.1/24",
-                "vrf_id": vrf.pk,
-            }
-        )
+        row = read_ip_row(client, device, "198.18.9.1/24", vrf=str(vrf.pk))
 
-        assert response.status_code == 200
-        assert "Update" in _json(response)["formatted_row"]["status"]
+        assert "Update" in row.status
+        assert row.shown_vrf == str(vrf.pk)
+
+    def test_an_address_netbox_lacks_renders_create_in_the_chosen_vrf(self, client):
+        from ipam.models import VRF
+
+        client.force_login(make_superuser())
+        device = make_device("ip-create", librenms_cf={"default": {"id": 50}})
+        make_interface(device, "Ethernet10")
+        seed_ip_snapshot(device, [ip_address_row("198.18.10.1", 10)], [{"port_id": 10, "ifName": "Ethernet10"}])
+        vrf = VRF.objects.create(name="create-vrf", rd="64512:11")
+
+        row = read_ip_row(client, device, "198.18.10.1/24", vrf=str(vrf.pk))
+
+        assert "Create</button>" in row.status
+        assert row.shown_vrf == str(vrf.pk)
 
 
 class TestCableVerifyEndpoint:
