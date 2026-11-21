@@ -1648,6 +1648,405 @@ class TestDeviceValidationDetailsView:
         assert "alert-warning" in content
         assert "alert-danger" not in content
 
+    def test_an_oob_match_offers_no_action_that_copies_the_controller_row(self):
+        """The row describes the host's OOB controller, so no field of it is offered for the host."""
+        host = make_device(
+            "validation-details-oob-host",
+            serial="HOST-SN-1",
+            librenms_cf={"default": {"id": 5, "oob": {"id": 1, "type": "idrac9"}}},
+        )
+        self.primary_server.device_info_response(
+            device_id=1, hostname=f"{host.name}-idrac", hardware="iDRAC9", os="idrac", serial="CTRL-SN-1", ip=""
+        )
+        self.primary_server.vc_inventory_callable(1, [], {})
+
+        _view, response = self._get("default")
+
+        content = response.content.decode()
+        assert response.status_code == 200
+        for action in ("sync_serial", "sync_name", "sync_platform", "sync_device_type", "update_type"):
+            assert f'name="action" value="{action}"' not in content, action
+
+    def test_a_detected_oob_controller_offers_add_as_oob_and_no_row_copy(self):
+        """The controller answers at the host's OOB IP and has no mapping: only the OOB attach is offered."""
+        host = make_device("validation-details-oob-ip-host", serial="HOST-SN-OOBIP-1")
+        host.oob_ip = make_ip("198.18.31.1/32")
+        host.save()
+        self.primary_server.device_info_response(
+            device_id=1, hostname=f"{host.name}-idrac", hardware="iDRAC9", os="idrac", serial="CTRL-1", ip="198.18.31.1"
+        )
+        self.primary_server.vc_inventory_callable(1, [], {})
+
+        _view, response = self._get("default")
+
+        content = response.content.decode()
+        assert response.status_code == 200
+        assert url_for("plugins:netbox_librenms_plugin:device_add_as_oob", kwargs={"device_id": 1}) in content
+        for action in ("sync_serial", "sync_name", "sync_platform", "sync_device_type", "update_type"):
+            assert f'name="action" value="{action}"' not in content, action
+
+    @pytest.mark.parametrize(
+        ("serial", "ambiguous"),
+        [("DETAILS-SHARED", True), ("DETAILS-UNMATCHED", False), ("", False)],
+        ids=["ambiguous", "no-match", "absent"],
+    )
+    def test_an_ambiguous_serial_prevents_ip_matching(self, client, serial, ambiguous):
+        from netbox_librenms_plugin.tests.conftest import ip_on
+
+        make_device("details-serial-exact", serial="DETAILS-SHARED")
+        make_device("details-serial-padded", serial="  DETAILS-SHARED  ")
+        host = make_device("details-ip-owner")
+        host.primary_ip4 = ip_on(host, "198.18.31.2/32", "mgmt0")
+        host.save(update_fields=["primary_ip4"])
+        self.primary_server.device_info_response(
+            device_id=1, hostname="details-controller", hardware="iDRAC9", os="idrac", serial=serial, ip="198.18.31.2"
+        )
+        self.primary_server.vc_inventory_callable(1, [], {})
+        client.force_login(make_superuser())
+
+        response = client.get(
+            url_for("plugins:netbox_librenms_plugin:device_validation_details", kwargs={"device_id": 1}),
+            {"server_key": "default"},
+            headers={"HX-Request": "true"},
+        )
+
+        assert response.status_code == 200
+        validation = response.context["validation"]
+        assert validation["serial_duplicate"] is ambiguous
+        if ambiguous:
+            assert validation["existing_device"] is None
+            assert validation["existing_match_type"] == "ambiguous_hostname_or_serial"
+            assert validation["oob_candidate"] is None
+            assert validation["row_is_oob_controller"] is False
+            assert validation["can_import"] is False
+            assert validation["is_ready"] is False
+            assert len(validation["issues"]) == 1
+        else:
+            assert validation["existing_device"] == host
+            assert validation["existing_match_type"] == "primary_ip"
+            assert validation["oob_candidate"]["device"] == host
+
+    def test_a_rediscovered_controller_at_the_oob_ip_offers_no_row_copy(self):
+        """The host already has an OOB link, and a new LibreNMS ID answers at its OOB IP: no row copy is offered."""
+        host = make_device(
+            "validation-details-rediscovered-host",
+            serial="HOST-SN-REDISCOVERED-1",
+            librenms_cf={"default": {"id": 5, "oob": {"id": 99, "type": "idrac9"}}},
+        )
+        host.oob_ip = make_ip("198.18.34.1/32")
+        host.save()
+        self.primary_server.device_info_response(
+            device_id=1, hostname=f"{host.name}-idrac", hardware="iDRAC9", os="idrac", serial="-", ip="198.18.34.1"
+        )
+        self.primary_server.vc_inventory_callable(1, [], {})
+
+        _view, response = self._get("default")
+
+        content = response.content.decode()
+        assert response.status_code == 200
+        for action in ("sync_serial", "sync_name", "sync_platform", "sync_device_type", "update_type", "update"):
+            assert f'value="{action}"' not in content, action
+
+    def test_a_controller_with_the_host_hostname_offers_no_serial_action(self):
+        """The controller reports the host's hostname and answers at its OOB IP: no host-side serial action."""
+        host = make_device("validation-details-mirror-host", serial="HOST-SN-MIRROR-1")
+        host.oob_ip = make_ip("198.18.36.1/32")
+        host.save()
+        self.primary_server.device_info_response(
+            device_id=1, hostname=host.name, hardware="iDRAC9", os="idrac", serial="CTRL-SN-MIRROR-1", ip="198.18.36.1"
+        )
+        self.primary_server.vc_inventory_callable(1, [], {})
+
+        _view, response = self._get("default")
+
+        content = response.content.decode()
+        assert response.status_code == 200
+        for action in ("update_serial", "sync_serial", "sync_name", "update_type"):
+            assert f'value="{action}"' not in content, action
+
+    @pytest.mark.parametrize("matched_by", ["hostname", "serial"])
+    def test_a_controller_row_offers_no_link_or_update(self, matched_by):
+        """A controller at the host's OOB IP that matched by hostname or serial: no Link or Update button."""
+        host = make_device(f"validation-details-link-{matched_by}", serial="HOST-SN-LINK-CTRL")
+        host.oob_ip = make_ip("198.18.39.1/32")
+        host.save()
+        self.primary_server.device_info_response(
+            device_id=1,
+            hostname=host.name if matched_by == "hostname" else f"{host.name}-other",
+            hardware="Unmatched hardware",
+            os="linux",
+            serial="HOST-SN-LINK-CTRL" if matched_by == "serial" else "-",
+            ip="198.18.39.1",
+        )
+        self.primary_server.vc_inventory_callable(1, [], {})
+
+        _view, response = self._get("default")
+
+        content = response.content.decode()
+        assert response.status_code == 200
+        for action in ("link", "update", "update_serial"):
+            assert f'value="{action}"' not in content, action
+
+    def test_a_controller_row_offers_no_hardware_mapping_to_the_host_type(self):
+        """The controller's hardware matches another DeviceType: the dialog must not map it to the host's type."""
+        from dcim.models import DeviceType
+
+        host = make_device("validation-details-oob-type-host", serial="HOST-SN-OOB-TYPE")
+        host.oob_ip = make_ip("198.18.37.1/32")
+        host.save()
+        DeviceType.objects.create(
+            manufacturer=host.device_type.manufacturer,
+            model="iDRAC9 controller",
+            slug="idrac9-controller",
+            part_number="IDRAC9-CTRL",
+        )
+        self.primary_server.device_info_response(
+            device_id=1, hostname=f"{host.name}-idrac", hardware="IDRAC9-CTRL", os="idrac", serial="-", ip="198.18.37.1"
+        )
+        self.primary_server.vc_inventory_callable(1, [], {})
+
+        _view, response = self._get("default")
+
+        content = response.content.decode()
+        assert response.status_code == 200
+        assert url_for("plugins:netbox_librenms_plugin:add_device_type_mapping", kwargs={"device_id": 1}) not in content
+
+    def test_a_controller_with_the_host_hostname_and_an_oob_os_offers_only_add_as_oob(self):
+        """The controller reports the host's hostname, its own serial and an OOB OS; the host has no OOB IP."""
+        host = make_device("validation-details-oob-os-host", serial="HOST-SN-OOB-OS-1")
+        self.primary_server.device_info_response(
+            device_id=1, hostname=host.name, hardware="iDRAC9", os="idrac", serial="CTRL-SN-OOB-OS-1", ip=""
+        )
+        self.primary_server.vc_inventory_callable(1, [], {})
+
+        _view, response = self._get("default")
+
+        content = response.content.decode()
+        assert response.status_code == 200
+        assert url_for("plugins:netbox_librenms_plugin:device_add_as_oob", kwargs={"device_id": 1}) in content
+        for action in ("link", "update", "update_serial", "sync_serial", "sync_name", "update_type"):
+            assert f'value="{action}"' not in content, action
+        assert url_for("plugins:netbox_librenms_plugin:add_device_type_mapping", kwargs={"device_id": 1}) not in content
+
+    def test_a_merge_row_at_the_host_oob_ip_shows_the_merge_and_no_host_sync(self):
+        """The controller row of a merge suggestion keeps the merge form and loses the host sync controls."""
+        from dcim.models import Platform
+
+        host = make_device("details-merge-oob-host")
+        host.oob_ip = make_ip("198.18.23.46/32", assigned_object=make_interface(host, "mgmt"))
+        host.save()
+        make_device("details-merge-oob-peer", serial="DETAILS-MERGE-SN", librenms_cf={"default": {"id": 9147}})
+        Platform.objects.create(name="details-merge-os", slug="details-merge-os")
+        self.primary_server.device_info_response(
+            device_id=1,
+            hostname=host.name,
+            hardware="Test chassis",
+            os="details-merge-os",
+            serial="DETAILS-MERGE-SN",
+            ip="198.18.23.46",
+        )
+        self.primary_server.vc_inventory_callable(1, [], {})
+
+        _view, response = self._get("default")
+
+        content = response.content.decode()
+        assert response.status_code == 200
+        assert url_for("plugins:netbox_librenms_plugin:device_merge_netbox_devices", kwargs={"device_id": 1}) in content
+        assert 'value="sync_platform"' not in content
+
+    def test_a_chassis_member_whose_owner_has_an_oob_link_offers_no_attach(self):
+        """The sync owner of the chassis already holds an OOB link, which Add as OOB checks too."""
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
+
+        owner = make_device("details-owner-oob-master")
+        member = make_device("details-owner-oob-member")
+        make_virtual_chassis("details-owner-oob-chassis", owner, member)
+        seed_mapping(owner, "default", own=7101, oob=7201, oob_type="idrac")
+        self.primary_server.device_info_response(
+            device_id=1, hostname=member.name, hardware="iDRAC9", os="idrac", serial="", ip=""
+        )
+        self.primary_server.vc_inventory_callable(1, [], {})
+
+        _view, response = self._get("default")
+
+        assert response.status_code == 200
+        assert url_for("plugins:netbox_librenms_plugin:device_add_as_oob", kwargs={"device_id": 1}) not in (
+            response.content.decode()
+        )
+
+    def test_a_chassis_member_whose_owner_has_an_oob_link_gets_no_serial_role_offer(self):
+        """The member's own name looks like a controller's; the chassis owner already holds an OOB link."""
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
+
+        owner = make_device("details-role-owner-master")
+        member = make_device("details-role-owner-idrac", serial="DETAILS-A175-SN")
+        make_virtual_chassis("details-role-owner-chassis", owner, member)
+        seed_mapping(owner, "default", own=7178, oob=7179, oob_type="idrac")
+        self.primary_server.device_info_response(
+            device_id=1,
+            hostname="details-role-owner-row",
+            hardware="Test chassis",
+            os="linux",
+            serial="DETAILS-A175-SN",
+            ip="",
+        )
+        self.primary_server.vc_inventory_callable(1, [], {})
+
+        _view, response = self._get("default")
+
+        assert response.status_code == 200
+        assert url_for("plugins:netbox_librenms_plugin:device_add_as_oob", kwargs={"device_id": 1}) not in (
+            response.content.decode()
+        )
+
+    def test_the_oob_interface_picker_lists_only_interfaces_the_viewer_can_see(self):
+        """The viewer sees one interface of the host; the other interface stays out of the form."""
+        from dcim.models import Device, Interface
+
+        from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
+
+        host = make_device("details-picker-scope-host")
+        make_interface(host, "visible-mgmt0")
+        make_interface(host, "hidden-eth9")
+        self.primary_server.device_info_response(
+            device_id=1, hostname=host.name, hardware="iDRAC9", os="idrac", serial="", ip=""
+        )
+        self.primary_server.vc_inventory_callable(1, [], {})
+        user = make_view_user("details-picker-scope-user", [("view", Device), ("change", Device)])
+        user = grant_view_permission(user, "view", Interface, constraints={"name": "visible-mgmt0"})
+        request = make_view_request("get", {"server_key": "default"}, user=user, HTTP_HX_REQUEST="true")
+
+        response = get_view(DeviceValidationDetailsView(), request, device_id=1)
+
+        content = response.content.decode()
+        assert url_for("plugins:netbox_librenms_plugin:device_add_as_oob", kwargs={"device_id": 1}) in content
+        assert "visible-mgmt0" in content
+        assert "hidden-eth9" not in content
+
+    def test_the_oob_interface_picker_lists_the_interfaces_of_the_chassis_owner(self):
+        """The controller matches a member; the chassis owner holds the LibreNMS link and the OOB slot."""
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
+
+        owner = make_device("details-picker-owner")
+        member = make_device("details-picker-member")
+        make_virtual_chassis("details-picker-chassis", owner, member)
+        seed_mapping(owner, "default", own=7180)
+        make_interface(owner, "owner-idrac0")
+        make_interface(member, "member-eth0")
+        self.primary_server.device_info_response(
+            device_id=1, hostname=member.name, hardware="iDRAC9", os="idrac", serial="", ip=""
+        )
+        self.primary_server.vc_inventory_callable(1, [], {})
+
+        _view, response = self._get("default")
+
+        content = response.content.decode()
+        assert "owner-idrac0" in content
+        assert "member-eth0" not in content
+
+    def test_the_controller_section_names_the_oob_target(self):
+        """The controller matches a member; the chassis owner holds the LibreNMS links and gets the OOB link."""
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
+
+        owner = make_device("details-target-name-owner")
+        member = make_device("details-target-name-member")
+        make_virtual_chassis("details-target-name-chassis", owner, member)
+        seed_mapping(owner, "default", own=7192)
+        self.primary_server.device_info_response(
+            device_id=1, hostname=member.name, hardware="iDRAC9", os="idrac", serial="", ip=""
+        )
+        self.primary_server.vc_inventory_callable(1, [], {})
+
+        _view, response = self._get("default")
+
+        content = response.content.decode()
+        assert url_for("dcim:device", kwargs={"pk": owner.pk}) in content
+        assert owner.name in content
+        # The button names the Device that Add as OOB writes, not the matched member.
+        assert f"Add as OOB to {owner.name}" in content
+        assert f"Add as OOB to {member.name}" not in content
+
+    def test_the_add_as_oob_form_posts_the_naming_rules_of_the_dialog(self):
+        """The dialog strips the domain to match the host; its Add as OOB request must carry the same rules."""
+        from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
+
+        make_device("details-naming-node")
+        self.primary_server.device_info_response(
+            device_id=1, hostname="details-naming-node.example.test", hardware="iDRAC9", os="idrac", serial="", ip=""
+        )
+        self.primary_server.vc_inventory_callable(1, [], {})
+        request = make_view_request(
+            "get",
+            {"server_key": "default", "strip_domain": "true", "use_sysname": "true"},
+            user=make_superuser(),
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = get_view(DeviceValidationDetailsView(), request, device_id=1)
+
+        content = response.content.decode()
+        form_url = url_for("plugins:netbox_librenms_plugin:device_add_as_oob", kwargs={"device_id": 1})
+        assert re.search(
+            r"hx-vals='\{\"use_sysname\": \"true\", \"strip_domain\": \"true\"\}'>\s*<form hx-post=\""
+            + re.escape(form_url),
+            content,
+        ), content[:400]
+
+    def test_a_viewer_who_cannot_see_the_oob_target_gets_no_offer_and_no_target_name(self):
+        """The viewer sees the matched member only; the hidden chassis owner holds its LibreNMS links."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
+        from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
+
+        owner = make_device("details-hidden-owner")
+        member = make_device("details-visible-member")
+        make_virtual_chassis("details-hidden-owner-chassis", owner, member)
+        seed_mapping(owner, "default", own=7197)
+        self.primary_server.device_info_response(
+            device_id=1, hostname=member.name, hardware="iDRAC9", os="idrac", serial="", ip=""
+        )
+        self.primary_server.vc_inventory_callable(1, [], {})
+        user = make_view_user(
+            "details-hidden-owner-user", [("view", Device), ("change", Device)], constraints={"name": member.name}
+        )
+        request = make_view_request("get", {"server_key": "default"}, user=user, HTTP_HX_REQUEST="true")
+
+        response = get_view(DeviceValidationDetailsView(), request, device_id=1)
+
+        content = response.content.decode()
+        assert response.status_code == 200
+        assert member.name in content
+        assert owner.name not in content
+        assert url_for("dcim:device", kwargs={"pk": owner.pk}) not in content
+        assert url_for("plugins:netbox_librenms_plugin:device_add_as_oob", kwargs={"device_id": 1}) not in content
+
+    def test_the_serial_role_pane_names_the_oob_target(self):
+        """The serial match is a member whose own name looks like a controller's; the owner holds the links."""
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
+
+        owner = make_device("details-role-pane-owner")
+        member = make_device("details-role-pane-bmc", serial="DETAILS-A207-SN")
+        make_virtual_chassis("details-role-pane-chassis", owner, member)
+        seed_mapping(owner, "default", own=7207)
+        self.primary_server.device_info_response(
+            device_id=1,
+            hostname="details-role-pane-row",
+            hardware="Test chassis",
+            os="linux",
+            serial="DETAILS-A207-SN",
+            ip="",
+        )
+        self.primary_server.vc_inventory_callable(1, [], {})
+
+        _view, response = self._get("default")
+
+        content = response.content.decode()
+        assert url_for("plugins:netbox_librenms_plugin:device_add_as_oob", kwargs={"device_id": 1}) in content
+        assert url_for("dcim:device", kwargs={"pk": owner.pk}) in content
+        # The effect table shows the host link of the OOB target, the owner.
+        assert "#7207" in content
+
     def test_a_serial_that_cannot_be_compared_shows_the_reason_not_a_match(self):
         from dcim.models import Device, VirtualChassis
         from django.utils.html import escape
@@ -3443,6 +3842,41 @@ class TestDeviceConflictActionMigrateLibreNMSId:
         assert b"Serial number not confirmed" in response.content
         assert stored_mapping_for_test(VirtualMachine.objects.get(pk=vm.pk)) == 42
 
+    @pytest.mark.parametrize("force", [True, False], ids=["forced", "not-forced"])
+    def test_a_legacy_id_whose_serial_holders_cannot_be_checked_converts_only_with_force(self, force):
+        """The legacy ID proves the match; another maker's broken rule stops the lookup of the other serial holders."""
+        from dcim.models import Device, Manufacturer
+
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        view = self._make_view()
+        device = make_device(f"migrate-unchecked-holders-{force}".lower(), serial="LEGACY-A214-SN", librenms_cf=42)
+        other = Manufacturer.objects.create(name="Migrate broken maker", slug="migrate-broken-maker")
+        rule = NormalizationRule.objects.create(
+            scope="serial", manufacturer=other, match_pattern=r"^OTHER-(.+)$", replacement=r"\1"
+        )
+        NormalizationRule.objects.filter(pk=rule.pk).update(replacement=r"KEY-\1")
+        self._register_device(42, device.name, serial="LEGACY-A214-SN")
+        data = {"server_key": self.server_key, "action": "migrate_librenms_id", "existing_device_id": str(device.pk)}
+        if force:
+            data["force"] = "on"
+        request = make_view_request(
+            "post",
+            data,
+            user=make_view_user(f"migrate-unchecked-{force}-user".lower(), [("change", Device)]),
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = post_view(view, request, device_id=42)
+
+        stored = stored_mapping_for_test(Device.objects.get(pk=device.pk))
+        if force:
+            assert response.get("HX-Trigger") == "closeModal", response.content.decode()[:600]
+            assert stored == {self.server_key: 42}
+        else:
+            assert response.headers.get("HX-Reswap") == "none"
+            assert stored == 42
+
     def test_migrates_a_device_and_persists_the_dict_format(self):
         """Migrate a confirmed Device mapping and render the updated import row."""
         from dcim.models import Device
@@ -4323,6 +4757,400 @@ class TestDeviceConflictActionBranches:
         assert "LibreNMS device not found" not in unescape(response.content.decode())
         assert cache.get(get_import_device_cache_key(42, self.server_key)) is not None
         assert self.server_key not in (stored_mapping_for_test(Device.objects.get(pk=target.pk)) or {})
+
+    @pytest.mark.parametrize(
+        "action",
+        [
+            "link",
+            "update",
+            "update_serial",
+            "sync_name",
+            "update_type",
+            "sync_serial",
+            "sync_platform",
+            "sync_device_type",
+        ],
+    )
+    def test_an_oob_match_copies_no_controller_field_onto_the_host(self, action):
+        """The OOB match selects the host, but the row is the controller's: the POST refuses every copy."""
+        from dcim.models import Device, Platform
+
+        host = make_device(
+            f"branches-oob-copy-{action}".replace("_", "-"),
+            serial="HOST-SN-COPY",
+            librenms_cf={self.server_key: {"id": 7, "oob": {"id": 42, "type": "idrac9"}}},
+        )
+        Platform.objects.create(name="ctrl-os", slug=f"ctrl-os-{action}".replace("_", "-"))
+        self.librenms_server.device_info_response(
+            device_id=42, hostname=f"{host.name}-idrac", hardware="iDRAC9", os="ctrl-os", serial="CTRL-SN-COPY", ip=""
+        )
+        self.librenms_server.vc_inventory_callable(42, [], {})
+        before = Device.objects.values("name", "serial", "device_type_id", "platform_id").get(pk=host.pk)
+
+        response = post_view(
+            self._make_view(), self._request(action, host, f"{host.name}-user", force="on"), device_id=42
+        )
+
+        assert response.headers.get("HX-Reswap") == "none"
+        assert Device.objects.values("name", "serial", "device_type_id", "platform_id").get(pk=host.pk) == before
+        assert stored_mapping_for_test(Device.objects.get(pk=host.pk)) == {
+            self.server_key: {"id": 7, "oob": {"id": 42, "type": "idrac9"}}
+        }
+
+    @pytest.mark.parametrize("action", ["sync_serial", "sync_name", "sync_platform", "update"])
+    def test_a_detected_oob_controller_copies_no_field_onto_the_host(self, action):
+        """The controller answers at the host's OOB IP and has no mapping: the POST refuses every copy."""
+        from dcim.models import Device, Platform
+
+        host = make_device(f"branches-oob-ip-{action}".replace("_", "-"), serial="HOST-SN-OOBIP")
+        host.oob_ip = make_ip("198.18.32.42/32")
+        host.save()
+        Platform.objects.create(name="idrac", slug=f"idrac-{action}".replace("_", "-"))
+        self.librenms_server.device_info_response(
+            device_id=42,
+            hostname=f"{host.name}-idrac",
+            hardware="iDRAC9",
+            os="idrac",
+            serial="CTRL-SN-OOBIP",
+            ip="198.18.32.42",
+        )
+        self.librenms_server.vc_inventory_callable(42, [], {})
+        before = Device.objects.values("name", "serial", "device_type_id", "platform_id").get(pk=host.pk)
+
+        response = post_view(
+            self._make_view(), self._request(action, host, f"{host.name}-user", force="on"), device_id=42
+        )
+
+        assert response.headers.get("HX-Reswap") == "none"
+        assert Device.objects.values("name", "serial", "device_type_id", "platform_id").get(pk=host.pk) == before
+
+    @pytest.mark.parametrize("action", ["sync_name", "sync_platform"])
+    def test_a_vm_matched_by_its_oob_id_gets_no_controller_field(self, action):
+        """The VM's OOB sub-key holds the requested ID, so the row is its controller's and nothing is copied."""
+        from virtualization.models import VirtualMachine
+
+        from dcim.models import Platform
+
+        vm = make_vm(f"branches-vm-oob-{action}".replace("_", "-"))
+        seed_stored_mapping(vm, {self.server_key: {"id": 7, "oob": {"id": 42, "type": "idrac9"}}}, save=True)
+        Platform.objects.create(name="ctrl-os", slug=f"ctrl-os-vm-{action}".replace("_", "-"))
+        self.librenms_server.device_info_response(
+            device_id=42, hostname=f"{vm.name}-ctrl", hardware="iDRAC9", os="ctrl-os", serial="", ip=""
+        )
+        self.librenms_server.vc_inventory_callable(42, [], {})
+        before = VirtualMachine.objects.values("name", "platform_id").get(pk=vm.pk)
+
+        response = post_view(
+            self._make_view(),
+            self._request(
+                action,
+                vm,
+                f"{vm.name}-user",
+                perms=[("change", VirtualMachine)],
+                existing_device_type="virtualmachine",
+                cluster_42=str(vm.cluster_id),
+            ),
+            device_id=42,
+        )
+
+        assert response.headers.get("HX-Reswap") == "none"
+        assert VirtualMachine.objects.values("name", "platform_id").get(pk=vm.pk) == before
+
+    @pytest.mark.parametrize("matched_by", ["serial", "oob-ip"])
+    @pytest.mark.parametrize("action", ["sync_name", "update", "sync_serial"])
+    def test_a_rediscovered_controller_of_an_oob_linked_host_copies_nothing(self, matched_by, action):
+        """The host already has an OOB link; its controller reappears under a new ID and matches by serial or OOB IP."""
+        from dcim.models import Device
+
+        tag = f"branches-rediscovered-{matched_by}-{action}".replace("_", "-")
+        host = make_device(
+            tag,
+            serial="HOST-SN-REDISCOVERED" if matched_by == "oob-ip" else "SHARED-SN-REDISCOVERED",
+            librenms_cf={self.server_key: {"id": 7, "oob": {"id": 99, "type": "idrac9"}}},
+        )
+        host.oob_ip = make_ip("198.18.33.42/32")
+        host.save()
+        self.librenms_server.device_info_response(
+            device_id=42,
+            hostname=f"{tag}-idrac",
+            hardware="iDRAC9",
+            os="idrac",
+            serial="SHARED-SN-REDISCOVERED" if matched_by == "serial" else "-",
+            ip="198.18.33.42" if matched_by == "oob-ip" else "",
+        )
+        self.librenms_server.vc_inventory_callable(42, [], {})
+        before = Device.objects.values("name", "serial", "device_type_id", "platform_id").get(pk=host.pk)
+
+        response = post_view(
+            self._make_view(), self._request(action, host, f"{host.name}-user", force="on"), device_id=42
+        )
+
+        assert response.headers.get("HX-Reswap") == "none"
+        assert Device.objects.values("name", "serial", "device_type_id", "platform_id").get(pk=host.pk) == before
+
+    @pytest.mark.parametrize("linked", [False, True], ids=["new-controller", "rediscovered"])
+    @pytest.mark.parametrize("action", ["update_serial", "sync_serial"])
+    def test_a_controller_with_the_host_hostname_copies_no_serial(self, linked, action):
+        """The controller reports the host's hostname, answers at its OOB IP and has another serial: nothing is copied."""
+        from dcim.models import Device
+
+        tag = f"branches-mirror-{action}-{int(linked)}".replace("_", "-")
+        host = make_device(
+            tag,
+            serial="HOST-SN-MIRROR",
+            librenms_cf={self.server_key: {"id": 7, "oob": {"id": 99, "type": "idrac9"}}} if linked else None,
+        )
+        host.oob_ip = make_ip("198.18.38.42/32")
+        host.save()
+        self.librenms_server.device_info_response(
+            device_id=42, hostname=host.name, hardware="iDRAC9", os="idrac", serial="CTRL-SN-MIRROR", ip="198.18.38.42"
+        )
+        self.librenms_server.vc_inventory_callable(42, [], {})
+
+        response = post_view(
+            self._make_view(), self._request(action, host, f"{host.name}-user", force="on"), device_id=42
+        )
+
+        assert response.headers.get("HX-Reswap") == "none"
+        assert Device.objects.get(pk=host.pk).serial == "HOST-SN-MIRROR"
+
+    @pytest.mark.parametrize("action", ["link", "update", "sync_name"])
+    def test_a_serial_match_with_an_oob_signal_copies_nothing(self, action):
+        """The row matches the host by serial and reports an OOB controller OS: it is the controller."""
+        from dcim.models import Device
+
+        tag = f"branches-serial-oob-signal-{action}".replace("_", "-")
+        host = make_device(tag, serial="SHARED-SN-OOB-SIGNAL", librenms_cf={self.server_key: {"id": 7}})
+        self.librenms_server.device_info_response(
+            device_id=42, hostname=f"{tag}-idrac", hardware="iDRAC9", os="idrac", serial=host.serial, ip=""
+        )
+        self.librenms_server.vc_inventory_callable(42, [], {})
+        before = Device.objects.values("name", "serial", "device_type_id", "platform_id").get(pk=host.pk)
+
+        response = post_view(
+            self._make_view(), self._request(action, host, f"{host.name}-user", force="on"), device_id=42
+        )
+
+        assert response.headers.get("HX-Reswap") == "none"
+        assert Device.objects.values("name", "serial", "device_type_id", "platform_id").get(pk=host.pk) == before
+        assert stored_mapping_for_test(Device.objects.get(pk=host.pk)) == {self.server_key: {"id": 7}}
+
+    @pytest.mark.parametrize("action", ["update_serial", "sync_serial", "link", "sync_name"])
+    def test_a_controller_with_the_host_hostname_and_an_oob_os_copies_nothing(self, action):
+        """The controller reports the host's hostname, its own serial and an OOB OS; the host has no OOB IP."""
+        from dcim.models import Device
+
+        host = make_device(f"branches-oob-os-{action}".replace("_", "-"), serial="HOST-SN-OOB-OS")
+        self.librenms_server.device_info_response(
+            device_id=42, hostname=host.name, hardware="iDRAC9", os="idrac", serial="CTRL-SN-OOB-OS", ip=""
+        )
+        self.librenms_server.vc_inventory_callable(42, [], {})
+        before = Device.objects.values("name", "serial", "device_type_id", "platform_id").get(pk=host.pk)
+
+        response = post_view(
+            self._make_view(), self._request(action, host, f"{host.name}-user", force="on"), device_id=42
+        )
+
+        assert response.headers.get("HX-Reswap") == "none"
+        assert Device.objects.values("name", "serial", "device_type_id", "platform_id").get(pk=host.pk) == before
+        assert not stored_mapping_for_test(Device.objects.get(pk=host.pk))
+
+    def test_an_oob_id_match_with_a_broken_chassis_serial_rule_refuses_to_rename_the_member(self):
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.models import LibreNMSSettings
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
+        from netbox_librenms_plugin.tests.test_coverage_device_operations import _member_of_a_broken_rule_vendor
+
+        LibreNMSSettings.objects.update_or_create(pk=1, defaults={"vc_member_name_pattern": "-{serial}"})
+        other = make_device("branches-rule-error-master")
+        member = make_device("branches-rule-error-member", serial="MEMBER-SN-5440")
+        make_virtual_chassis("branches-rule-error-chassis", other, member)
+        # The chassis master decides the serial rules of its members.
+        _member_of_a_broken_rule_vendor(other, "action-oob-id")
+        self._register_device(5440, "branches-rule-error-ctrl", serial="REAL-5440")
+        unmatched_response = post_view(
+            self._make_view(), self._request("sync_name", member, "rule-error-unmatched-user"), device_id=5440
+        )
+        seed_mapping(member, self.server_key, oob=5440, oob_type="idrac")
+
+        response = post_view(self._make_view(), self._request("sync_name", member, "rule-error-user"), device_id=5440)
+        platform_response = post_view(
+            self._make_view(), self._request("sync_platform", member, "rule-error-platform-user"), device_id=5440
+        )
+
+        assert response.headers.get("HX-Reswap") == "none"
+        assert response.content == platform_response.content
+        assert unmatched_response.headers.get("HX-Reswap") == "none"
+        assert response.content != unmatched_response.content
+        assert Device.objects.get(pk=member.pk).name == "branches-rule-error-member"
+
+    def test_a_merge_row_at_the_host_oob_ip_copies_nothing(self):
+        """The row matches the host by hostname and a linked Device by serial, and answers at the host's OOB IP."""
+        from dcim.models import Device, Platform
+
+        from netbox_librenms_plugin.views.imports.actions import _OOB_ROW_REFUSED
+
+        host = make_device("branches-merge-oob-host")
+        host.oob_ip = make_ip("198.18.22.46/32", assigned_object=make_interface(host, "mgmt"))
+        host.save()
+        make_device("branches-merge-oob-peer", serial="BRANCHES-MERGE-SN", librenms_cf={self.server_key: {"id": 9146}})
+        Platform.objects.create(name="branches-merge-os", slug="branches-merge-os")
+        self.librenms_server.device_info_response(
+            device_id=46,
+            hostname=host.name,
+            hardware="Branches unmatched chassis",
+            os="branches-merge-os",
+            serial="BRANCHES-MERGE-SN",
+            ip="198.18.22.46",
+        )
+        self.librenms_server.vc_inventory_callable(46, [], {})
+
+        response = post_view(self._make_view(), self._request("sync_platform", host, "merge-oob-user"), device_id=46)
+
+        assert _OOB_ROW_REFUSED in response.content.decode()
+        assert Device.objects.get(pk=host.pk).platform_id is None
+
+    def test_an_ip_match_with_an_oob_os_copies_nothing_onto_a_host_with_a_primary_ip(self):
+        """The row's address is on a second host interface; the host has its own primary IP and no OOB IP."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.conftest import ip_on
+        from netbox_librenms_plugin.views.imports.actions import _OOB_ROW_REFUSED
+
+        host = make_device("branches-ip-oob-os-host")
+        primary = ip_on(host, "198.18.26.1/24", "eth0")
+        Device.objects.filter(pk=host.pk).update(primary_ip4=primary)
+        ip_on(host, "198.18.26.52/24", "idrac0")
+        self.librenms_server.device_info_response(
+            device_id=52, hostname="branches-ip-oob-os-bmc", hardware="iDRAC9", os="idrac", serial="", ip="198.18.26.52"
+        )
+        self.librenms_server.vc_inventory_callable(52, [], {})
+
+        response = post_view(self._make_view(), self._request("sync_name", host, "ip-oob-os-user"), device_id=52)
+
+        assert _OOB_ROW_REFUSED in response.content.decode()
+        assert Device.objects.get(pk=host.pk).name == "branches-ip-oob-os-host"
+
+    def test_a_controller_name_that_is_not_the_preferred_name_does_not_rename_the_host(self):
+        """The hostname names a controller and sysName names the row; the serial is the host's."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.views.imports.actions import _OOB_ROW_REFUSED
+
+        host = make_device("branches-name-role-old", serial="BRANCHES-A162-SN")
+        row = {
+            "device_id": 62,
+            "hostname": "branches-name-role-idrac",
+            "sysName": "branches-name-role-new",
+            "hardware": "Branches unmatched chassis",
+            "os": "linux",
+            "serial": "BRANCHES-A162-SN",
+            "ip": "",
+        }
+        self.librenms_server.register("/api/v0/devices/62", {"status": "ok", "devices": [row]})
+        self.librenms_server.vc_inventory_callable(62, [], {})
+
+        response = post_view(self._make_view(), self._request("sync_name", host, "name-role-user"), device_id=62)
+
+        assert _OOB_ROW_REFUSED in response.content.decode()
+        assert Device.objects.get(pk=host.pk).name == "branches-name-role-old"
+
+    def test_an_ip_match_with_a_controller_name_does_not_rename_the_host(self):
+        """The row's name names iDRAC and its address is on a second host interface; the OS is generic."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.conftest import ip_on
+        from netbox_librenms_plugin.views.imports.actions import _OOB_ROW_REFUSED
+
+        host = make_device("branches-ip-name-host")
+        Device.objects.filter(pk=host.pk).update(primary_ip4=ip_on(host, "198.18.29.1/24", "eth0"))
+        ip_on(host, "198.18.29.69/24", "eth1")
+        self.librenms_server.device_info_response(
+            device_id=69,
+            hostname="branches-ip-name-host-idrac",
+            hardware="Branches unmatched chassis",
+            os="linux",
+            serial="",
+            ip="198.18.29.69",
+        )
+        self.librenms_server.vc_inventory_callable(69, [], {})
+
+        response = post_view(self._make_view(), self._request("sync_name", host, "ip-name-user"), device_id=69)
+
+        assert _OOB_ROW_REFUSED in response.content.decode()
+        assert Device.objects.get(pk=host.pk).name == "branches-ip-name-host"
+
+    def test_another_fqdn_with_the_same_short_name_does_not_rename_the_host(self):
+        """The host and its controller share a short name; the controller's FQDN names iDRAC."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.views.imports.actions import _OOB_ROW_REFUSED
+
+        host = make_device("node02.prod.example.test", serial="BRANCHES-A178-SN")
+        self.librenms_server.device_info_response(
+            device_id=78,
+            hostname="node02.idrac.example.test",
+            hardware="Branches unmatched chassis",
+            os="linux",
+            serial="BRANCHES-A178-SN",
+            ip="",
+        )
+        self.librenms_server.vc_inventory_callable(78, [], {})
+
+        response = post_view(self._make_view(), self._request("sync_name", host, "fqdn-short-user"), device_id=78)
+
+        assert _OOB_ROW_REFUSED in response.content.decode()
+        assert Device.objects.get(pk=host.pk).name == "node02.prod.example.test"
+
+    def test_a_serial_match_at_the_oob_ip_of_the_chassis_owner_does_not_rename_the_member(self):
+        """The row matches a member by serial; its address is the OOB IP of the chassis owner."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
+        from netbox_librenms_plugin.views.imports.actions import _OOB_ROW_REFUSED
+
+        owner = make_device("branches-owner-ip-master")
+        member = make_device("branches-owner-ip-member", serial="BRANCHES-A184-SN")
+        make_virtual_chassis("branches-owner-ip-chassis", owner, member)
+        seed_mapping(owner, self.server_key, own=7185)
+        owner.oob_ip = make_ip("198.18.31.84/32", assigned_object=make_interface(owner, "idrac0"))
+        owner.save()
+        self.librenms_server.device_info_response(
+            device_id=84,
+            hostname="branches-owner-ip-row",
+            hardware="Branches unmatched chassis",
+            os="linux",
+            serial="BRANCHES-A184-SN",
+            ip="198.18.31.84",
+        )
+        self.librenms_server.vc_inventory_callable(84, [], {})
+
+        response = post_view(self._make_view(), self._request("sync_name", member, "owner-ip-user"), device_id=84)
+
+        assert _OOB_ROW_REFUSED in response.content.decode()
+        assert Device.objects.get(pk=member.pk).name == "branches-owner-ip-member"
+
+    def test_an_unverified_hostname_match_is_not_linked(self):
+        """Two Devices share the name; a broken serial rule stops validation before its duplicate check."""
+        from dcim.models import Device, Site
+
+        from netbox_librenms_plugin.tests.test_coverage_device_operations import _member_of_a_broken_rule_vendor
+        from netbox_librenms_plugin.views.imports.actions import _UNVERIFIED_MATCH_REFUSED
+
+        first = make_device("branches-unverified-node", serial="FIRST-A206")
+        other_site = Site.objects.create(name="branches-unverified-site", slug="branches-unverified-site")
+        Device.objects.create(
+            name=first.name, device_type=first.device_type, role=first.role, site=other_site, status="active"
+        )
+        for device in Device.objects.filter(name=first.name):
+            _member_of_a_broken_rule_vendor(device, f"branches-unverified-{device.pk}")
+        self._register_device(66, first.name, serial="REAL-A206")
+
+        response = post_view(self._make_view(), self._request("link", first, "unverified-user"), device_id=66)
+
+        assert _UNVERIFIED_MATCH_REFUSED in response.content.decode()
+        assert not any(stored_mapping_for_test(device) for device in Device.objects.filter(name=first.name))
 
     def test_a_live_serial_with_a_second_holder_links_no_device(self):
         """Only the target's maker strips "TAG-": the live "TAG-ABC" names the target and a Device that stores it."""
@@ -5778,6 +6606,46 @@ class TestCreatePlatformAssignmentIndependence:
         cached = cache.get(get_import_device_cache_key(42, self.server_key))
         assert (absent, cached is None) == (status == 404, status == 404)
 
+    def test_an_oob_match_gets_no_platform_from_the_controller_row(self):
+        """The row's OS is the OOB controller's, so Create Platform assigns nothing to the host."""
+        host = make_device(
+            "platform-oob-host", librenms_cf={self.server_key: {"id": 7, "oob": {"id": 42, "type": "idrac9"}}}
+        )
+        self.librenms_server.device_info_response(
+            device_id=42, hostname="platform-oob-host-idrac", os="test-os", serial="CTRL-SN-PLATFORM", ip=""
+        )
+        self.librenms_server.vc_inventory_callable(42, [], {})
+
+        self._post(host, "Controller OS", host.device_type.manufacturer_id)
+
+        host.refresh_from_db()
+        assert host.platform is None
+
+    def test_an_unverified_hostname_match_gets_no_platform(self):
+        """Two Devices share the name; a broken serial rule stops validation before its duplicate check."""
+        from dcim.models import Device, Site
+
+        from netbox_librenms_plugin.tests.test_coverage_device_operations import _member_of_a_broken_rule_vendor
+
+        first = make_device("platform-unverified-node", serial="FIRST-PLATFORM")
+        other_site = Site.objects.create(name="platform-unverified-site", slug="platform-unverified-site")
+        Device.objects.create(
+            name=first.name, device_type=first.device_type, role=first.role, site=other_site, status="active"
+        )
+        for device in Device.objects.filter(name=first.name):
+            _member_of_a_broken_rule_vendor(device, f"platform-unverified-{device.pk}")
+        self.librenms_server.device_info_response(
+            device_id=42, hostname=first.name, os="test-os", serial="REAL-PLATFORM", ip=""
+        )
+        self.librenms_server.vc_inventory_callable(42, [], {})
+
+        first.refresh_from_db()
+
+        # The platform has the manufacturer of the device's type, so only the unverified match can refuse it.
+        self._post(first, "Unverified OS", first.device_type.manufacturer_id)
+
+        assert not Device.objects.filter(name=first.name, platform__isnull=False).exists()
+
     def test_a_live_row_that_names_another_device_gets_no_platform_on_the_cached_target(self):
         """The cached hostname selected one Device; the live row for the same LibreNMS ID now names another."""
         from netbox_librenms_plugin.import_utils.device_operations import fetch_device_with_cache
@@ -6373,6 +7241,98 @@ class TestAddAsOOBViewPost:
         assert response.status_code == 200
         assert b"legacy" in response.content.lower()
         assert response["HX-Reswap"] == "none"
+
+    def test_a_controller_at_the_oob_ip_with_the_host_hostname_can_be_added_as_oob(self):
+        """The controller reports its host's hostname and answers at its OOB IP; the host has no OOB link yet."""
+        from dcim.models import Device
+
+        view = self._make_view()
+        host = make_device("oob-mirror-host", serial="HOST-SN-MIRROR-ADD", librenms_cf={self.server_key: {"id": 10}})
+        host.oob_ip = make_ip("198.18.40.17/32")
+        host.save()
+        self._register_oob_device(17, host.name, serial="CTRL-SN-MIRROR-ADD", ip="198.18.40.17")
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "existing_device_id": str(host.pk)},
+            user=self._device_writer("oob-mirror-host-user"),
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = post_view(view, request, device_id=17)
+
+        assert response.status_code == 200
+        assert "validationRefresh" in response.get("HX-Trigger", ""), response.content.decode()[:1500]
+        assert stored_mapping_for_test(Device.objects.get(pk=host.pk))[self.server_key]["oob"]["id"] == 17
+
+    def test_a_controller_with_the_host_hostname_and_an_oob_os_can_be_added_as_oob(self):
+        """The controller matched by the host's hostname and reports an OOB OS: Add as OOB attaches it."""
+        from dcim.models import Device
+
+        view = self._make_view()
+        host = make_device("oob-os-host", serial="HOST-SN-OOB-OS-ADD", librenms_cf={self.server_key: {"id": 10}})
+        self._register_oob_device(17, host.name, serial="CTRL-SN-OOB-OS-ADD")
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "existing_device_id": str(host.pk)},
+            user=self._device_writer("oob-os-host-user"),
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = post_view(view, request, device_id=17)
+
+        assert response.status_code == 200
+        assert "validationRefresh" in response.get("HX-Trigger", ""), response.content.decode()[:600]
+        assert stored_mapping_for_test(Device.objects.get(pk=host.pk))[self.server_key]["oob"]["id"] == 17
+
+    def test_a_row_at_the_oob_ip_of_the_chassis_owner_is_attached_to_the_owner(self):
+        """The row matches a member by serial; its address is the OOB IP of the chassis owner."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
+
+        view = self._make_view()
+        owner = make_device("attach-owner-ip-master")
+        member = make_device("attach-owner-ip-member", serial="ADD-A184-SN")
+        make_virtual_chassis("attach-owner-ip-chassis", owner, member)
+        seed_mapping(owner, self.server_key, own=10)
+        owner.oob_ip = make_ip("198.18.32.84/32", assigned_object=make_interface(owner, "idrac0"))
+        owner.save()
+        self._register_oob_device(84, "attach-owner-ip-row", serial="ADD-A184-SN", ip="198.18.32.84", generic=True)
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "existing_device_id": str(member.pk)},
+            user=self._device_writer("attach-owner-ip-user"),
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = post_view(view, request, device_id=84)
+
+        assert "validationRefresh" in response.get("HX-Trigger", ""), response.content.decode()[:600]
+        assert read_mapping(Device.objects.get(pk=owner.pk)).oob_id(self.server_key) == 84
+
+    def test_an_attach_with_the_posted_naming_rules_matches_by_the_stripped_name(self):
+        """The saved default keeps the domain; the request carries the dialog's rules, which strip it."""
+        from dcim.models import Device
+
+        view = self._make_view()
+        host = make_device("attach-naming-node", librenms_cf={self.server_key: {"id": 10}})
+        self._register_oob_device(93, "attach-naming-node.example.test", serial="")
+        request = make_view_request(
+            "post",
+            {
+                "server_key": self.server_key,
+                "existing_device_id": str(host.pk),
+                "use_sysname": "true",
+                "strip_domain": "true",
+            },
+            user=self._device_writer("attach-naming-user"),
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = post_view(view, request, device_id=93)
+
+        assert "validationRefresh" in response.get("HX-Trigger", ""), response.content.decode()[:600]
+        assert read_mapping(Device.objects.get(pk=host.pk)).oob_id(self.server_key) == 93
 
     def test_libre_device_not_found_returns_htmx_error(self):
         """When get_validated_device_with_selections returns no libre_device, returns HTMX error."""
@@ -9478,10 +10438,24 @@ class TestConflictActionsObjectScope:
 
         response = self._post_add_as_oob(user, selected)
 
-        assert b"Existing device not found" in response.content
+        # The validation withholds an offer whose OOB target the user cannot see, before the write checks run.
+        assert b"No OOB candidate found" in response.content
         sync_entry = stored_mapping_for_test(Device.objects.get(pk=sync.pk))["default"]
         assert sync_entry == {"id": 30}  # no OOB half written onto the unauthorized sibling
         assert stored_mapping_for_test(Device.objects.get(pk=selected.pk)) is None
+
+    def test_add_as_oob_cannot_write_a_visible_vc_sync_device_without_change(self):
+        """The user may see the sync sibling but not change it, so the attach is refused before any write."""
+        from dcim.models import Device
+
+        sync, selected = self._vc_pair("scope-oob-vc-view", sync_cf={"default": {"id": 30}})
+        user = self._scoped_writer(selected, "scoped-oob-vc-viewer")
+        user = grant_view_permission(user, "view", Device, constraints={"pk": sync.pk})
+
+        response = self._post_add_as_oob(user, selected)
+
+        assert b"Existing device not found" in response.content
+        assert stored_mapping_for_test(Device.objects.get(pk=sync.pk))["default"] == {"id": 30}
 
     def test_add_as_oob_writes_the_vc_sync_device_when_it_is_in_scope(self):
         """Widening the grant to the sync sibling lets the same attach through (no over-block)."""
