@@ -540,10 +540,15 @@ def _resolve(queryset, values, *, rules, row_context, lock, spare=0, writer=None
     that *writer* gives its text, equals the key that *writer* gives a value: after the write, the
     two rows would have one identity, or a lookup of the row's text would find the target.
     """
-    values = list(dict.fromkeys(_text(value) for value in values))
+    serial_texts = {}
+    for value in values:
+        text = _text(value)
+        # A text key can name hardware only if an admitted value supplied it.
+        serial_texts[text] = is_serial_value(value) or serial_texts.get(text, False)
+    values = [text for text, admitted in serial_texts.items() if admitted]
     probes = _probe_keys(values, rules)
     by_own_key = _writer_keys(values, probes, writer)
-    results = {value: _ABSENT for value, keys in probes.items() if not keys}
+    results = {text: _ABSENT for text in serial_texts if not probes.get(text)}
     open_values = [value for value in values if probes[value]]
     if not open_values:
         return results
@@ -618,7 +623,6 @@ def resolve_devices(serials: Iterable, *, rules: SerialRules | None = None, excl
 
 def resolve_device(serial, *, rules: SerialRules | None = None, exclude_pks=(), lock=False) -> Resolution:
     """Return the Resolution of one incoming serial among Devices; see :func:`resolve_devices`."""
-    # A list or an object is no dict key of the lookup; it has no identity either.
     if not is_serial_value(serial):
         return _ABSENT
     return resolve_devices([serial], rules=rules, exclude_pks=exclude_pks, lock=lock)[_text(serial)]
