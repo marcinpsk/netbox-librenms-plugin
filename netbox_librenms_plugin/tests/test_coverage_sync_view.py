@@ -1070,7 +1070,7 @@ class TestVirtualChassisInventory:
         assert (b"data-vc-serial-unavailable" in response.content) is (not read_error)
 
     def test_the_dialog_offers_no_row_for_a_serial_that_is_not_text_or_a_number(self, librenms_server):
-        """The dialog posts text, so a JSON `true` would reach Sync All as the serial "True"."""
+        """The dialog drops a JSON boolean and still offers the other member's valid serial."""
         _vc, members = make_virtual_chassis_members("inventory-boolean", count=2)
         inventory = _stack_inventory({"entPhysicalSerialNum": True}, {"entPhysicalSerialNum": "VC-REAL-SERIAL"})
         _register_device(librenms_server, 6649, members[0].name, inventory=inventory)
