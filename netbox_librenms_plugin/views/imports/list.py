@@ -132,6 +132,7 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
 
         from netbox_librenms_plugin.import_utils import get_import_device_cache_key
         from netbox_librenms_plugin.import_utils.bulk_import import validate_search_row
+        from netbox_librenms_plugin.import_utils.device_operations import preload_import_objects
         from netbox_librenms_plugin.import_utils.virtual_chassis import load_numbering_rules
         from netbox_librenms_plugin.serial_identity import SerialRules
         from netbox_librenms_plugin.utils import row_identity_matches
@@ -168,15 +169,24 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
             logger.warning(f"Job {job_id} missing device_ids")
             return []
 
-        # The job cached the raw LibreNMS rows; each row is validated again as a search validates it.
-        validated_devices = []
-        serial_rules = SerialRules.load()
-        numbering_rules = load_numbering_rules()
+        libre_devices = []
         for device_id in device_ids:
             device = cache.get(get_import_device_cache_key(device_id, server_key))
             if not row_identity_matches(device, device_id):
                 logger.warning(f"Device {device_id} from job {job_id} not in cache (may have expired)")
                 continue
+            libre_devices.append(device)
+
+        if not libre_devices:
+            logger.error(f"Job {job_id} cache expired. Processed {len(device_ids)} devices but none in cache.")
+            return []
+
+        self._job_rows_read = True
+        serial_rules = SerialRules.load()
+        numbering_rules = load_numbering_rules()
+        known_objects = preload_import_objects(libre_devices, server_key, serial_rules=serial_rules)
+        validated_devices = []
+        for device in libre_devices:
             validation = validate_search_row(
                 self._librenms_api,
                 device,
@@ -185,20 +195,15 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
                 strip_domain=strip_domain,
                 serial_rules=serial_rules,
                 numbering_rules=numbering_rules,
+                known_objects=known_objects,
             )
-            self._job_rows_read = True
             if exclude_existing and validation["existing_device"]:
                 continue
             device["_validation"] = validation
             validated_devices.append(device)
 
-        if not self._job_rows_read:
-            logger.error(f"Job {job_id} cache expired. Processed {len(device_ids)} devices but none in cache.")
-        else:
-            # Mirror the job's naming settings so toggle state matches the cached results
-            self._use_sysname = use_sysname
-            self._strip_domain = strip_domain
-
+        self._use_sysname = use_sysname
+        self._strip_domain = strip_domain
         return validated_devices
 
     def get(self, request, *args, **kwargs):  # noqa: C901

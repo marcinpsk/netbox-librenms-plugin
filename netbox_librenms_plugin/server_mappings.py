@@ -21,6 +21,8 @@ from enum import StrEnum
 
 from django.db import DEFAULT_DB_ALIAS, connections, transaction
 from django.db.models import JSONField, Q
+from django.db.models.fields.json import KeyTextTransform
+from django.db.models.lookups import Regex
 
 from netbox_librenms_plugin.constants import OOB_TYPE_PATTERN, OOB_TYPES, normalize_oob_type
 from netbox_librenms_plugin.librenms_ids import (
@@ -70,6 +72,10 @@ class PreferenceStatus(StrEnum):
     ABSENT = "absent"
     MALFORMED = "malformed"
     NAMED = "named"
+
+
+class MalformedCustomFieldData(ValueError):
+    """The record's custom fields are stored as a value other than a JSON object."""
 
 
 class AmbiguousLibreNMSIdError(LookupError):
@@ -324,10 +330,30 @@ def read_mapping(obj) -> MappingState:
 
     Raises:
         TypeError: If *obj* is not a Device, VirtualMachine, Interface or VMInterface.
+        MalformedCustomFieldData: If the record's custom fields are not a JSON object.
 
     """
-    _space_of(type(obj))
-    return _decode_stored_mapping(obj.custom_field_data.get(_MAPPING_KEY))
+    return _decode_stored_mapping(_stored_value(obj))
+
+
+def prefetch_mappings(objects: Iterable) -> list:
+    """
+    Load the mappings of *objects* for later :func:`read_mapping` calls, and return the objects as a list.
+
+    A producer that reads the mapping of each object in a collection calls this once, before its
+    first read, and then reads the returned instances. A read on another instance of the same row
+    is not prefetched, so a producer must not evaluate a queryset again. The list keeps the order
+    of *objects*, and the objects keep their database alias. An unsaved object is accepted. The
+    custom-field storage loads with the object, so this storage runs no query.
+
+    Raises:
+        TypeError: If an object is not a Device, VirtualMachine, Interface or VMInterface.
+
+    """
+    objects = list(objects)
+    for obj in objects:
+        _space_of(type(obj))
+    return objects
 
 
 def read_mappings(queryset, *, fields: Iterable[str]) -> tuple[MappedRecord, ...]:
@@ -368,16 +394,18 @@ def _identity_predicates(server_key, values) -> tuple[Q, Q]:
     if not normalized_values:
         return match_none, match_none
 
-    storage = f"{_STORAGE_FIELD}__{_MAPPING_KEY}"
+    storage = KeyTextTransform(_MAPPING_KEY, _STORAGE_FIELD)
+    # A server key can end in an underscore. Pass it as a single JSON path component.
+    scoped = KeyTextTransform(server_key, storage)
     # Text regex only: jsonb equality would also find a float 42.0 that the decoder rejects.
     # One alternation per JSON path: N values must not cost N predicates per path.
     numeric_pattern = librenms_id_text_pattern(*normalized_values)
     own_q = (
-        Q(**{f"{storage}__{server_key}__regex": numeric_pattern})
-        | Q(**{f"{storage}__{server_key}__id__regex": numeric_pattern})
-        | Q(**{f"{storage}__regex": numeric_pattern})
+        Q(Regex(scoped, numeric_pattern))
+        | Q(Regex(KeyTextTransform("id", scoped), numeric_pattern))
+        | Q(Regex(storage, numeric_pattern))
     )
-    oob_q = Q(**{f"{storage}__{server_key}__oob__id__regex": numeric_pattern})
+    oob_q = Q(Regex(KeyTextTransform("id", KeyTextTransform("oob", scoped)), numeric_pattern))
     return own_q, oob_q
 
 
@@ -452,6 +480,13 @@ def find_mapping(queryset, *, server: str, identity, roles: Iterable[MappingRole
 
     own_matches = list(queryset.filter(own_q)[:2]) if MappingRole.OWN in roles else []
     oob_matches = list(queryset.filter(oob_q)[:2]) if MappingRole.OOB in roles else []
+    return resolve_mapping_matches(
+        model, server=server, identity=identity, own_matches=own_matches, oob_matches=oob_matches
+    )
+
+
+def resolve_mapping_matches(model, *, server: str, identity, own_matches, oob_matches):
+    """Return the sole holder of an identity or report which records conflict."""
     if len(own_matches) > 1:
         _raise_ambiguous(model.__name__, identity, server, "host", own_matches)
     if len(oob_matches) > 1:
@@ -584,8 +619,8 @@ def mapped_device_servers(subject, *, active_server: str | None = None) -> tuple
     members = [subject]
     virtual_chassis = getattr(subject, "virtual_chassis", None)
     if virtual_chassis is not None:
-        members = list(virtual_chassis.members.all())
-    mappings = [read_mapping(member) for member in members]
+        members = virtual_chassis.members.all()
+    mappings = [read_mapping(member) for member in prefetch_mappings(members)]
 
     server_keys = {
         entry.server
@@ -727,7 +762,10 @@ class MergeChange:
 
 def _stored_value(obj):
     _space_of(type(obj))
-    return obj.custom_field_data.get(_MAPPING_KEY)
+    custom_fields = obj.custom_field_data
+    if not isinstance(custom_fields, dict):
+        raise MalformedCustomFieldData("The NetBox record's custom fields must be a JSON object.")
+    return custom_fields.get(_MAPPING_KEY)
 
 
 def _same_stored(first, second) -> bool:
