@@ -959,8 +959,8 @@ def test_the_import_preload_skips_a_placeholder_serial():
 
     loaded = preload_import_objects(rows, SERVER_KEY)
 
-    assert (type(real), real.pk) in loaded
-    assert (type(placeholder), placeholder.pk) not in loaded
+    assert (type(real), real.pk) in loaded.by_pk
+    assert (type(placeholder), placeholder.pk) not in loaded.by_pk
 
 
 @pytest.mark.django_db
@@ -978,8 +978,8 @@ def test_the_import_preload_loads_the_devices_that_the_serial_rules_match():
         [_import_row(7260, "imp-ruled-row", serial="IMP-RULED-SN")], SERVER_KEY, serial_rules=SerialRules.load()
     )
 
-    assert (type(ruled), ruled.pk) in loaded
-    assert (type(other), other.pk) not in loaded
+    assert (type(ruled), ruled.pk) in loaded.by_pk
+    assert (type(other), other.pk) not in loaded.by_pk
 
 
 @pytest.mark.django_db
@@ -998,7 +998,7 @@ def test_the_import_preload_leaves_the_serial_matches_out_under_a_broken_serial_
         [_import_row(7270, named.name, serial="IMP-BROKEN-SN")], SERVER_KEY, serial_rules=SerialRules.load()
     )
 
-    assert (type(named), named.pk) in loaded
+    assert (type(named), named.pk) in loaded.by_pk
 
 
 @pytest.mark.django_db
@@ -1018,7 +1018,7 @@ def test_the_import_preload_leaves_a_malformed_serial_to_the_row_validation(seri
         [_import_row(7280, named.name, serial=serial)], SERVER_KEY, serial_rules=SerialRules.load()
     )
 
-    assert (type(named), named.pk) in loaded
+    assert (type(named), named.pk) in loaded.by_pk
 
 
 @pytest.mark.django_db
@@ -1051,7 +1051,7 @@ def test_preloaded_serial_matches_keep_the_related_device_types():
 
     device = make_device("imp-related-type", serial="PRELOAD-TYPE-SERIAL")
     loaded = preload_import_objects([_import_row(7282, "imp-different-name", serial=device.serial)], SERVER_KEY)
-    match = loaded[(type(device), device.pk)]
+    match = loaded.by_pk[(type(device), device.pk)]
 
     with CaptureQueriesContext(connection) as queries:
         assert match.device_type == device.device_type
