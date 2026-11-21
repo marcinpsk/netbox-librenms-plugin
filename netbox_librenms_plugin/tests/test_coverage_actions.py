@@ -2271,7 +2271,7 @@ class TestDeviceValidationDetailsView:
 
         assert response.status_code == 200
         member.refresh_from_db()
-        assert stored_mapping_for_test(member) == {"default": 1}
+        assert mapping_summary(member) == {"default": {"own": 1}}
         assert member.serial == "MEMBER-OLD"
         assert member.name == "SW01"
 
@@ -4631,17 +4631,17 @@ class TestDeviceConflictActionBranches:
         if outcome == "absent":
             assert response.headers.get("HX-Reswap") == "none"
             assert response.headers.get("HX-Trigger") != "closeModal"
-            assert (target.serial, target.device_type_id, stored_mapping_for_test(target)) == (
+            assert (target.serial, target.device_type_id, mapping_summary(target)) == (
                 old_serial,
                 old_type_id,
-                None,
+                {},
             )
         else:
             assert response.headers.get("HX-Trigger") == "closeModal"
-            assert (target.serial, target.device_type_id, stored_mapping_for_test(target)) == (
+            assert (target.serial, target.device_type_id, mapping_summary(target)) == (
                 serial,
                 reported_type.pk,
-                {self.server_key: 42},
+                {self.server_key: {"own": 42}},
             )
 
     @pytest.mark.parametrize("change", ["hidden-duplicate", "target-serial-changed"])
@@ -5254,12 +5254,12 @@ class TestDeviceConflictActionBranches:
         if refused:
             assert response.headers.get("HX-Reswap") == "none"
             assert master.device_type_id == old_type_id
-            assert stored_mapping_for_test(master) is None
+            assert mapping_summary(master) == {}
         else:
             self._assert_success(response)
             assert master.device_type_id == new_type.pk
-            assert stored_mapping_for_test(master) == {self.server_key: 42}
-        assert stored_mapping_for_test(sibling) is None
+            assert mapping_summary(master) == {self.server_key: {"own": 42}}
+        assert mapping_summary(sibling) == {}
         assert (master.serial, sibling.serial) == ("XABC123", "YABC123")
 
     @pytest.mark.parametrize("shape", ["chassis-members", "device-modules"])
@@ -5349,11 +5349,11 @@ class TestDeviceConflictActionBranches:
         if linked:
             self._assert_success(response)
             assert reloaded.device_type_id == reported_type.pk
-            assert stored_mapping_for_test(reloaded) == {self.server_key: 42}
+            assert mapping_summary(reloaded) == {self.server_key: {"own": 42}}
         else:
             assert response.headers.get("HX-Reswap") == "none"
             assert reloaded.device_type_id == target.device_type_id
-            assert stored_mapping_for_test(reloaded) is None
+            assert mapping_summary(reloaded) == {}
 
     def test_update_serial_reports_a_real_serial_conflict(self):
         from dcim.models import Device
@@ -5511,7 +5511,7 @@ class TestDeviceConflictActionBranches:
         target.refresh_from_db()
         sibling.refresh_from_db()
         assert (target.serial, sibling.serial) == ("MEMBER-OLD", "")
-        assert stored_mapping_for_test(target) is None
+        assert mapping_summary(target) == {}
         assert response.status_code == 200
         assert response.headers.get("HX-Reswap") == "none"
 
@@ -5570,7 +5570,7 @@ class TestDeviceConflictActionBranches:
         self._assert_htmx_error(response, "No valid serial from LibreNMS")
         reloaded = Device.objects.get(pk=target.pk)
         assert reloaded.serial == ""
-        assert stored_mapping_for_test(reloaded) is None
+        assert mapping_summary(reloaded) == {}
 
     def test_a_json_boolean_serial_finds_no_target_for_a_field_sync(self):
         """A device stores the text "True"; LibreNMS sends `serial: true` and no other key matches that device."""

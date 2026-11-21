@@ -571,7 +571,7 @@ def test_an_unavailable_member_serial_rolls_back_the_stack_until_the_master_link
 
     from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
     from netbox_librenms_plugin.models import NormalizationRule
-    from netbox_librenms_plugin.tests.mapping_fixtures import stored_mapping_for_test
+    from netbox_librenms_plugin.tests.mapping_fixtures import mapping_summary
     from netbox_librenms_plugin.tests.test_bulk_import_job_control import _chassis
     from netbox_librenms_plugin.tests.test_coverage_device_operations import _stray_chassis_member
 
@@ -606,7 +606,7 @@ def test_an_unavailable_member_serial_rolls_back_the_stack_until_the_master_link
     assert [entry["device_id"] for entry in retry["success"]] == [96313]
     assert retry["virtual_chassis_created"] == 1
     chassis = VirtualChassis.objects.get(domain="librenms-default-96313")
-    assert stored_mapping_for_test(chassis.master) == {"default": 96313}
+    assert mapping_summary(chassis.master) == {"default": {"own": 96313}}
     assert set(chassis.members.values_list("serial", flat=True)) == set(serials)
 
 
@@ -726,7 +726,7 @@ def test_a_confirmed_member_serial_conflict_skips_only_that_member(live_librenms
     from dcim.models import Device, VirtualChassis
 
     from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
-    from netbox_librenms_plugin.tests.mapping_fixtures import stored_mapping_for_test
+    from netbox_librenms_plugin.tests.mapping_fixtures import mapping_summary
     from netbox_librenms_plugin.tests.test_bulk_import_job_control import _chassis
 
     serials = ["TAKEN-STACK-AAA", "TAKEN-STACK-BBB", "TAKEN-STACK-CCC"]
@@ -747,7 +747,7 @@ def test_a_confirmed_member_serial_conflict_skips_only_that_member(live_librenms
     assert [entry["device_id"] for entry in result["success"]] == [device_id]
     assert result["virtual_chassis_created"] == 1
     chassis = VirtualChassis.objects.get(domain=f"librenms-default-{device_id}")
-    assert stored_mapping_for_test(chassis.master) == {"default": device_id}
+    assert mapping_summary(chassis.master) == {"default": {"own": device_id}}
     assert set(chassis.members.values_list("serial", flat=True)) == set(serials[:-1])
     assert set(Device.objects.filter(serial=serials[-1]).values_list("pk", flat=True)) == holders
     assert any(
