@@ -483,7 +483,7 @@ def test_cable_refresh_fails_closed_when_host_discovery_conflicts(
     assert response.status_code == 200
     assert "Cable refresh was incomplete. No cable rows were loaded. Refresh Cables to try again." in rendered_messages
     assert "Cable data refreshed successfully." not in rendered_messages
-    assert cache.get(sync_snapshot_key(target, TAB_SPECS[SyncTab.CABLES].data_type, server_key)) is None
+    assert cache.get(sync_snapshot_key(target, TAB_SPECS[SyncTab.CABLES].source.data_type, server_key)) is None
 
 
 @pytest.mark.django_db
@@ -495,7 +495,7 @@ def test_primary_ip_sync_reports_a_discovered_id_conflict_without_writes(client,
     make_interface(target, "Ethernet1", iface_type="1000base-t")
     row_id = "198.18.20.10/24"
     port_id = 7020
-    cache_key = sync_snapshot_key(target, TAB_SPECS[SyncTab.IP_ADDRESSES].data_type, server_key)
+    cache_key = sync_snapshot_key(target, TAB_SPECS[SyncTab.IP_ADDRESSES].source.data_type, server_key)
     cache.set(
         cache_key,
         {

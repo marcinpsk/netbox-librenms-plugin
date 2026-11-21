@@ -1,0 +1,16 @@
+<!-- ruleid: primary-ip-through-helper-template -->
+<td>{{ object.primary_ip.address.ip|default:'-' }}</td>
+<!-- ruleid: primary-ip-through-helper-template -->
+{% if validation.existing_device.primary_ip %}known{% endif %}
+<!-- ok: primary-ip-through-helper-template -->
+{% if object.primary_ip4 %}{{ object.primary_ip4.address }}{% endif %}
+<!-- ok: primary-ip-through-helper-template -->
+{{ object.primary_ip6|default_if_none:"" }}
+<!-- ok: primary-ip-through-helper-template -->
+{% if set_primary_ip or sync_device_has_primary_ip %}on{% endif %}
+<!-- ok: primary-ip-through-helper-template -->
+{% elif validation.existing_match_type == 'primary_ip' %}
+<!-- ok: primary-ip-through-helper-template -->
+{# The old read was object.primary_ip. #}
+<!-- ok: primary-ip-through-helper-template -->
+<p>The device.primary_ip property prefers IPv6.</p>

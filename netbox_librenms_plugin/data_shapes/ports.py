@@ -161,7 +161,9 @@ def name_matches_lag_pattern(name, compiled_lag_patterns):
 
 def port_is_lag(port, compiled_lag_patterns):
     """
-    Return whether *port* is a LAG aggregate, mirroring ``resolve_port_relationships._is_lag_aggregate``.
+    Return whether *port* is a LAG aggregate, mirroring the resolver's ``_is_lag_aggregate``.
+
+    The resolver is ``interface_relationships.resolve_port_relationships``.
 
     An ``ieee8023adLag`` ifType OR a name matching a configured per-OS LAG pattern. Reading ifType
     alone would classify a pattern-based LAG (e.g. Cisco "Po1", carried as propVirtual) as not-a-LAG.
