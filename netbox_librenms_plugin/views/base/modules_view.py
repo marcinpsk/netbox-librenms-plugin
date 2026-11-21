@@ -14,7 +14,7 @@ from netbox_librenms_plugin.constants import (
     OOB_INVENTORY_SOURCE,
     is_librenms_placeholder,
 )
-from netbox_librenms_plugin.import_utils.virtual_chassis import attribute_inventory
+from netbox_librenms_plugin.import_utils.virtual_chassis import VCNumberingError, attribute_inventory
 from netbox_librenms_plugin.inventory_policy import load_inventory_policy
 from netbox_librenms_plugin.inventory_tree import DANGLING_PARENT_KEY, REPORTED_PARENT_KEY, repair_dangling_parents
 from netbox_librenms_plugin.librenms_ids import (
@@ -854,11 +854,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
     def _attribute_to_members(obj, inventory_data, vc_members, policy):
         """Return ``{item key: (Device, source)}`` for the main inventory, with *obj* for an unowned row."""
         rows = [item for item in inventory_data if item.get("_source") != OOB_INVENTORY_SOURCE]
-        # Without members every row stays on the page, so the serial rules are not read.
+        # Without members every row stays on the page, so the serial and numbering rules are not read.
         owners = attribute_inventory(
             rows,
             vc_members,
             policy.chassis_serial_context() if vc_members else None,
+            policy.chassis_numbering_mode() if vc_members else None,
             member_context=policy.device_serial_context,
         )
         return {
@@ -1071,7 +1072,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 request, obj, inventory_data, server_key=server_key, sync_device=sync_device, policy=policy
             )
         )
-        refresh_incomplete = refresh_incomplete or context.get("table") is None
+        # A rule or numbering refusal comes after a complete read: the snapshot stays, and each render refuses again.
+        refused = bool(context.get("vc_numbering_error") or context.get("inventory_rule_error"))
+        refresh_incomplete = refresh_incomplete or (context.get("table") is None and not refused)
         if ports_error:
             logger.warning("Port metadata fetch failed for device %s: %s", self.librenms_id, ports_error)
             messages.warning(
@@ -1101,7 +1104,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 server_key,
                 actor_id=request_actor_id(request),
             ):
-                messages.success(request, "Inventory data refreshed successfully.")
+                if not refused:
+                    messages.success(request, "Inventory data refreshed successfully.")
             else:
                 messages.error(
                     request,
@@ -1298,6 +1302,16 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 "cache_expiry": None,
                 "server_key": self._active_server_key,
                 "inventory_rule_error": exc.shown_to(request.user),
+            }
+        except VCNumberingError as exc:
+            # A row whose member is unknown would land on the page device, so the tab shows no rows.
+            logger.warning("Module table for %s not built: %s", obj, exc)
+            return {
+                "table": None,
+                "object": obj,
+                "cache_expiry": None,
+                "server_key": self._active_server_key,
+                "vc_numbering_error": str(exc),
             }
 
     def _build_table_context(
