@@ -18,6 +18,7 @@ from django.core.exceptions import ValidationError
 from django.db import DatabaseError, IntegrityError, transaction
 from django.db.models import Q
 from django.utils.text import slugify
+from utilities.exceptions import PermissionsViolation
 
 from netbox_librenms_plugin.models import LibreNMSSettings, PlatformMapping
 from netbox_librenms_plugin.transactions import (
@@ -654,7 +655,7 @@ def apply_platform(model, pk, facts, *, tracking, actor, new_os_platform=None, s
         return stop.outcome
     except model.DoesNotExist:
         return PlatformOutcome(OutcomeStatus.BLOCKED, PlatformReason.SUBJECT_UNAVAILABLE)
-    except (ValidationError, IntegrityError) as exc:
+    except (ValidationError, IntegrityError, PermissionsViolation) as exc:
         # A lock conflict leaves the runner as TransactionConflict; the adapter describes this error.
         # nosemgrep: caught-error-text  # noqa: ERA001
         return _failed_outcome(exc, seen, model)
@@ -668,7 +669,8 @@ def _apply_once(seen, model, pk, facts, *, tracking, actor, new_os_platform, nam
 
     Raises:
         _Stop: An outcome other than APPLIED or UNCHANGED.
-        Model.DoesNotExist | ValidationError | IntegrityError: The subject is gone, or a write was refused.
+        Model.DoesNotExist | ValidationError | IntegrityError | PermissionsViolation: The subject is
+            gone, or a write was refused.
 
     """
     seen.clear()

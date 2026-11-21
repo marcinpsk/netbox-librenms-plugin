@@ -55,7 +55,7 @@ ALLOWED = [
     ),
     (
         "views/imports/actions.py",
-        "_save_device.write",
+        "_write_device_row.write",
         "row",
         NOT_A_LITERAL,
         "The callers pass Device and VirtualMachine columns, which have no _name, and the mapping "
@@ -70,7 +70,7 @@ ALLOWED = [
     ),
     (
         "views/sync/modules.py",
-        "_bind_interface_librenms_id.save",
+        "_bind_interface_librenms_id_in_savepoint.save",
         "row",
         NOT_A_LITERAL,
         "update_fields holds only module and the mapping storage; last_updated is added at the save.",

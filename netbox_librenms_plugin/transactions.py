@@ -15,7 +15,8 @@ that the read returned. It locks the row in ``pre_save``, at the point and in th
 
 ``update_existing_row`` writes one existing row under its row lock, and records the row's state
 before the write, so NetBox's change log has the before-state of the row. A mapping change that
-the row's ``apply`` returns is saved in the same save.
+the row's ``apply`` returns is saved in the same save. After the save it reads the row again
+through the caller's scope, as NetBox's edit views do.
 
 NetBox object permissions constrain the state of an object after a write. ``saved_in_scope`` reads
 a row that the transaction just wrote through the user's scope, so the caller can refuse the write
@@ -34,7 +35,7 @@ from django.db.models import UniqueConstraint
 from django.db.models.expressions import RawSQL
 from django.db.transaction import TransactionManagementError
 from netbox.context import events_queue
-from utilities.exceptions import AbortRequest
+from utilities.exceptions import AbortRequest, PermissionsViolation
 
 logger = logging.getLogger(__name__)
 
@@ -397,9 +398,10 @@ def update_existing_row(queryset, apply):
     NetBox's change log. Then ``apply(row)`` sets the new values; it can also check the locked row
     and raise to stop the write. When ``apply`` returns False, the row already holds the values,
     and it is not validated or saved. When it returns a mapping change that it built on the row,
-    ``persist_mapping`` puts the change on the row before the one validation and save. An
-    exception from ``apply``, the persistence, ``full_clean()`` or ``save()`` rolls the savepoint
-    back and propagates.
+    ``persist_mapping`` puts the change on the row before the one validation and save. After the
+    save, *queryset* must still find the row: a constrained grant decides on the saved row. An
+    exception from ``apply``, the persistence, ``full_clean()``, ``save()`` or the read-back rolls
+    the savepoint back with its NetBox events, and propagates.
 
     Args:
         queryset (QuerySet): The rows that the caller may change, filtered to one row.
@@ -412,6 +414,7 @@ def update_existing_row(queryset, apply):
     Raises:
         Model.DoesNotExist: *queryset* has no row.
         ValidationError: The changed row is not valid.
+        PermissionsViolation: The saved row is outside *queryset* (``outside_change_scope``).
 
     """
     with atomic_with_events():
@@ -420,11 +423,15 @@ def update_existing_row(queryset, apply):
         if result is False:
             return row
         if result is None:
-            return _validate_and_save(row)
-        # A local import: server_mappings imports this module for TransactionConflict.
-        from netbox_librenms_plugin.server_mappings import persist_mapping
+            _validate_and_save(row)
+        else:
+            # A local import: server_mappings imports this module for TransactionConflict.
+            from netbox_librenms_plugin.server_mappings import persist_mapping
 
-        return persist_mapping(row, result, write=_validate_and_save)
+            persist_mapping(row, result, write=_validate_and_save)
+        if not queryset.filter(pk=row.pk).exists():
+            raise outside_change_scope(row)
+        return row
 
 
 def saved_in_scope(obj, user, action):
@@ -445,6 +452,11 @@ def saved_in_scope(obj, user, action):
 
     """
     return type(obj).objects.restrict(user, action).filter(pk=obj.pk).exists()
+
+
+def outside_change_scope(row):
+    """Return the refusal of a write that moved *row* out of the user's change scope; its text names only the model."""
+    return PermissionsViolation(f"The changed {row._meta.verbose_name} is outside your change permission constraints.")
 
 
 def first_at_version(queryset):

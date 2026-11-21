@@ -17,7 +17,7 @@ from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.utils.html import escape
 from django.views import View
-from utilities.exceptions import AbortRequest
+from utilities.exceptions import AbortRequest, PermissionsViolation
 
 from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE
 from netbox_librenms_plugin.interface_diff import type_change_refusal
@@ -547,8 +547,8 @@ def _authorize_adoptable_module_components(module, component_querysets):
     return expected_ids
 
 
-def _save_module_with_expected_component_adoption(module, expected_ids):
-    """Save a module and verify that NetBox adopted only the expected components."""
+def _save_module_with_expected_component_adoption(module, expected_ids, component_querysets):
+    """Save a module and verify that NetBox adopted only the expected components, each still in its change scope."""
     from django.db.models.signals import post_save
 
     component_models = tuple(spec[2] for spec in _module_component_specs())
@@ -586,6 +586,10 @@ def _save_module_with_expected_component_adoption(module, expected_ids):
                 None,
             )
             raise _ModuleComponentAdoptionUnavailable(diverged)
+        # A constrained change grant decides on the adopted components as saved.
+        for component_model, ids in actual_ids.items():
+            if component_querysets[component_model].filter(pk__in=ids).count() != len(ids):
+                raise _ModuleComponentAdoptionUnavailable(component_model)
     return sum(len(ids) for ids in actual_ids.values())
 
 
@@ -593,7 +597,7 @@ def _save_module_with_scoped_component_adoption(module, component_querysets):
     """Authorize, lock, and save every component NetBox can adopt."""
     with atomic_with_events():
         expected_ids = _authorize_adoptable_module_components(module, component_querysets)
-        return _save_module_with_expected_component_adoption(module, expected_ids)
+        return _save_module_with_expected_component_adoption(module, expected_ids, component_querysets)
 
 
 def _adopt_existing_template_interfaces(device, module, interfaces):
@@ -613,12 +617,22 @@ def _adopt_existing_template_interfaces(device, module, interfaces):
         }
 
     adopted_names = []
-    with transaction.atomic():
-        for interface in adoptable:
-            interface.snapshot()
-            interface.module = module
-            interface.save(update_fields=["module", "last_updated"])
-            adopted_names.append(interface.name)
+    try:
+        with atomic_with_events():
+            for interface in adoptable:
+                interface.snapshot()
+                interface.module = module
+                interface.save(update_fields=["module", "last_updated"])
+                adopted_names.append(interface.name)
+            # A constrained change grant decides on the adopted interfaces as saved.
+            if interfaces.filter(pk__in=[interface.pk for interface in adoptable]).count() != len(adoptable):
+                raise PermissionsViolation
+    except PermissionsViolation:
+        return {
+            "status": "skipped",
+            "refused": True,
+            "reason": "the adopted interfaces are outside your change permission constraints",
+        }
 
     return {
         "status": "bound",
@@ -662,6 +676,29 @@ def _module_interface_update_message(bind_result, location):
         # this guard the fall-through renders "Updated interface None for ..." to the user.
         return f"No interface changes were needed for {location}."
     return f"Updated interface {interface_name} for {location}."
+
+
+def _adopt_name_conflict(conflict, interface, module, changeable_interfaces, result):
+    """Adopt the standalone *conflict* into *module* in place of the generated *interface*, and count the outcome."""
+    conflict.snapshot()
+    conflict.module = module
+    try:
+        with row_savepoint():
+            conflict.save(update_fields=["module", "last_updated"])
+            if not changeable_interfaces.filter(pk=conflict.pk).exists():
+                raise PermissionsViolation
+    except PermissionsViolation:
+        result["skipped"] += 1
+        return
+    result["adopted"] += 1
+    try:
+        with row_savepoint():
+            interface.delete()
+        result["removed"] += 1
+    except Exception as exc:
+        if classify_conflict(exc):
+            raise
+        result["skipped"] += 1
 
 
 def _normalize_module_interface_names_for_vc_member(
@@ -729,18 +766,7 @@ def _normalize_module_interface_names_for_vc_member(
                 if interface.pk not in deletable_interface_ids:
                     result["skipped"] += 1
                     continue
-                conflict.snapshot()
-                conflict.module = module
-                conflict.save(update_fields=["module", "last_updated"])
-                result["adopted"] += 1
-                try:
-                    with row_savepoint():
-                        interface.delete()
-                    result["removed"] += 1
-                except Exception as exc:
-                    if classify_conflict(exc):
-                        raise
-                    result["skipped"] += 1
+                _adopt_name_conflict(conflict, interface, module, changeable_interfaces, result)
             else:
                 result["skipped"] += 1
             continue
@@ -751,6 +777,9 @@ def _normalize_module_interface_names_for_vc_member(
             with row_savepoint():
                 interface.full_clean()
                 interface.save(update_fields=["name", "_name", "last_updated"])
+                # A rename out of a constrained change grant rolls back and counts as skipped.
+                if not changeable_interfaces.filter(pk=interface.pk).exists():
+                    raise PermissionsViolation
             result["renamed"] += 1
         except Exception as exc:
             if classify_conflict(exc):
@@ -854,8 +883,6 @@ def _module_may_own_interface(device, module_pk, name):
     return get_module_adoptable_interface_names(device, module).may_move(name)
 
 
-# Its own savepoint: callers catch a non-conflict error and keep their transaction.
-@row_savepoint()
 def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces):
     """
     Bind LibreNMS ``port_id`` to the best matching NetBox interface.
@@ -878,6 +905,16 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
         LibreNMSPortBindingBusy: Another open transaction holds the claim on the port.
 
     """
+    try:
+        return _bind_interface_librenms_id_in_savepoint(device, item, module_pk, server_key, interfaces)
+    except PermissionsViolation as exc:
+        return {"status": "skipped", "reason": str(exc)}
+
+
+# Its own savepoint: callers catch a non-conflict error and keep their transaction.
+@row_savepoint()
+def _bind_interface_librenms_id_in_savepoint(device, item, module_pk, server_key, interfaces):
+    """Bind the port as ``_bind_interface_librenms_id`` describes; a bind out of the change scope raises."""
     port_id, interface_names = _get_item_port_identity(item)
     if not port_id:
         return None
@@ -940,6 +977,8 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
         persist_mapping(candidate, assign_own(candidate, server_key, port_id), write=save)
     else:
         save(candidate)
+    if not interfaces.filter(pk=candidate.pk).exists():
+        raise PermissionsViolation(f"{candidate.name} would be outside your change permission constraints")
     return {"status": "bound", "interface": candidate.name, "port_id": port_id, "changed": True}
 
 
@@ -1022,7 +1061,7 @@ def _refuse_identity_move(module, target_device, moving, serial_rules, scope):
 
 
 class _ModuleActionRefused(Exception):
-    """Leave a module write transaction before any write, with the text the page shows."""
+    """Leave a module write transaction and roll back its writes, with the text the page shows."""
 
     def __init__(self, message, level=messages.ERROR):
         self.message = message
@@ -2188,6 +2227,18 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         return [(granted.row(index), targets[target_id], pinned) for index, target_id, pinned in plan]
 
 
+def _save_module_serial(module, serial, user):
+    """Save *serial* on the locked *module*; refuse a serial that moves it out of *user*'s change scope."""
+    module.snapshot()
+    module.serial = serial
+    module.full_clean()
+    module.save(update_fields=["serial", "last_updated"])
+    if not saved_in_scope(module, user, "change"):
+        raise _ModuleActionRefused(
+            "Nothing was changed: the updated module is outside your change permission constraints."
+        )
+
+
 class UpdateModuleSerialView(
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
@@ -2266,10 +2317,7 @@ class UpdateModuleSerialView(
                     )
                 changed = assignment.value is not None
                 if changed:
-                    module.snapshot()
-                    module.serial = assignment.value
-                    module.full_clean()
-                    module.save(update_fields=["serial", "last_updated"])
+                    _save_module_serial(module, assignment.value, request.user)
             if changed:
                 messages.success(
                     request,
@@ -2328,7 +2376,7 @@ class UpdateModuleInterfaceView(
         module = self.restrict_object_or_404(Module, "view", pk=module_id, device=target_device)
 
         bind_result = None
-        adoption_failed = False
+        adoption_warning = None
         try:
             # One transaction: a lock conflict in the bind or the adoption rolls back both.
             with transaction.atomic():
@@ -2357,7 +2405,7 @@ class UpdateModuleInterfaceView(
                 )
                 granted.grant.require(action_target=installed_module_target(module.pk, module_bay_id))
                 bind_item = granted.row(granted.grant.ent_index)
-                bind_result, adoption_failed = self._bind_and_adopt(
+                bind_result, adoption_warning = self._bind_and_adopt(
                     target_device, module, bind_item, server_key, changeable_interfaces
                 )
         except ValidationError as exc:
@@ -2373,12 +2421,8 @@ class UpdateModuleInterfaceView(
         except _ModuleActionRefused as exc:
             exc.report(request)
             return _modules_action_response(request, page_device, server_key)
-        if adoption_failed:
-            messages.warning(
-                request,
-                "Primary interface binding succeeded, but adopting standalone "
-                "template interfaces failed; see server logs for details.",
-            )
+        if adoption_warning:
+            messages.warning(request, adoption_warning)
 
         if bind_result is None:
             messages.error(request, "No LibreNMS interface identity is available for this row.")
@@ -2399,7 +2443,7 @@ class UpdateModuleInterfaceView(
     def _bind_and_adopt(target_device, module, bind_item, server_key, changeable_interfaces):
         """Bind the row's LibreNMS port and adopt the module's standalone template interfaces; return the outcome."""
         bind_result = None
-        adoption_failed = False
+        adoption_warning = None
         # The missing-server guard above already returned, so a resolved primary is always bound.
         try:
             bind_result = _bind_interface_librenms_id(
@@ -2454,10 +2498,15 @@ class UpdateModuleInterfaceView(
                             "reason": "unexpected error while associating interface to installed module",
                         }
                     else:
-                        adoption_failed = True
+                        adoption_warning = (
+                            "Primary interface binding succeeded, but adopting standalone "
+                            "template interfaces failed; see server logs for details."
+                        )
                 else:
                     if bind_result is None:
                         bind_result = adopt_result
+                    elif adopt_result.get("refused"):
+                        adoption_warning = f"Primary interface binding succeeded, but {adopt_result['reason']}."
                     elif adopt_result.get("status") == "bound":
                         bind_result = {
                             "status": "bound",
@@ -2470,7 +2519,7 @@ class UpdateModuleInterfaceView(
                             "adopted_count": (bind_result.get("adopted_count") or 0)
                             + (adopt_result.get("adopted_count") or 0),
                         }
-        return bind_result, adoption_failed
+        return bind_result, adoption_warning
 
 
 def _module_interface_type_targets(device, module):
@@ -2635,7 +2684,7 @@ class ApplyModuleInterfaceTypesView(
         }
         validation_failures = []
         try:
-            with transaction.atomic():
+            with atomic_with_events():
                 scope = lock_module_write(observe_module_write(device_ids=[target_device.pk], observed_ids=[module.pk]))
                 target_device = scope.devices[target_device.pk]
                 module.refresh_from_db()
@@ -3133,6 +3182,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 adopted_components = _save_module_with_expected_component_adoption(
                     new_module,
                     expected_component_ids,
+                    changeable_components,
                 )
                 vc_adjustments = _normalize_module_interface_names_for_vc_member(
                     target_device,
@@ -3367,6 +3417,10 @@ class MoveModuleView(
                     )
                 except Module.DoesNotExist:
                     raise _ModuleActionRefused("Module no longer exists.") from None
+                except PermissionsViolation:
+                    raise _ModuleActionRefused(
+                        "Move failed: the moved module is outside your change permission constraints."
+                    ) from None
 
             if occupant_removed_msg:
                 messages.info(request, occupant_removed_msg)
@@ -4178,10 +4232,11 @@ class MarkBuiltInView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libr
             def apply(row):
                 row.part_number = plan.model
 
-            update_existing_row(self.restricted_queryset(DeviceType, "change").filter(pk=locked.pk), apply)
-            # A constrained grant decides on the saved row; a denial rolls the whole mark back.
-            if not saved_in_scope(locked, self.request.user, "change"):
-                raise _MarkBuiltInOutOfScope
+            try:
+                update_existing_row(self.restricted_queryset(DeviceType, "change").filter(pk=locked.pk), apply)
+            except PermissionsViolation:
+                # A constrained grant decides on the saved row; a denial rolls the whole mark back.
+                raise _MarkBuiltInOutOfScope from None
         if plan.rule is not None:
             # A rule edit after the policy read must not leave a mark that no rule covers.
             rule = (
@@ -4219,7 +4274,8 @@ class MarkBuiltInView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libr
             return _modules_action_response(request, page_device)
 
         try:
-            with transaction.atomic():
+            # A refusal rolls back the part number and the rule, and their events.
+            with atomic_with_events():
                 plan = self._plan(page_device, server_key, request.POST, write=True)
                 self.required_object_permissions = {"POST": self._permissions(plan)}
                 if error := self.require_object_permissions("POST"):
