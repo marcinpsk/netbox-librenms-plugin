@@ -2113,6 +2113,7 @@ def import_single_device(  # noqa: C901
             # Create the device with its mapping: the claim and the owner check come before the insert.
             device = Device(**device_data)
             persist_mapping(device, assign_own(device, api.server_key, device_id), write=_validate_and_insert)
+            warnings = import_platform_warnings(f"device {device_id}", platform_plan, text_viewer)
 
         # Sync additional data based on options
         sync_options = sync_options or {}
@@ -2139,7 +2140,7 @@ def import_single_device(  # noqa: C901
             "message": f"Successfully imported device: {device.name}",
             "error": None,
             "synced": synced,
-            "warnings": import_platform_warnings(f"device {device_id}", platform_plan, text_viewer),
+            "warnings": warnings,
         }
 
     except Exception as e:
