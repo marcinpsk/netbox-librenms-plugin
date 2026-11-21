@@ -347,7 +347,7 @@ class TestCompletedJobResults:
         assert response.status_code == 200
         rows = {row["device_id"]: row["_validation"] for row in response.context["table"].data}
         assert rows[valid["device_id"]]["existing_device"] == mapped
-        assert rows[candidate["device_id"]]["match_verified"] is not use_sysname
+        assert rows[candidate["device_id"]]["match_verified"] is (not use_sysname)
 
     @pytest.mark.django_db
     def test_completed_job_loads_only_live_cached_rows_and_restores_its_options(
