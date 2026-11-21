@@ -13,6 +13,8 @@ mapping, puts the change on the row, and calls the writer's own save once.
 """
 
 import copy
+import hashlib
+import json
 import logging
 from collections.abc import Callable, Iterable
 from contextvars import ContextVar
@@ -196,6 +198,8 @@ class ServerState:
     oob_type: object = None
     oob_recorded: bool = False
     migration: MigrationState = MigrationState()
+    # The entry records an ID, an OOB entry or a marker that the decoder cannot read.
+    malformed: bool = False
 
     @property
     def display_id(self) -> int | None:
@@ -254,13 +258,24 @@ class MappedRecord:
     mapping: MappingState
 
 
+def _unreadable_id(raw) -> bool:
+    # A blank value records no ID, as the OOB builder reads it.
+    return raw is not None and coerce_librenms_id(raw) is None and not (isinstance(raw, str) and not raw.strip())
+
+
 def _decode_entry(server_key: str, entry) -> ServerState:
     if not isinstance(entry, dict):
-        return ServerState(server=server_key, own_id=coerce_librenms_id(entry))
+        return ServerState(server=server_key, own_id=coerce_librenms_id(entry), malformed=_unreadable_id(entry))
     own_id = coerce_librenms_id(entry.get("id"))
     oob = entry.get("oob")
     oob_id = coerce_librenms_id(oob.get("id")) if isinstance(oob, dict) else None
     marker = entry.get(MIGRATED_TO_FIELD)
+    malformed = (
+        _unreadable_id(entry.get("id"))
+        or (oob is not None and not isinstance(oob, dict))
+        or (isinstance(oob, dict) and _unreadable_id(oob.get("id")))
+        or (marker is not None and not isinstance(marker, dict))
+    )
     effective = None
     # A live own or OOB link wins over a stale marker, and a marker names its own server.
     if isinstance(marker, dict) and own_id is None and oob_id is None and marker.get("server_key") == server_key:
@@ -274,6 +289,7 @@ def _decode_entry(server_key: str, entry) -> ServerState:
         oob_type=copy.deepcopy(oob.get("type")) if isinstance(oob, dict) else None,
         oob_recorded=isinstance(oob, dict) and bool(oob),
         migration=MigrationState(recorded=isinstance(marker, dict), effective=effective),
+        malformed=malformed,
     )
 
 
@@ -699,6 +715,13 @@ class MappingChanged(TransactionConflict):
     """The row's mapping is not the mapping that the change was built on."""
 
 
+CHASSIS_CHANGED_MESSAGE = "The device moved to another virtual chassis. Refresh and try again."
+
+
+class ChassisChanged(TransactionConflict):
+    """The device moved to another virtual chassis between the read of its chassis and the lock."""
+
+
 class LibreNMSPortBindingConflict(ValueError):
     """Another NetBox interface holds the LibreNMS port, or more than one does."""
 
@@ -755,9 +778,47 @@ class MergeChange:
     winner: MappingChange
     donor: MappingChange
 
+    @property
+    def sides(self) -> tuple[MappingChange, ...]:
+        """Return the changes that persist together."""
+        return (self.winner, self.donor)
+
     def change_for(self, row) -> MappingChange | None:
         """Return the change of the merge side that *row* is, or None."""
-        return next((side for side in (self.winner, self.donor) if _is_target(row, side)), None)
+        return next((side for side in self.sides if _is_target(row, side)), None)
+
+
+@dataclass(frozen=True, eq=False)
+class ChassisMove:
+    """The master and member changes of one virtual chassis move. Only :func:`persist_merge` persists them, together."""
+
+    master: MappingChange
+    members: tuple[MappingChange, ...]
+
+    @property
+    def sides(self) -> tuple[MappingChange, ...]:
+        """Return the changes that persist together."""
+        return (self.master, *self.members)
+
+    def change_for(self, row) -> MappingChange | None:
+        """Return the change of the row that *row* is, or None."""
+        return next((side for side in self.sides if _is_target(row, side)), None)
+
+
+class MappingMoveRefused(ValueError):
+    """The mapping data of the chassis members cannot move to the master; the text names no object."""
+
+
+class MappingMoveConflict(MappingMoveRefused):
+    """The chassis master, or another member, holds a different value for a stored key of a member."""
+
+    def __init__(self, key):
+        self.key = key
+        if key == PREFERRED_SERVER_FIELD:
+            text = "The master and a member store different preferred servers."
+        else:
+            text = f"The master and a member store different LibreNMS mappings on server '{key}'."
+        super().__init__(f"{text} Correct one of the two values first.")
 
 
 def _stored_value(obj):
@@ -896,14 +957,19 @@ def link_import(
     elif existing_host_id is not None and existing_host_id != normalized_id:
         raise SameServerIdentityConflict(server, existing_host_id, normalized_id)
 
+    value, _outcome = _with_own_id(stored, server, normalized_id, obj)
+    _keep_established_choice(current, value, server, configured_servers)
+    return _change(obj, value, claims=_claim_for(obj, server, normalized_id))
+
+
+def _keep_established_choice(current: MappingState, value: dict, server: str, configured_servers) -> None:
+    """Store the previous sole usable mapping as preferred when *value* adds a second one and holds no preference."""
     configured_keys = set(configured_servers)
     previous_usable_keys = [
         entry.server for entry in current.servers if entry.server in configured_keys and entry.display_id is not None
     ]
-    value, _outcome = _with_own_id(stored, server, normalized_id, obj)
     if server not in previous_usable_keys and len(previous_usable_keys) == 1 and PREFERRED_SERVER_FIELD not in value:
         value[PREFERRED_SERVER_FIELD] = previous_usable_keys[0]
-    return _change(obj, value, claims=_claim_for(obj, server, normalized_id))
 
 
 def _normalized_oob_type(oob_type) -> str:
@@ -999,6 +1065,87 @@ def convert_legacy(obj, server: str) -> MappingChange:
     if legacy_id is None:
         return _change(obj, stored)
     return _change(obj, {server: legacy_id}, claims=_claim_for(obj, server, legacy_id))
+
+
+def _edited_fields(entry) -> tuple:
+    # A form posts a blank type as None.
+    return (None, None, None) if entry is None else (entry.own_id, entry.oob_id, entry.oob_type or None)
+
+
+def _named_id(raw, label):
+    if raw is None:
+        return None
+    identity = coerce_librenms_id(raw)
+    if identity is None:
+        raise ValueError(f"The {label} must be a positive integer, not {raw!r}.")
+    return identity
+
+
+def _entry_is_malformed(obj, server: str, entry) -> bool:
+    """Return whether the stored *entry* of *obj* on *server* holds a marker, or the cutover classifier quarantines it."""
+    from netbox_librenms_plugin import mapping_classifier
+
+    # The classifier skips a marker beside a live ID, but the merge workflow owns every stored marker.
+    if isinstance(entry, dict) and entry.get(MIGRATED_TO_FIELD) is not None:
+        return True
+    target = mapping_classifier.Target(obj._meta.label_lower, obj.pk)
+    (result,) = mapping_classifier.classify([(target, {server: entry})], {server}).objects
+    return bool(result.reasons)
+
+
+def edit_server(
+    obj, server: str, *, own_id, oob_id, oob_type, shown: ServerState, configured_servers: Iterable[str]
+) -> MappingChange:
+    """
+    Build the change that sets the own ID and the OOB controller that an operator named on *server*.
+
+    *shown* is the entry the operator edited, as the form showed it. The named values replace it:
+    a None OOB ID removes the OOB entry, and a None own ID is allowed only where no own ID is
+    stored. The entry must keep an own ID or an OOB ID. *oob_type* counts only with an OOB ID. Each named ID is claimed, so an owner of either model refuses it at persistence.
+    A second usable mapping on *configured_servers* keeps the first one as preferred, as :func:`link_import` does.
+
+    Raises:
+        MappingChanged: The stored entry is not *shown*.
+        ValueError: The stored value is legacy or invalid, the server records a migration marker or
+            a malformed entry, the stored own ID is removed, no ID is named, an ID is not a positive
+            integer, or the OOB type is missing or unknown.
+
+    """
+    server = require_server_key(server)
+    stored = _stored_value(obj)
+    current = _decode_stored_mapping(stored)
+    if current.container is ContainerStatus.LEGACY:
+        raise ValueError("The LibreNMS mapping has the legacy format. Convert it before you edit it.")
+    if current.container is ContainerStatus.INVALID:
+        raise ValueError("The existing LibreNMS mapping has an invalid format.")
+    entry = current.server(server)
+    if entry is not None and entry.migration.recorded:
+        raise ValueError(f"This object was merged into another device on server '{server}'.")
+    # The form shows only the readable parts of an entry, so a save would drop the rest.
+    if entry is not None and _entry_is_malformed(obj, server, stored[server]):
+        raise ValueError(f"The stored LibreNMS mapping on server '{server}' has an invalid format.")
+    if _edited_fields(entry) != _edited_fields(shown):
+        raise recorded_conflict(
+            MappingChanged("The LibreNMS mapping changed after it was read. Refresh and try again.")
+        )
+    own = _named_id(own_id, "LibreNMS ID")
+    oob = _named_id(oob_id, "OOB controller ID")
+    # Discovery on the next page load stores a found own ID again, so a removal would not last.
+    if own is None and entry is not None and entry.own_id is not None:
+        raise ValueError("The LibreNMS ID cannot be removed here. Enter another ID to replace it.")
+    if own is None and oob is None:
+        raise ValueError("Enter a LibreNMS ID or an OOB controller ID.")
+    if oob is not None and not oob_type:
+        raise ValueError("Select the type of the OOB controller.")
+    value = copy.deepcopy(stored) if isinstance(stored, dict) else {}
+    value[server] = {}
+    if own is not None:
+        value, _outcome = _with_own_id(value, server, own, obj)
+    if oob is not None:
+        value = _with_oob(value, server, oob, oob_type, obj)
+    _keep_established_choice(current, value, server, configured_servers)
+    claims = dict.fromkeys(_claim_for(obj, server, own) + _claim_for(obj, server, oob))
+    return _change(obj, value, claims=tuple(claims))
 
 
 def release_server(obj, server: str, *, clear_preference: bool) -> MappingChange:
@@ -1309,6 +1456,239 @@ def merge_links(winner, donor, server: str, *, at: str | None = None) -> MergeCh
     )
 
 
+def _with_member_mapping(merged, stored):
+    """Return *merged*, the value for the chassis master, with the stored value of one member added."""
+    if _decode_stored_mapping(stored).container is ContainerStatus.INVALID:
+        raise MappingMoveRefused("A member stores a LibreNMS mapping with an invalid format. Repair it first.")
+    if not merged:
+        return copy.deepcopy(stored)
+    if _same_stored(merged, stored):
+        return merged
+    if not isinstance(merged, dict) or not isinstance(stored, dict):
+        raise MappingMoveRefused("A legacy LibreNMS ID combines with no other mapping. Convert it first.")
+    for key, value in stored.items():
+        if key in merged and not _same_stored(merged[key], value):
+            raise MappingMoveConflict(key)
+        merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def move_to_master(master, members) -> ChassisMove:
+    """
+    Build the move of the mapping data of *members* to the chassis *master*, and the release of each member.
+
+    Each stored key of a member (a server entry or the preferred server) goes to the master
+    unchanged. When the master or an earlier member stores the key, the values must be the same. A
+    legacy value moves only to a master that stores nothing. The move binds no new identity, so it
+    claims nothing, and its rows persist only together, through :func:`persist_merge`.
+
+    Raises:
+        MappingMoveConflict: Two values differ for one key.
+        MappingMoveRefused: A value has an invalid format, or a legacy value meets another value.
+
+    """
+    merged = copy.deepcopy(_stored_value(master))
+    if _decode_stored_mapping(merged).container is ContainerStatus.INVALID:
+        raise MappingMoveRefused("The master stores a LibreNMS mapping with an invalid format. Repair it first.")
+    for member in members:
+        merged = _with_member_mapping(merged, _stored_value(member))
+    group = object()
+    return ChassisMove(
+        master=_change(master, merged, group=group),
+        members=tuple(_change(member, None, group=group) for member in members),
+    )
+
+
+# Host changes: a change that removes or replaces a host ID clears that server's port IDs in its scope.
+
+
+@dataclass(frozen=True)
+class CascadeInterface:
+    """One interface in a host change scope whose entry for the server the change clears."""
+
+    interface: object
+    _entry: object = field(repr=False)
+
+
+@dataclass(frozen=True)
+class HostChangeScope:
+    """
+    The interface cascade of one entry change of a Device or VM on one server.
+
+    The scope is the interfaces of a VM, of a Device, or of every member of a Device's virtual
+    chassis. ``interfaces`` holds those with an entry for the server, ``refused`` those whose stored
+    value is legacy or invalid, or whose entry for the server holds no port ID or is malformed. A
+    change that removes or replaces no host ID has an empty cascade.
+    """
+
+    changes_host: bool
+    members: tuple = ()
+    interfaces: tuple[CascadeInterface, ...] = ()
+    refused: tuple = ()
+
+    @property
+    def is_empty(self) -> bool:
+        """Return whether the change clears no interface entry and no interface value refuses it."""
+        return not self.interfaces and not self.refused
+
+    @property
+    def digest(self) -> str:
+        """Return the SHA-256 digest of the sorted (model label, pk, exact server entry) list of the cascade."""
+        return _digest(
+            [cascade.interface._meta.label_lower, cascade.interface.pk, cascade._entry] for cascade in self.interfaces
+        )
+
+    @property
+    def membership_digest(self) -> str:
+        """Return the SHA-256 digest of the sorted (model label, pk) list of the objects whose interfaces are the scope."""
+        return _digest([member._meta.label_lower, member.pk] for member in self.members)
+
+
+def _canonical_digest(value) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _digest(rows) -> str:
+    return _canonical_digest(sorted(rows, key=lambda row: (row[0], row[1])))
+
+
+def removes_host_id(before: ServerState | None, after: ServerState | None) -> bool:
+    """Return whether changing the entry *before* to *after* (None: no entry) removes or replaces an own or OOB ID."""
+    if before is None:
+        return False
+    own_after = after.own_id if after is not None else None
+    oob_after = after.oob_id if after is not None else None
+    return (before.own_id is not None and before.own_id != own_after) or (
+        before.oob_id is not None and before.oob_id != oob_after
+    )
+
+
+def host_entry(obj, server: str) -> ServerState:
+    """Return the own ID and OOB controller that *obj* holds on *server*; a legacy value is the own ID on every server."""
+    mapping = read_mapping(obj)
+    entry = mapping.server(require_server_key(server))
+    return ServerState(
+        server=server,
+        own_id=mapping.own_id(server),
+        oob_id=entry.oob_id if entry is not None else None,
+        oob_type=entry.oob_type if entry is not None else None,
+        oob_recorded=entry is not None and entry.oob_recorded,
+    )
+
+
+def stored_entry_digest(obj, server: str) -> str:
+    """Return the SHA-256 digest of the exact stored entry of *obj* on *server*; a value that is not scoped digests whole."""
+    stored = _stored_value(obj)
+    return _canonical_digest(stored.get(require_server_key(server)) if isinstance(stored, dict) else stored)
+
+
+def lock_device_chassis(pk):
+    """
+    Lock Device *pk* and its virtual chassis in the shared order, and return the locked chassis and members.
+
+    The virtual chassis row is locked first, then the chassis members in pk order
+    (``views/sync/interfaces.py`` uses the same order). The caller holds the transaction. A join of
+    the locked chassis waits for the commit: it locks the chassis row for key share.
+
+    Returns:
+        tuple: ``(chassis, members)``: the locked VirtualChassis, or None for a device outside a
+            chassis, and the locked chassis members in pk order. *pk* is a member while it exists.
+
+    Raises:
+        ChassisChanged: The device moved to another chassis between the read and the lock, so the
+            locks do not cover its chassis. Only a new transaction can lock the new chassis.
+
+    """
+    from dcim.models import Device, VirtualChassis
+
+    chassis_id = Device.objects.filter(pk=pk).values_list("virtual_chassis_id", flat=True).first()
+    member_ids = {pk}
+    chassis = None
+    if chassis_id is not None:
+        chassis = VirtualChassis.objects.select_for_update().filter(pk=chassis_id).order_by().first()
+        member_ids |= set(Device.objects.filter(virtual_chassis_id=chassis_id).values_list("pk", flat=True))
+    locked = list(Device.objects.select_for_update(of=("self",)).filter(pk__in=member_ids).order_by("pk"))
+    row = next((device for device in locked if device.pk == pk), None)
+    if row is not None and row.virtual_chassis_id != chassis_id:
+        raise recorded_conflict(ChassisChanged(CHASSIS_CHANGED_MESSAGE))
+    # A member that left the chassis before the lock is locked, but it is not a member now.
+    return chassis, [device for device in locked if device.pk == pk or device.virtual_chassis_id == chassis_id]
+
+
+def lock_host_change_owner(model, pk):
+    """
+    Lock the rows that own a host change scope in the shared order, and return the locked object.
+
+    A VM locks its own row. A Device locks its virtual chassis first, then the chassis members, as
+    :func:`lock_device_chassis` does. Returns None when the object is gone.
+
+    Raises:
+        ChassisChanged: The device moved to another chassis between the read and the lock.
+
+    """
+    from dcim.models import Device
+
+    if model is not Device:
+        return model.objects.select_for_update(of=("self",)).filter(pk=pk).order_by().first()
+    _chassis, members = lock_device_chassis(pk)
+    return next((device for device in members if device.pk == pk), None)
+
+
+def _scope_members(obj) -> tuple:
+    from dcim.models import Device
+
+    if isinstance(obj, Device) and obj.virtual_chassis_id is not None:
+        return tuple(Device.objects.filter(virtual_chassis_id=obj.virtual_chassis_id).order_by("pk"))
+    return (obj,)
+
+
+def host_change_scope(obj, server: str, new_entry: ServerState | None, *, lock: bool = False) -> HostChangeScope:
+    """
+    Return the interface cascade of changing the entry of *obj* on *server* to *new_entry*.
+
+    *new_entry* None removes the whole entry. Every host-ID writer calls this: a change with a
+    cascade, or with a refused interface value, needs the confirmation of a mapping lifecycle
+    operation. A change that removes or replaces no host ID, such as a create or an OOB add on an
+    empty OOB, returns an empty cascade and runs no query.
+
+    With *lock*, the caller locked the owner rows with :func:`lock_host_change_owner` in its
+    transaction, and the scope's interface rows are locked in pk order.
+    """
+    from dcim.models import Device, Interface
+    from virtualization.models import VMInterface
+
+    server = require_server_key(server)
+    if not removes_host_id(host_entry(obj, server), new_entry):
+        return HostChangeScope(changes_host=False)
+    members = _scope_members(obj)
+    if isinstance(obj, Device):
+        rows = Interface.objects.filter(device__in=[member.pk for member in members]).select_related("device")
+    else:
+        rows = VMInterface.objects.filter(virtual_machine=obj).select_related("virtual_machine")
+    rows = rows.order_by("pk")
+    if lock:
+        rows = rows.select_for_update(of=("self",))
+    cascade, refused = [], []
+    for interface in rows:
+        stored = _stored_value(interface)
+        mapping = _decode_stored_mapping(stored)
+        if mapping.container in (ContainerStatus.LEGACY, ContainerStatus.INVALID):
+            refused.append(interface)
+        elif mapping.container is ContainerStatus.SCOPED and server in stored:
+            # An entry that holds no port ID, or a value the decoder cannot read, is hand-edited or corrupt.
+            if mapping.own_id(server) is None or mapping.server(server).malformed:
+                refused.append(interface)
+            else:
+                cascade.append(CascadeInterface(interface, copy.deepcopy(stored[server])))
+    return HostChangeScope(changes_host=True, members=members, interfaces=tuple(cascade), refused=tuple(refused))
+
+
+def save_mapping_fields(row, fields):
+    """Validate only the mapping storage that *fields* names, then save only it: other fields may be invalid."""
+    row.clean_fields(exclude={model_field.name for model_field in row._meta.fields if model_field.name not in fields})
+    row.save(update_fields=[*fields, "last_updated"])
+
+
 # Claims and persistence.
 
 
@@ -1354,8 +1734,14 @@ def claim_librenms_port_binding(port_id, server_key, *, using=None):
         raise recorded_conflict(LibreNMSPortBindingBusy())
 
 
-def _device_identity_owner(server_key, librenms_id, *, exclude_model=None, exclude_pk=None):
-    """Return a Device or VM, other than the excluded row, that owns the identity; read in new statements."""
+def device_identity_owner(server_key, librenms_id, *, exclude_model=None, exclude_pk=None):
+    """
+    Return a Device or VM, other than the excluded row, that owns the identity; read in new statements.
+
+    Raises:
+        AmbiguousLibreNMSIdError: More than one object of a model owns the identity.
+
+    """
     from dcim.models import Device
     from virtualization.models import VirtualMachine
 
@@ -1403,7 +1789,7 @@ def lock_librenms_id_assignment(librenms_id, server_key: str, *, owner_queryset=
     if owner_queryset is not None:
         owner_model = owner_queryset.model
         locked_owner = owner_queryset.select_for_update(of=("self",)).get(pk=owner_pk)
-    conflict = _device_identity_owner(
+    conflict = device_identity_owner(
         normalized_server_key, normalized_id, exclude_model=owner_model, exclude_pk=owner_pk
     )
     return locked_owner, conflict
@@ -1426,7 +1812,7 @@ def _take_claim(claim) -> None:
 
 def _check_owner(claim, row) -> None:
     if claim.space is IdentitySpace.DEVICE:
-        owner = _device_identity_owner(claim.server, claim.identity, exclude_model=type(row), exclude_pk=row.pk)
+        owner = device_identity_owner(claim.server, claim.identity, exclude_model=type(row), exclude_pk=row.pk)
         if owner is not None:
             raise IdentityOwned(owner, claim.identity, claim.server)
         return
@@ -1452,7 +1838,7 @@ def _enter_group(change) -> None:
     if change._group is None:
         return
     progress = _active_merge.get()
-    if progress is None or progress.change.winner._group is not change._group:
+    if progress is None or progress.change.sides[0]._group is not change._group:
         raise ValueError("A merge side persists only inside persist_merge() of its own merge.")
     if id(change) in progress.written:
         raise ValueError("A merge side persists only once.")
@@ -1506,21 +1892,21 @@ def _put_on(row, change) -> frozenset:
     return _put_stored_value(row, change._stored)
 
 
-def persist_merge(change: MergeChange, *, write: Callable[[], object]):
+def persist_merge(change: MergeChange | ChassisMove, *, write: Callable[[], object]):
     """
-    Run ``write()``, which saves the merge's rows, in one atomic group.
+    Run ``write()``, which saves the rows of a merge or of a chassis move, in one atomic group.
 
-    Both sides' mappings are checked before the first write. ``write`` saves each touched row once,
-    through :func:`persist_mapping` with ``change.change_for(row)`` for the two sides. Any exception
-    rolls the whole group back, so the donor never commits without the winner.
+    The mapping of each side is checked before the first write. ``write`` saves each touched row
+    once, through :func:`persist_mapping` with ``change.change_for(row)``. Any exception rolls the
+    whole group back, so no side commits without the others.
 
     Raises:
-        MappingChanged: A side's mapping changed after the merge was built.
+        MappingChanged: The mapping of a side changed after the change was built.
         RuntimeError: ``write`` did not persist each side exactly once.
 
     """
     with transaction.atomic():
-        for side in (change.winner, change.donor):
+        for side in change.sides:
             row = side._model.objects.select_for_update().get(pk=side._pk)
             if read_mapping(row) != side.before:
                 raise recorded_conflict(
@@ -1532,8 +1918,8 @@ def persist_merge(change: MergeChange, *, write: Callable[[], object]):
             result = write()
         finally:
             _active_merge.reset(token)
-        if progress.written != {id(change.winner), id(change.donor)}:
-            raise RuntimeError("A merge must save its winner and its donor once each.")
+        if progress.written != {id(side) for side in change.sides}:
+            raise RuntimeError("A merge must save each of its sides once.")
     return result
 
 

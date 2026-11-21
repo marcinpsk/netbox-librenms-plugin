@@ -27,6 +27,7 @@ from netbox_librenms_plugin.data_shapes.capture import CAPTURE_RESOURCES, captur
 from netbox_librenms_plugin import source_cache
 from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.data_shapes.compress import compress_recording
+from netbox_librenms_plugin.mapping_owner import ensure_mapping_owner
 from netbox_librenms_plugin.data_shapes.signature import (
     classify_novelty,
     compute_shape_signature,
@@ -60,7 +61,8 @@ class CaptureDataShapeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
         # only checks model-level has_perm (no instance), which a site-constrained view_device grant
         # passes — so a plain get_object_or_404 would let such a user capture (and see the modal's
         # find_pii values for) any device by raw pk. An out-of-scope id 404s like a nonexistent one.
-        device = self.restrict_object_or_404(Device, pk=device_id)
+        # A chassis member that is not the master has no LibreNMS device of its own.
+        device = ensure_mapping_owner(self.restrict_object_or_404(Device, pk=device_id))
 
         # Scope the LibreNMS client + id lookup to the server the user is viewing (multi-server).
         server_key = self.rebind_api_for_posted_server(request.GET)

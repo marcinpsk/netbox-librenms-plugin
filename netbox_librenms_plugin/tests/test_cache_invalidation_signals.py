@@ -622,16 +622,15 @@ class TestSharedSnapshotsFollowTheWholeChassis:
             claim_sync_subjects,
             sync_subject_key,
         )
+        from netbox_librenms_plugin.mapping_owner import mapping_owner
         from netbox_librenms_plugin.tests.conftest import install_module, make_module_bay, make_virtual_chassis_members
-        from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
         _vc, (member_one, member_two) = make_virtual_chassis_members("shared-claim-vc")
-        for member in (member_one, member_two):
-            seed_mapping(member, SERVER_KEY, own=11, save=False)
-            member.save()
+        # The master holds the mapping of the chassis.
+        seed_mapping(member_one, SERVER_KEY, own=11)
         make_module_bay(member_one, "Bay 1")
 
-        sync_device = get_librenms_sync_device(member_one, server_key=SERVER_KEY) or member_one
+        sync_device = mapping_owner(member_one)
         # The page is the member that does NOT own the shared snapshot, and the write lands on
         # the member that does; the old identity comparison missed exactly this direction.
         page_device = member_two if sync_device.pk == member_one.pk else member_one

@@ -103,7 +103,8 @@ class TestDeviceStatusTable:
         bind_librenms_server(settings, librenms_server, server_key="default")
         viewed = make_device("status-vc-viewed")
         sync_member = make_device("status-vc-<sync>")
-        make_virtual_chassis("status-vc", viewed, sync_member)
+        # The master holds the mapping of the chassis.
+        make_virtual_chassis("status-vc", sync_member, viewed)
         seed_mapping(sync_member, own=4102, save=False)
         sync_member.save()
         client.force_login(make_superuser("status-vc-user"))

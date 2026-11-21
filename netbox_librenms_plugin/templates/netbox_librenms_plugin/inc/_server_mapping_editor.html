@@ -1,0 +1,75 @@
+{# One form per row: the inputs join it through their form attribute, so it posts without JavaScript. #}
+<details class="card-footer p-0" id="librenms-mapping-editor">
+    <summary class="px-3 py-2 small text-secondary">
+        <i class="mdi mdi-pencil-outline me-1" aria-hidden="true"></i>Edit server mappings
+    </summary>
+    {% if mapping_editor.blocked %}
+    <p class="px-3 pb-2 mb-0 small text-muted">
+        The stored mapping has a legacy or invalid format, so it cannot be edited here.
+    </p>
+    {% else %}
+    <table class="table table-sm align-middle mb-0">
+        <thead>
+            <tr>
+                <th class="ps-3">Server</th>
+                <th>LibreNMS ID</th>
+                <th>OOB controller ID</th>
+                <th>OOB type</th>
+                <th class="pe-3"></th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for row in mapping_editor.rows %}
+        <tr>
+            <td class="ps-3">{{ row.display_name }}</td>
+            {% if row.merged %}
+            <td colspan="4" class="small text-muted pe-3">Merged into another device on this server</td>
+            {% else %}
+            <td data-label="LibreNMS ID">
+                <input type="text" inputmode="numeric" autocomplete="off" name="own_id"
+                       form="librenms-mapping-edit-{{ forloop.counter }}"
+                       value="{{ row.own_id|default_if_none:'' }}"
+                       class="form-control form-control-sm"
+                       aria-label="LibreNMS ID on {{ row.display_name }}">
+            </td>
+            <td data-label="OOB controller ID">
+                <input type="text" inputmode="numeric" autocomplete="off" name="oob_id"
+                       form="librenms-mapping-edit-{{ forloop.counter }}"
+                       value="{{ row.oob_id|default_if_none:'' }}"
+                       class="form-control form-control-sm"
+                       aria-label="OOB controller ID on {{ row.display_name }}">
+            </td>
+            <td data-label="OOB type">
+                <select name="oob_type" form="librenms-mapping-edit-{{ forloop.counter }}"
+                        class="form-select form-select-sm no-ts"
+                        aria-label="OOB type on {{ row.display_name }}">
+                    <option value="">---------</option>
+                    {% for oob_type in mapping_editor.oob_types %}
+                    <option value="{{ oob_type }}"{% if oob_type == row.oob_type %} selected{% endif %}>{{ oob_type }}</option>
+                    {% endfor %}
+                </select>
+            </td>
+            <td class="pe-3 text-end">
+                <form method="post" id="librenms-mapping-edit-{{ forloop.counter }}" class="d-inline"
+                      action="{% url 'plugins:netbox_librenms_plugin:edit_server_mapping' pk=mapping_editor.owner_pk %}">
+                    {% csrf_token %}
+                    <input type="hidden" name="server_key" value="{{ row.server_key }}">
+                    <input type="hidden" name="object_type" value="{{ mapping_editor.object_type }}">
+                    <input type="hidden" name="active_server_key" value="{{ server_key|default:'' }}">
+                    <input type="hidden" name="tab" value="{{ active_sync_tab|default:'' }}">
+                    <input type="hidden" name="shown_own_id" value="{{ row.own_id|default_if_none:'' }}">
+                    <input type="hidden" name="shown_oob_id" value="{{ row.oob_id|default_if_none:'' }}">
+                    <input type="hidden" name="shown_oob_type" value="{{ row.oob_type|default_if_none:'' }}">
+                    <button type="submit" class="btn btn-sm btn-primary"
+                            aria-label="Save the mapping on {{ row.display_name }}">
+                        <i class="mdi mdi-content-save-outline" aria-hidden="true"></i> Save
+                    </button>
+                </form>
+            </td>
+            {% endif %}
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</details>

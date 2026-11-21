@@ -6310,13 +6310,6 @@ def test_a_chassis_page_without_member_serials_offers_no_module_action(client, s
     chassis, (owner, page) = make_virtual_chassis_members(f"chassis-unavailable-{master_link_broken}")
     make_module_bay(page, "Slot 1")
     module_type = make_module_type("CHASSIS-UNAVAILABLE-CARD", manufacturer=page.device_type.manufacturer)
-    if master_link_broken:
-        # The master link names a device of another chassis, so no member serial can be compared.
-        master = make_device(f"chassis-unavailable-elsewhere-{master_link_broken}")
-        other = VirtualChassis.objects.create(name=f"chassis-unavailable-other-{master_link_broken}")
-        Device.objects.filter(pk=master.pk).update(virtual_chassis=other, vc_position=1)
-        VirtualChassis.objects.filter(pk=chassis.pk).update(master=master)
-        owner.refresh_from_db()
     item = {
         "entPhysicalIndex": 84,
         "entPhysicalClass": "module",
@@ -6325,11 +6318,16 @@ def test_a_chassis_page_without_member_serials_offers_no_module_action(client, s
         "entPhysicalModelName": module_type.model,
         "entPhysicalSerialNum": "CHASSIS-ROW-1",
     }
-    # The control needs a stack that names both members, so the row sits under the page's member row.
+    # Cache a snapshot while the master link is valid. The module belongs to the page device.
     inventory = stack_inventory([item], [owner, page], on_member={84: page.vc_position})
     payload = trusted_module_inventory_payload(owner, inventory, librenms_id=9305)
     cache.set(DeviceModuleTableView().get_cache_key(owner, "inventory", server_key="default"), payload, 300)
     cache.set("librenms_device_info_default_9305", (True, {"device_id": 9305, "hostname": owner.name}), 300)
+    if master_link_broken:
+        master = make_device(f"chassis-unavailable-elsewhere-{master_link_broken}")
+        other = VirtualChassis.objects.create(name=f"chassis-unavailable-other-{master_link_broken}")
+        Device.objects.filter(pk=master.pk).update(virtual_chassis=other, vc_position=1)
+        VirtualChassis.objects.filter(pk=chassis.pk).update(master=master)
     client.force_login(make_superuser(f"chassis-unavailable-user-{master_link_broken}"))
 
     response = client.get(
@@ -6338,12 +6336,13 @@ def test_a_chassis_page_without_member_serials_offers_no_module_action(client, s
     )
 
     assert response.status_code == 200
-    table = response.context["module_sync"]["table"]
     if master_link_broken:
-        assert table is None
+        assert response.context["chassis_owner_problem"]["problem"] == "no_master"
+        assert response.context.get("module_sync") is None
         assert 'name="inventory_binding"' not in response.content.decode()
     else:
         # The control: with a usable master link the same row offers its install.
+        table = response.context["module_sync"]["table"]
         (row,) = list(table.data)
         assert row["can_install"] is True
 

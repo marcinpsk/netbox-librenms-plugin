@@ -15,6 +15,7 @@ from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGI
 from netbox_librenms_plugin.interface_sync import ApplicationResult, write_interface_row
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI, LibreNMSIDConflictError, LibreNMSLookupError
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
+from netbox_librenms_plugin.mapping_owner import MappingOwnerError
 from netbox_librenms_plugin.utils import coerce_model_pk, effective_vlan_mode
 
 logger = logging.getLogger(__name__)
@@ -571,6 +572,9 @@ class LibreNMSAPIMixin:
                 conflict=getattr(exc, "conflict", None),
                 named_message=getattr(exc, "named_message", None),
             )
+        except MappingOwnerError as exc:
+            # A chassis member that does not hold the mappings is never looked up, so the caller fails closed.
+            return None, LibreNMSLookupError(str(exc))
 
     def scoped_lookup_message(self, error):
         """Return a lookup message, naming a conflicting object only when this user may view it."""

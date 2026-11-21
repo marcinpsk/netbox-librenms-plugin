@@ -1720,16 +1720,20 @@ class TestValidateDeviceForImport:
 
     def test_a_second_validation_builds_the_offer_for_the_current_chassis_owner(self):
         """The chassis owner of the matched member changes between two validations."""
+        from dcim.models import VirtualChassis
+
         first_owner = make_device("validation-owner-change-a")
         second_owner = make_device("validation-owner-change-b")
         member = make_device("validation-owner-change-member", serial="A202-SN")
-        make_virtual_chassis("validation-owner-change-chassis", first_owner, second_owner, member)
+        chassis = make_virtual_chassis("validation-owner-change-chassis", first_owner, second_owner, member)
         seed_mapping(first_owner, SERVER_KEY, own=7202)
         payload = _device_payload(5502, hostname="validation-owner-change-row", os="idrac", serial="A202-SN", ip="")
         result = self._validate(payload)
         assert result["oob_candidate"]["device"] == first_owner
+        # The master holds the mappings, so the owner changes with the master.
         seed_unmapped(first_owner, SERVER_KEY)
         seed_mapping(second_owner, SERVER_KEY, own=7203)
+        VirtualChassis.objects.filter(pk=chassis.pk).update(master=second_owner)
 
         result = self._validate(payload)
 

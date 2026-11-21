@@ -599,8 +599,8 @@ class TestRemotePickerEndpoint:
         assert response.status_code == 302
         assert response["Location"] == f"{expected_path}?tab=cables&server_key={SERVER_KEY}"
 
-    def test_migrated_selected_member_is_read_only_in_render_and_verify(self):
-        """The exact local termination owner must suppress actions before the writer rejects it."""
+    def test_a_marker_on_a_member_that_is_not_the_master_blocks_render_verify_and_sync(self):
+        """A migration marker on a member that is not the master is misplaced mapping data, so no cable action runs."""
         import json
 
         from django.urls import reverse
@@ -643,12 +643,8 @@ class TestRemotePickerEndpoint:
 
         rendered = _render_cable_sync_page(client, page, server_key)
         assert rendered.status_code == 200
-        record = next(iter(rendered.context["cable_sync"]["table"].rows)).record
-        table_html = rendered.context["cable_sync"]["table"].as_html(rendered.wsgi_request)
-        assert record["netbox_local_device_id"] == selected.pk
-        assert record["can_create_cable"] is False
-        assert "Pick remote end" not in table_html
-        assert 'name="sync_one"' not in table_html
+        assert rendered.context["chassis_owner_problem"]["problem"] == "misplaced"
+        assert "cable_sync" not in rendered.context
 
         verified = client.post(
             reverse("plugins:netbox_librenms_plugin:verify_cable"),
@@ -663,11 +659,7 @@ class TestRemotePickerEndpoint:
             content_type="application/json",
         )
 
-        assert verified.status_code == 200
-        formatted = verified.json()["formatted_row"]
-        assert formatted["can_create_cable"] is False
-        assert "Pick remote end" not in formatted["actions"]
-        assert "sync_one" not in formatted["actions"]
+        assert verified.status_code == 409
 
         synced = client.post(
             reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[page.pk]),

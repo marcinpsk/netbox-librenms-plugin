@@ -124,7 +124,9 @@ from netbox_librenms_plugin.platform_versions import (
     target_label,
 )
 from netbox_librenms_plugin.server_mappings import (
+    CHASSIS_CHANGED_MESSAGE,
     AmbiguousLibreNMSIdError,
+    ChassisChanged,
     ContainerStatus,
     SameServerIdentityConflict,
     attach_oob,
@@ -138,17 +140,15 @@ from netbox_librenms_plugin.server_mappings import (
     promote_to_host,
     read_mapping,
 )
-from netbox_librenms_plugin.server_selection import (
-    get_librenms_sync_device,
-    librenms_link_owner,
-    parse_configured_server_key,
-)
+from netbox_librenms_plugin.mapping_owner import ensure_locked_mapping_owner, lock_owner_chassis, mapping_owner
+from netbox_librenms_plugin.server_selection import parse_configured_server_key
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
 from netbox_librenms_plugin.transactions import (
     atomic_with_events,
     classify_conflict,
     lock_and_snapshot,
     outside_change_scope,
+    recorded_conflict,
     saved_in_scope,
     update_existing_row,
 )
@@ -550,12 +550,16 @@ def _write_mapping_rows(view, model, lookup, duplicate_message, *, field, target
 
 
 def _lock_librenms_id_assignment_target(view, target_model, target_pk, librenms_id, server_key):
-    """Lock the chassis of a Device target, one server/ID claim and the target; reject ownership across models."""
-    from dcim.models import Device
+    """
+    Lock the chassis of a Device target, one server/ID claim and the target; reject ownership across models.
+
+    Raises:
+        MappingOwnerError: The locked target does not hold the mappings of its virtual chassis.
+
+    """
     from virtualization.models import VirtualMachine as NetBoxVM
 
-    if target_model is Device:
-        lock_chassis_of(target_pk)
+    chassis_id = lock_owner_chassis(target_model, target_pk)
     try:
         locked_target, id_conflict = lock_librenms_id_assignment(
             librenms_id,
@@ -581,7 +585,7 @@ def _lock_librenms_id_assignment_target(view, target_model, target_pk, librenms_
             f"LibreNMS ID conflict: ID {librenms_id} is already assigned to {object_label} "
             f"'{conflict_name}' (ID: {id_conflict.pk})"
         )
-
+    ensure_locked_mapping_owner(locked_target, chassis_id)
     return locked_target, None
 
 
@@ -3190,11 +3194,11 @@ class AddAsOOBView(
 
         server_key = self.librenms_api.server_key
 
-        # The offer's device is its OOB target: the owner of the LibreNMS links of the matched device
-        # (librenms_link_owner), because every reader looks for the OOB link and the OOB IP there. The lock,
-        # guards, IP set and save below target it; the check under the lock reads the owner again.
+        # The offer's device is its OOB target: the mapping owner of the matched device, the master of a
+        # virtual chassis, because every reader looks for the OOB link and the OOB IP there. The lock, guards,
+        # IP set and save below target it; the check under the lock reads the owner again.
         sync_device = oob_candidate["device"]
-        if sync_device.pk != librenms_link_owner(existing_device, server_key).pk:
+        if sync_device.pk != mapping_owner(existing_device).pk:
             return _htmx_error_response("Device ID mismatch: existing_device_id does not match OOB candidate")
         # The sync device is DERIVED (a VC sibling of the scoped existing_device), and the block
         # below locks and saves it. Authorize it too, or a grant covering only the selected member
@@ -3233,6 +3237,8 @@ class AddAsOOBView(
             matched_is_master = hold_matched and VirtualChassis.objects.filter(master_id=existing_device.pk).exists()
             if serial_match:
                 assignment_lock([libre_device.get("serial")], model=Device, rules=serial_rules)
+            # The owner comes from the chassis of the selected member, not from the owner read before the lock.
+            chassis_id = lock_owner_chassis(Device, existing_device.pk)
             if hold_matched and not matched_is_master:
                 _hold_device_row(existing_device.pk)
             try:
@@ -3260,8 +3266,17 @@ class AddAsOOBView(
                     f"LibreNMS device #{librenms_id} is already assigned to {object_label} "
                     f"'{conflict_name}'; refresh and retry."
                 )
+            # The owner was read before the locks; a master change since then refuses the link.
+            ensure_locked_mapping_owner(sync_device, chassis_id)
+            if chassis_id is None and sync_device.pk != existing_device.pk:
+                raise recorded_conflict(ChassisChanged(CHASSIS_CHANGED_MESSAGE))
             if matched_is_master:
                 _hold_device_row(existing_device.pk)
+            # A row lock holds the selected member in the locked chassis until the commit.
+            if sync_device.pk != existing_device.pk:
+                locked_member = self.relock_scoped_row(Device, pk=existing_device.pk)
+                if locked_member is None or locked_member.virtual_chassis_id != chassis_id:
+                    raise recorded_conflict(ChassisChanged(CHASSIS_CHANGED_MESSAGE))
             if serial_match:
                 if not is_sole_holder(existing_device, libre_device.get("serial"), rules=serial_rules):
                     return _htmx_error_response(_SERIAL_MATCH_LOST)
@@ -3269,7 +3284,7 @@ class AddAsOOBView(
                 if (existing_device.name or "").lower() != (validation.get("resolved_name") or "").lower():
                     return _htmx_error_response(_HOSTNAME_MATCH_LOST)
             elif matched_by == "oob_ip":
-                if not row_at_oob_target_ip(existing_device, libre_device, server_key):
+                if not row_at_oob_target_ip(existing_device, libre_device):
                     return _htmx_error_response(_IP_MATCH_LOST)
             else:
                 matched, ambiguous = resolve_device_by_host_ip(oob_ip_str)
@@ -4110,31 +4125,23 @@ class MergeNetBoxDevicesView(
             transaction.set_rollback(True)
             return _htmx_error_response("Cannot merge because the database operation failed. Please retry.")
 
-        # LibreNMS treats a Virtual Chassis as one logical device, so the host/OOB link lives on the
-        # single sync member (get_librenms_sync_device) — which may differ from the winner/donor the
-        # user selected when a candidate matched a NON-sync VC member by serial/hostname. Merge the
-        # link state on the sync devices: writing it to a non-sync member would either split-brain a
-        # VC that already has a linked member, or leave the donor's real link (on its sync sibling)
-        # uncleared where every reader still resolves and finds it. For non-VC devices these resolve
-        # back to the same rows, so the common path is unchanged. The oob_ip transfer and the
-        # candidate-match check deliberately stay on the user-selected winner/donor: oob_ip is a
-        # per-device FK on those rows, not a VC link.
+        # The host/OOB link of a virtual chassis lives on its master, which can differ from the
+        # winner/donor the user selected. Merge the link state on the mapping owners. For non-VC
+        # devices these are the same rows. The oob_ip transfer and the candidate-match check stay
+        # on the user-selected winner/donor: oob_ip is a per-device FK on those rows, not a VC link.
         # A refused winner save rolls back the donor save, and its event.
         with atomic_with_events():
             # Lock the selected winner/donor AND every current member of their virtual chassis, in
-            # deterministic pk order to avoid deadlocks, BEFORE resolving the sync device:
-            # get_librenms_sync_device scans every VC member's librenms_id custom field, so resolving
-            # it from unlocked rows would let a concurrent VC edit (a member joining/leaving, or the
-            # id moving between members) shift the sync member to a row we never locked — splitting
-            # the link across the VC. Non-VC merges add no members, so they lock the same two rows.
+            # deterministic pk order to avoid deadlocks, BEFORE resolving the mapping owners: the
+            # owner rule reads every member's librenms_id custom field, so a read from unlocked rows
+            # could see a mapping that a concurrent edit moves. Non-VC merges lock the same two rows.
             serial_rules = SerialRules.load()
             assignment_lock([libre_device.get("serial")], model=Device, rules=serial_rules)
             try:
+                # The chassis rows decide the mapping owners: share-lock them before the member rows.
+                chassis_ids = {lock_owner_chassis(Device, pk) for pk in sorted({winner.pk, donor.pk})} - {None}
                 lock_pks = {winner.pk, donor.pk}
-                for candidate in (winner, donor):
-                    vc = getattr(candidate, "virtual_chassis", None)
-                    if vc:
-                        lock_pks.update(vc.members.values_list("pk", flat=True))
+                lock_pks.update(Device.objects.filter(virtual_chassis_id__in=chassis_ids).values_list("pk", flat=True))
                 lock_pks = sorted(lock_pks)
                 locked = list(Device.objects.select_for_update().filter(pk__in=lock_pks).order_by("pk"))
             except DatabaseError as exc:
@@ -4148,6 +4155,9 @@ class MergeNetBoxDevicesView(
             locked_by_pk = {d.pk: d for d in locked}
             winner = locked_by_pk[winner.pk]
             donor = locked_by_pk[donor.pk]
+            # A device that changed chassis before its row lock is outside the locked chassis rows.
+            if {winner.virtual_chassis_id, donor.virtual_chassis_id} - {None} != chassis_ids:
+                return _htmx_error_response("Virtual chassis membership changed during the merge; please retry.")
             hostname_match_pk = winner.pk if serial_peer_pk == donor.pk else donor.pk
             if serial_peer_pk not in (winner.pk, donor.pk) or not is_sole_holder(
                 locked_by_pk[serial_peer_pk],
@@ -4157,10 +4167,10 @@ class MergeNetBoxDevicesView(
             ):
                 return _htmx_error_response(_SERIAL_MATCH_LOST)
 
-            # Resolve the sync devices from the now-locked, current state.
+            # Resolve the mapping owners from the now-locked, current state.
             try:
-                winner_sync = get_librenms_sync_device(winner, server_key=server_key) or winner
-                donor_sync = get_librenms_sync_device(donor, server_key=server_key) or donor
+                winner_sync = mapping_owner(winner)
+                donor_sync = mapping_owner(donor)
             except DatabaseError as exc:
                 if classify_conflict(exc):
                     raise

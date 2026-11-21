@@ -13,8 +13,9 @@ from django.views import View
 from utilities.exceptions import PermissionsViolation
 from virtualization.models import VirtualMachine
 
+from netbox_librenms_plugin.assessment.mapping_lifecycle import host_change_action
 from netbox_librenms_plugin.import_utils import _determine_device_name
-from netbox_librenms_plugin.import_utils.disclosure import serial_conflict_text
+from netbox_librenms_plugin.import_utils.disclosure import serial_conflict_text, visible_object_label
 from netbox_librenms_plugin.import_utils.virtual_chassis import _existing_member_name
 from netbox_librenms_plugin.platform_versions import (
     FactsSource,
@@ -31,13 +32,19 @@ from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
     ContainerStatus,
     IdentityOwned,
+    ServerState,
     convert_legacy,
+    edit_server,
+    host_entry,
     persist_mapping,
     read_mapping,
     release_server,
     require_server_key,
+    save_mapping_fields,
     set_preference,
 )
+from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 from netbox_librenms_plugin.serial_identity import (
     RETYPE_HELD,
     SerialRules,
@@ -52,11 +59,18 @@ from netbox_librenms_plugin.serial_identity import (
     retype_scope,
     serial_refusal,
 )
-from netbox_librenms_plugin.server_selection import build_server_mappings, get_librenms_sync_device
+from netbox_librenms_plugin.mapping_owner import (
+    ensure_locked_mapping_owner,
+    ensure_mapping_owner,
+    lock_owner_chassis,
+    mapping_owner,
+)
+from netbox_librenms_plugin.server_selection import build_server_mappings
 from netbox_librenms_plugin.sync_cache import SyncTab
 from netbox_librenms_plugin.transactions import (
     atomic_with_events,
     classify_conflict,
+    outside_change_scope,
     run_transaction,
     saved_in_scope,
     update_existing_row,
@@ -75,6 +89,7 @@ from netbox_librenms_plugin.views.mixins import (
     redirect_with_server_key,
     resolve_configured_server_key,
 )
+from netbox_librenms_plugin.views.sync.mapping_lifecycle import render_host_change
 
 logger = logging.getLogger(__name__)
 
@@ -201,7 +216,8 @@ def _write_device_serial(view, request, pk, server_key, incoming):
     """
     Write the LibreNMS serial *incoming* to the locked standalone device.
 
-    The serial identity locks come before the row lock, then the conflict check reads the locked row.
+    The serial identity locks and the chassis share lock come before the row lock. The owner rule
+    and the conflict check then read the locked row.
 
     Returns:
         tuple: ``(old serial, None)`` after the write, or ``(None, redirect)`` when nothing was written.
@@ -211,6 +227,7 @@ def _write_device_serial(view, request, pk, server_key, incoming):
     old_values = []
 
     def apply(row):
+        ensure_locked_mapping_owner(row, chassis_id)
         if refusal := direct_serial_sync_refusal(row):
             raise _WriteRefused(refusal)
         assignment = device_assignment(row, incoming, rules=serial_rules)
@@ -227,6 +244,7 @@ def _write_device_serial(view, request, pk, server_key, incoming):
         with atomic_with_events():
             serial_rules = SerialRules.load()
             assignment_lock([incoming], model=Device, rules=serial_rules)
+            chassis_id = lock_owner_chassis(Device, pk)
             update_existing_row(view.restricted_queryset(Device, "change").filter(pk=pk), apply)
     except Device.DoesNotExist:
         messages.error(request, "Device no longer exists.")
@@ -248,13 +266,16 @@ def _live_platform_facts(view, subject, server_key):
     """
     Return the live LibreNMS platform facts of *subject*, read through *view*'s bound server.
 
-    A virtual chassis member reads the facts of the chassis sync device for *server_key*, as the sync page does.
+    A virtual chassis member reads the facts of the chassis master, as the sync page does.
 
     Returns:
         tuple: ``(PlatformFacts, FactsSource, None)``, or ``(None, None, text)`` when the lookup failed.
 
+    Raises:
+        MappingOwnerError: The virtual chassis has no mapping owner.
+
     """
-    lookup_subject = get_librenms_sync_device(subject, server_key=server_key) or subject
+    lookup_subject = mapping_owner(subject)
     source = FactsSource(lookup_subject.pk, getattr(subject, "virtual_chassis_id", None))
     view.librenms_id, lookup_error = view.resolve_librenms_id(lookup_subject)
     if lookup_error is not None:
@@ -295,18 +316,8 @@ class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             messages.error(request, "Selected LibreNMS server is no longer configured.")
             return _device_sync_redirect(request, pk, server_key)
 
-        # For VC members without their own librenms_id, use the VC sync device. Scope the
-        # resolution to the POST-rebound server_key so a multi-server VC picks the sibling
-        # linked to *this* server, not the server-agnostic "any member with any id" fallback
-        # (which would rename the device from a different server's LibreNMS device).
-        librenms_lookup_device = device
-        if hasattr(device, "virtual_chassis") and device.virtual_chassis:
-            if not read_mapping(device).has_recorded_state:
-                sync_device = get_librenms_sync_device(device, server_key=server_key)
-                if sync_device:
-                    librenms_lookup_device = sync_device
-
-        self.librenms_id, lookup_error = self.resolve_librenms_id(librenms_lookup_device)
+        # A virtual chassis member takes its name from the LibreNMS device of the chassis master.
+        self.librenms_id, lookup_error = self.resolve_librenms_id(mapping_owner(device))
 
         if lookup_error is not None:
             messages.error(request, self.scoped_lookup_message(lookup_error))
@@ -366,6 +377,7 @@ class UpdateDeviceSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
         if error := self.require_all_permissions("POST"):
             return error
 
+        # The writer checks the owner rule on the locked row: a chassis change can commit before that lock.
         device = self.restrict_object_or_404(Device, "change", pk=pk)
 
         # Rebind the API client to the POSTed server before resolving the per-server librenms_id,
@@ -427,6 +439,7 @@ class UpdateDeviceTypeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
         if error := self.require_all_permissions("POST"):
             return error
 
+        # The writer checks the owner rule on the locked row: a chassis change can commit before that lock.
         device = self.restrict_object_or_404(Device, "change", pk=pk)
 
         # Rebind the API client to the POSTed server before resolving the per-server librenms_id,
@@ -482,12 +495,13 @@ class UpdateDeviceTypeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
         scope = retype_scope(device)
 
         def no_new_holder(row):
+            ensure_locked_mapping_owner(row, chassis_id)
             if retype_conflict(row, device_type, rules=serial_rules, scope=scope):
                 raise _WriteRefused(RETYPE_HELD)
 
         with atomic_with_events():
             retype_lock(scope, rules=serial_rules)
-            lock_chassis_of(pk)
+            chassis_id = lock_owner_chassis(Device, pk)
             old_device_type, failed = _write_device_field(
                 self,
                 request,
@@ -827,12 +841,6 @@ def _has_removable_mapping(mapping, server_key):
     return mapping.server(server_key) is not None or (server_key == "default" and mapping.legacy.is_legacy)
 
 
-def _save_mapping_fields(row, fields):
-    """Validate only the mapping storage that *fields* names, then save only it: other fields may be invalid."""
-    row.clean_fields(exclude={field.name for field in row._meta.fields if field.name not in fields})
-    row.save(update_fields=[*fields, "last_updated"])
-
-
 class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
     """Remove a single server entry from the device's (or VM's) librenms_id custom field dict."""
 
@@ -860,6 +868,7 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
         active_sync_tab = _validated_sync_tab(request)
         active_server_key = _validated_active_server_key(request)
         obj, model = self._get_object(object_type, pk)
+        ensure_mapping_owner(obj)
         server_key = request.POST.get("server_key", "").strip()
 
         if not server_key:
@@ -898,11 +907,13 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
             return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
 
         with atomic_with_events():
+            chassis_id = lock_owner_chassis(model, pk)
             try:
                 obj_locked = self.restricted_queryset(model, "change").select_for_update(of=("self",)).get(pk=pk)
             except model.DoesNotExist:
                 messages.error(request, f"{model.__name__} no longer exists.")
                 return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
+            ensure_locked_mapping_owner(obj_locked, chassis_id)
             # Re-check after acquiring lock; mirror the pre-transaction protection logic
             _is_protected = server_key in configured_servers or (
                 legacy_url_configured and not configured_servers and server_key == "default"
@@ -918,7 +929,7 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
                 if usable_count <= 1:
                     change = release_server(obj_locked, server_key, clear_preference=True)
                 try:
-                    persist_mapping(obj_locked, change, write=_save_mapping_fields)
+                    persist_mapping(obj_locked, change, write=save_mapping_fields)
                 except ValidationError as exc:
                     transaction.set_rollback(True)
                     logger.exception(
@@ -983,9 +994,10 @@ class SetPreferredServerView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
         submitted_active_key = request.POST.get("active_server_key", "").strip() or None
 
         with atomic_with_events():
-            owner = get_object_or_404(
-                self.restricted_queryset(model, "change").select_for_update(of=("self",)),
-                pk=pk,
+            chassis_id = lock_owner_chassis(model, pk)
+            owner = ensure_locked_mapping_owner(
+                get_object_or_404(self.restricted_queryset(model, "change").select_for_update(of=("self",)), pk=pk),
+                chassis_id,
             )
             mappings = build_server_mappings(owner)
             selectable_keys = {mapping.server_key for mapping in mappings if mapping.is_selectable}
@@ -999,7 +1011,7 @@ class SetPreferredServerView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
 
             owner.snapshot()
             try:
-                persist_mapping(owner, set_preference(owner, requested_key), write=_save_mapping_fields)
+                persist_mapping(owner, set_preference(owner, requested_key), write=save_mapping_fields)
             except ValidationError as exc:
                 transaction.set_rollback(True)
                 logger.warning(
@@ -1023,6 +1035,157 @@ class SetPreferredServerView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
 
         messages.success(request, f"Preferred LibreNMS server changed to '{requested_key}'.")
         return self._redirect(object_type, pk, active_server_key, active_sync_tab)
+
+
+def _posted_value(request, field):
+    """Return the stripped POST value of *field*, or None when it is blank."""
+    return request.POST.get(field, "").strip() or None
+
+
+def _identity_owned_text(exc, user):
+    """Return the owner conflict text; it names the owner only when *user* may view it."""
+    visible = visible_object_label(exc.owner, user)
+    if visible is None:
+        return f"LibreNMS ID {exc.identity} is already assigned to another object outside your view scope."
+    object_label, owner_name = visible
+    return f"LibreNMS ID {exc.identity} is already assigned to {object_label} '{owner_name}' (ID: {exc.owner.pk})."
+
+
+class _NeedsConfirmation(Exception):
+    """The posted IDs remove or replace a host ID, so the editor renders that host change's confirmation."""
+
+    def __init__(self, owner, action, choices):
+        super().__init__(action)
+        self.owner, self.action, self.choices = owner, action, choices
+
+
+def _editor_host_change(owner, server_key, own_id, oob_id, oob_type, shown):
+    """
+    Return the mapping change that the editor writes, or raise _NeedsConfirmation for a host change.
+
+    A change that replaces an own ID or removes or replaces an OOB ID needs a confirmation.
+    Two host changes at once are refused: each one has its own confirmation.
+    """
+    entry = host_entry(owner, server_key)
+    try:
+        change = edit_server(
+            owner,
+            server_key,
+            own_id=own_id,
+            oob_id=oob_id,
+            oob_type=oob_type,
+            shown=shown,
+            configured_servers=LibreNMSAPI.get_available_servers(),
+        )
+    except ValueError as exc:
+        raise _WriteRefused(str(exc)) from None
+    after = change.after.server(server_key)
+    confirmation = host_change_action(entry, after.own_id, after.oob_id, after.oob_type)
+    if confirmation is None:
+        return change
+    action, choices = confirmation
+    if choices is None:
+        raise _WriteRefused(
+            "Change the LibreNMS ID and the OOB controller one at a time: each change has its own confirmation."
+        )
+    raise _NeedsConfirmation(owner, action, choices)
+
+
+class EditServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
+    """
+    Set the own LibreNMS ID and the OOB controller of a Device or VirtualMachine on one configured server.
+
+    A create and an OOB add on an empty OOB write at once. A change that removes or replaces a host
+    ID renders the confirmation of its mapping lifecycle operation and writes nothing.
+    """
+
+    required_object_permissions = {
+        "POST": [("change", Device), ("change", VirtualMachine)],
+    }
+
+    def post(self, request, pk):
+        raw_object_type = request.POST.get("object_type", "device")
+        object_type = _normalize_sync_object_type(raw_object_type)
+        if object_type is None:
+            return HttpResponse(f"Invalid object_type: {escape(raw_object_type)}", status=400)
+        model = _sync_model(object_type)
+        self.required_object_permissions = {"POST": [("change", model)]}
+        if error := self.require_all_permissions("POST"):
+            return error
+
+        active_sync_tab = _validated_sync_tab(request)
+        active_server_key = _validated_active_server_key(request)
+        server_key = resolve_configured_server_key(_posted_value(request, "server_key"))
+        if server_key is None:
+            messages.error(request, "Select a configured LibreNMS server.")
+            return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
+        # A malformed shown value matches no stored entry, so the builder reports a changed mapping.
+        shown = ServerState(
+            server=server_key,
+            own_id=coerce_librenms_id(_posted_value(request, "shown_own_id")),
+            oob_id=coerce_librenms_id(_posted_value(request, "shown_oob_id")),
+            oob_type=_posted_value(request, "shown_oob_type"),
+        )
+        try:
+            with atomic_with_events():
+                chassis_id = lock_owner_chassis(model, pk)
+                owner = ensure_locked_mapping_owner(
+                    get_object_or_404(self.restricted_queryset(model, "change").select_for_update(of=("self",)), pk=pk),
+                    chassis_id,
+                )
+                change = _editor_host_change(
+                    owner,
+                    server_key,
+                    _posted_value(request, "own_id"),
+                    _posted_value(request, "oob_id"),
+                    _posted_value(request, "oob_type"),
+                    shown,
+                )
+                if change.changed:
+                    owner.snapshot()
+                    persist_mapping(owner, change, write=save_mapping_fields)
+                    # A change constraint can read the mapping, so the saved row must stay in the change scope.
+                    if not saved_in_scope(owner, request.user, "change"):
+                        raise outside_change_scope(owner)
+        except _NeedsConfirmation as needed:
+            # The confirmation is an assessment: it reads the object again and writes nothing.
+            return render_host_change(
+                request,
+                needed.owner,
+                server_key,
+                needed.action,
+                needed.choices,
+                tab=active_sync_tab,
+                return_server_key=active_server_key,
+            )
+        except IdentityOwned as exc:
+            messages.error(request, _identity_owned_text(exc, request.user))
+            return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
+        except AmbiguousLibreNMSIdError:
+            messages.error(request, "The LibreNMS ID matches more than one object. Resolve the duplicate first.")
+            return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
+        except _WriteRefused as exc:
+            messages.add_message(request, exc.level, str(exc))
+            return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
+        except PermissionsViolation as exc:
+            messages.error(request, str(exc))
+            return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
+        except ValidationError as exc:
+            if classify_conflict(exc):
+                raise
+            logger.warning("Validation error saving the LibreNMS mapping: %s", validation_error_detail(exc))
+            messages.error(
+                request, f"Validation error saving the LibreNMS mapping: {exception_text_for(exc, model, request.user)}"
+            )
+            return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
+
+        # After the commit: a lock conflict at COMMIT must not leave a success message behind.
+        if change.changed:
+            messages.success(request, f"Saved the LibreNMS mapping for server '{server_key}'.")
+        else:
+            messages.info(request, f"The LibreNMS mapping for server '{server_key}' did not change.")
+        # The edited server now has a usable mapping, so the page can open on it.
+        return _server_mapping_redirect(object_type, pk, server_key, active_sync_tab)
 
 
 class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
@@ -1082,6 +1245,7 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             return error
 
         model, obj = self._get_model_and_object(object_type, pk)
+        ensure_mapping_owner(obj)
         # Rebind the API client to the POST-scoped server before any lookup/migration so the
         # legacy-ID conversion is verified (get_device_info), conflict-checked and written
         # (convert_legacy and its persistence) under the same server
@@ -1119,6 +1283,7 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             return self._sync_url(object_type, pk)
 
         def convert(locked):
+            ensure_locked_mapping_owner(locked, chassis_id)
             # Re-check preconditions on the locked row (another admin may have
             # changed cf_value or serial between the initial read and the lock).
             locked_mapping = read_mapping(locked)
@@ -1143,6 +1308,7 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                 if not is_vm:
                     # The serial identity locks come before the row lock.
                     assignment_lock([incoming_serial], model=model, rules=serial_rules)
+                chassis_id = lock_owner_chassis(model, pk)
                 update_existing_row(self.restricted_queryset(model, "change").filter(pk=pk), convert)
         except model.DoesNotExist:
             messages.error(request, f"{model.__name__} no longer exists.")

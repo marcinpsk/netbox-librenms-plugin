@@ -18,7 +18,7 @@ from netbox_librenms_plugin.serial_utils import (
     project_serial_sensors,
 )
 from netbox_librenms_plugin.server_mappings import MappingRole, identity_q, prefetch_mappings, read_mapping
-from netbox_librenms_plugin.server_selection import chassis_sync_devices
+from netbox_librenms_plugin.mapping_owner import chassis_ownerships
 
 REMOTE_ALIAS_FETCH_BUDGET_SECONDS = 15.0
 NEIGHBOUR_PORTS_PREFIX = "neighbour_ports:"
@@ -188,11 +188,13 @@ def _cable_parts(fetch, librenms_id):
             if device_id is None:
                 hostname_devices.append((device, device_links))
     # One member load serves every chassis of the host-name neighbours.
-    sync_by_chassis = chassis_sync_devices([device for device, _links in hostname_devices], server_key=fetch.server_key)
-    hostname_owners = [
-        (sync_by_chassis.get(device.virtual_chassis_id) or device, device_links)
-        for device, device_links in hostname_devices
-    ]
+    ownerships = chassis_ownerships([device for device, _links in hostname_devices])
+    hostname_owners = []
+    for device, device_links in hostname_devices:
+        owner = ownerships[device.virtual_chassis_id].owner if device.virtual_chassis_id is not None else device
+        # A neighbour chassis with no mapping owner names no LibreNMS device, so its ports are not fetched.
+        if owner is not None:
+            hostname_owners.append((owner, device_links))
     prefetch_mappings(owner for owner, _links in hostname_owners)
     for owner, device_links in hostname_owners:
         neighbour_id = read_mapping(owner).own_id(fetch.server_key)

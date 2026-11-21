@@ -916,6 +916,30 @@ def test_a_type_change_of_a_member_that_becomes_master_waits_and_reads_its_new_s
 
 
 @transactional_db_with_all_apps()
+def test_a_master_that_loses_the_chassis_while_its_serial_write_waits_writes_nothing(librenms_server):
+    """After the commit, D is a member that holds mapping data, so the owner rule on the locked row refuses."""
+    from dcim.models import Device, VirtualChassis
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
+
+    demoted = seed_mapping(make_device("demote-serial-master", serial="DEMOTE-OLD"), SERVER_KEY, own=9863)
+    successor = make_device("demote-serial-successor")
+    chassis = make_virtual_chassis("demote-serial-chassis", demoted, successor)
+    librenms_server.device_info_response(device_id=9863, hostname=demoted.name, serial="DEMOTE-NEW")
+    url = reverse("plugins:netbox_librenms_plugin:update_device_serial", kwargs={"pk": demoted.pk})
+
+    status, sqlstates = _write_during_a_chassis_change(
+        make_superuser("demote-serial-user"), url, {"server_key": SERVER_KEY}, [_set_master(chassis, successor)]
+    )
+
+    assert "40P01" not in sqlstates
+    assert status == 302
+    assert VirtualChassis.objects.get(pk=chassis.pk).master_id == successor.pk
+    assert Device.objects.get(pk=demoted.pk).serial == "DEMOTE-OLD"
+
+
+@transactional_db_with_all_apps()
 def test_a_vc_serial_assignment_and_a_chassis_edit_in_netbox_order_both_commit(librenms_server):
     """NetBox's chassis edit updates the chassis row, then the member rows, in one transaction."""
     from dcim.models import Device, VirtualChassis

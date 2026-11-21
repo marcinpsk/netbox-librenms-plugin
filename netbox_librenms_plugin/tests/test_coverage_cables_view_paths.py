@@ -212,7 +212,8 @@ class TestCableLocalPortEnrichment:
 
         viewed = make_device("cable-serial-viewed")
         owner = _map_device(make_device("cable-serial-owner"), 88)
-        make_virtual_chassis("cable-serial-vc", viewed, owner)
+        # The owner is the chassis master, which holds the mapping.
+        make_virtual_chassis("cable-serial-vc", owner, viewed)
         ConsoleServerPort.objects.create(device=owner, name="console1")
         # The viewed member carries a same-named port, so binding the viewed device instead of
         # the out-of-scope sync owner would silently resolve the wrong console port.

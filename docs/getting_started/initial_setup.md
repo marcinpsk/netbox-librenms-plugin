@@ -56,14 +56,7 @@ The Device Import feature automatically sets the `librenms_id` custom field, ena
 
 ### Virtual Chassis
 
-LibreNMS treats a Virtual Chassis as one logical device. The plugin selects a single "sync device" from your chassis to communicate with LibreNMS using this priority:
-
-1. **Member with `librenms_id` set** (if already configured)
-2. **Master device with primary IP** (most common)
-3. **Any member with primary IP** (fallback)
-4. **Member with lowest position number** (last resort)
-
-Only the selected sync device should have the `librenms_id` custom field populated—leave it empty on all other members.
+LibreNMS treats a Virtual Chassis as one logical device. The master of the virtual chassis holds the `librenms_id` custom field of the chassis, and the plugin finds the chassis in LibreNMS from the primary IP or the name of the master. Set a master on each virtual chassis, give it a primary IP, and leave `librenms_id` empty on all other members. See [Virtual chassis](../configuration/custom_field.md#virtual-chassis).
 
 For best results, align chassis member positions with interface naming patterns. For example, if switch 1 has interfaces like `eth1/0/1` and switch 2 has `eth2/0/1`, the plugin can auto-detect the correct member for each interface. Always verify the member selection before running bulk synchronization.
 

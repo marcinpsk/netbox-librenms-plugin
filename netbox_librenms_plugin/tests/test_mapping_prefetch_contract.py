@@ -353,8 +353,8 @@ class TestModulesTab:
 class TestVirtualChassisInterfacesTab:
     def test_every_member_and_interface_read_is_prefetched(self, superuser_client):
         _chassis, members = make_virtual_chassis_members("prefetch-vc", count=3)
-        for position, member in enumerate(members):
-            _seed_device_mapping(member, position, HOST_ID + position)
+        # The master holds the mapping of the chassis.
+        _seed_device_mapping(members[0], 0, HOST_ID)
         ports = []
         for index in range(6):
             member = members[index % 3]
@@ -705,13 +705,13 @@ class TestMergeView(_merge_harness()):
 
 @pytest.mark.django_db
 def test_the_sync_page_of_a_chassis_member_prefetches_the_members(superuser_client):
-    """The sync owner and the mapped servers of a chassis come from the mappings of every member."""
-    from netbox_librenms_plugin import server_mappings, server_selection
+    """The mapping owner and the mapped servers of a chassis come from the mappings of every member."""
+    from netbox_librenms_plugin import mapping_owner, server_mappings
 
     _chassis, members = make_virtual_chassis_members("prefetch-page-vc", count=4)
-    for position, member in enumerate(members):
-        _seed_device_mapping(member, position + 2, HOST_ID + position)
-    producers = [(server_selection, "get_librenms_sync_device"), (server_mappings, "mapped_device_servers")]
+    # The master holds the mapping of the chassis; the owner rule still reads every member.
+    _seed_device_mapping(members[0], 2, HOST_ID)
+    producers = [(mapping_owner, "mapping_ownership"), (server_mappings, "mapped_device_servers")]
 
     with spy_mapping_reads(*producers) as spy:
         response = superuser_client.get(
@@ -801,9 +801,9 @@ def _status_chassis(tag, chassis_count, members_per_chassis=3):
         for position, member in enumerate(members):
             member.role = role
             member.save()
-            # The first member is unmapped, so each row points at a mapped sibling.
-            if position:
-                _seed_device_mapping(member, chassis + position, NEIGHBOUR_BASE + chassis * 10 + position)
+            # The master holds the mapping of the chassis, so each other row points at the master.
+            if not position:
+                _seed_device_mapping(member, chassis, NEIGHBOUR_BASE + chassis * 10)
     return {"role": role.pk}
 
 

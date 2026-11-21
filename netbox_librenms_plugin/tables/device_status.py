@@ -15,6 +15,7 @@ from netbox_librenms_plugin.import_plan import ImportObjectType, VMPlacementMeth
 from netbox_librenms_plugin.import_utils.disclosure import scope_validation_disclosures
 from netbox_librenms_plugin.import_utils.naming import import_name_variants
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
+from netbox_librenms_plugin.mapping_owner import OwnerProblem
 from netbox_librenms_plugin.serial_identity import display
 from netbox_librenms_plugin.utils import netbox_allows_standalone_vm_host
 
@@ -32,9 +33,10 @@ class DeviceStatusTable(DeviceTable):
     )
 
     def __init__(self, *args, **kwargs):
-        """Create the table; the list view sets the sync member of each listed chassis, keyed by chassis ID."""
+        """Create the table; the list view sets the mapping ownership of each listed chassis and the viewable owners."""
         super().__init__(*args, **kwargs)
-        self.sync_by_chassis = {}
+        self.ownerships = {}
+        self.visible_owner_pks = frozenset()
 
     def render_librenms_status(self, value, record):
         """Render LibreNMS sync status with link to sync page."""
@@ -43,13 +45,29 @@ class DeviceStatusTable(DeviceTable):
             kwargs={"pk": record.pk},
         )
 
-        # A chassis row whose sync member is another device links to that member.
-        sync_device = self.sync_by_chassis.get(record.virtual_chassis_id)
-        if sync_device is not None and sync_device.pk != record.pk:
+        ownership = self.ownerships.get(record.virtual_chassis_id)
+        if ownership is not None and ownership.problem is not None:
+            label = "No chassis master" if ownership.problem is OwnerProblem.NO_MASTER else "Misplaced mappings"
+            return format_html(
+                '<a href="{}"><span class="text-warning" data-owner-problem="{}">'
+                '<i class="mdi mdi-alert"></i> {}</span></a>',
+                sync_url,
+                ownership.problem.value,
+                label,
+            )
+        # A chassis member that is not the master links to the master, which holds the mappings.
+        owner = ownership.owner if ownership is not None else None
+        if owner is not None and owner.pk != record.pk:
+            if owner.pk not in self.visible_owner_pks:
+                return format_html(
+                    '<a href="{}"><span class="text-info"><i class="mdi mdi-server-network"></i> See the chassis master'
+                    "</span></a>",
+                    sync_url,
+                )
             return format_html(
                 '<a href="{}"><span class="text-info"><i class="mdi mdi-server-network"></i> See {}</span></a>',
-                reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": sync_device.pk}),
-                sync_device.name,
+                reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": owner.pk}),
+                owner.name,
             )
         if value:
             status = '<span class="text-success"><i class="mdi mdi-check-circle"></i> Found</span>'

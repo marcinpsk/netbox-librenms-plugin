@@ -54,21 +54,22 @@
 </div>
 {% endif %}
 
-{% if server_selection_blocked and not server_selection_has_usable_mapping %}
+{% if chassis_owner_problem %}
+{% include "netbox_librenms_plugin/inc/_chassis_owner_problem.html" with problem=chassis_owner_problem %}
+{% elif server_selection_blocked and not server_selection_has_usable_mapping %}
 <div class="alert alert-warning d-flex align-items-start" role="alert" id="librenms-server-selection-recovery">
     <i class="mdi mdi-lifebuoy me-2 fs-3"></i>
     <div>
         <strong>No mapped LibreNMS server is usable.</strong>
         Every mapping below is disabled, so no sync tab can run against this object.
         {% if lookup_device_pk != object.pk %}
-        The mappings belong to the virtual chassis sync device. Correct or remove them on
-        <a href="{% if lookup_device_model_name == 'virtualmachine' %}{% url 'plugins:netbox_librenms_plugin:vm_librenms_sync' pk=lookup_device_pk %}{% else %}{% url 'plugins:netbox_librenms_plugin:device_librenms_sync' pk=lookup_device_pk %}{% endif %}"
-           class="alert-link">that device&#39;s LibreNMS tab</a>.
-        {% else %}
+        The mappings belong to the master of the virtual chassis:
+        <a href="{% url 'plugins:netbox_librenms_plugin:device_librenms_sync' pk=lookup_device_pk %}"
+           class="alert-link">open its LibreNMS tab</a>.
+        {% endif %}
         A mapping for a server that is no longer configured has a Remove button beside it. A mapping
         for a configured server stays until its URL and API token are repaired in the plugin
         configuration.
-        {% endif %}
         <a href="{% url 'plugins:netbox_librenms_plugin:settings' %}" class="alert-link">Open the LibreNMS settings page</a>
         to check the configured servers.
     </div>
@@ -154,7 +155,7 @@
         <span><i class="mdi mdi-server-network text-primary me-1"></i><strong>LibreNMS Connections</strong></span>
         <div class="d-flex flex-wrap gap-2 align-items-center">
             {% include "netbox_librenms_plugin/inc/_server_selector.html" %}
-            {% if not server_selection_blocked and object|meta:"model_name" == "device" %}
+            {% if not server_selection_blocked and object|meta:"model_name" == "device" and lookup_device_pk == object.pk %}
             {# Capture an anonymized LibreNMS data shape for community-contributed outcome tests (issue #95). #}
             {# server_key is read from the page URL at request time (js hx-vals); when the URL omits it, fall back to the active page server (librenms_server_info.server_key) like the interface-sync controls, NOT to '' — an empty fallback would silently capture against the default server. #}
             <button type="button" class="btn btn-sm btn-outline-secondary"
@@ -236,7 +237,6 @@
                     {% endif %}
                     {% if not mapping.is_configured %}
                     {% if lookup_device_model_name == "device" or lookup_device_model_name == "virtualmachine" %}
-                    {% if lookup_device_pk == object.pk %}
                     <form method="post"
                           action="{% url 'plugins:netbox_librenms_plugin:remove_server_mapping' pk=lookup_device_pk %}"
                           style="display:inline">
@@ -250,11 +250,6 @@
                             <i class="mdi mdi-trash-can-outline"></i> Remove
                         </button>
                     </form>
-                    {% else %}
-                    <span class="text-muted small" title="Mapping belongs to {% if visible_sync_device %}VC sync device {{ visible_sync_device.name }}{% else %}the VC sync device{% endif %} — navigate there to remove it">
-                        <i class="mdi mdi-information-outline me-1"></i>Managed by VC sync device
-                    </span>
-                    {% endif %}
                     {% endif %}
                     {% endif %}
                 </td>
@@ -263,6 +258,7 @@
             </tbody>
         </table>
     </div>
+    {% if mapping_editor %}{% include "netbox_librenms_plugin/inc/_server_mapping_editor.html" %}{% endif %}
 </div>
 {% elif librenms_server_info %}
 <div class="card mb-3">
@@ -284,6 +280,15 @@
             {% endif %}
         </div>
     </div>
+    {% if mapping_editor %}{% include "netbox_librenms_plugin/inc/_server_mapping_editor.html" %}{% endif %}
+</div>
+{% elif mapping_editor %}
+{# A refused server key on an unmapped object renders no card above, so the editor gets its own. #}
+<div class="card mb-3">
+    <div class="card-header py-2">
+        <i class="mdi mdi-server-network text-primary me-1" aria-hidden="true"></i><strong>LibreNMS Connections</strong>
+    </div>
+    {% include "netbox_librenms_plugin/inc/_server_mapping_editor.html" %}
 </div>
 {% endif %}
 
@@ -734,10 +739,10 @@
 <span class="fs-5 mt-2 text-muted">Last data updated: {{ last_fetched|date:"Y-m-d H:i" }}</span>
 {% endif %}
 
-{% if is_vc_member and not object_has_recorded_mapping %}
-<!-- VC Member Message - Non-sync members redirect to the designated sync device -->
+{% if is_vc_member and object.pk != librenms_sync_device.pk %}
+<!-- VC Member Message - A member that is not the master points to the master, which holds the mappings -->
     {% if sync_device_has_librenms_id %}
-    <!-- A VC member already has librenms_id configured -->
+    <!-- The master has a librenms_id -->
     <div class="alert alert-info">
         <div>
             {% if visible_sync_device %}
@@ -749,26 +754,26 @@
         </div>
     </div>
     {% elif sync_device_has_primary_ip %}
-    <!-- Sync device has primary IP and is ready for LibreNMS configuration -->
+    <!-- The master has a primary IP and is ready for LibreNMS configuration -->
     <div class="alert alert-info">
         <div>
             {% if visible_sync_device %}
             <i class="mdi mdi-information-outline"></i>
             LibreNMS sync for this virtual chassis should be configured on <a href="{{ visible_sync_device.url }}">{{ visible_sync_device.name }}</a>
             {% else %}
-            LibreNMS sync for this virtual chassis should be configured on the designated sync device
+            LibreNMS sync for this virtual chassis should be configured on the chassis master
             {% endif %}
         </div>
     </div>
     {% else %}
-    <!-- No member has a primary IP configured - cannot proceed with LibreNMS sync -->
+    <!-- The master has no primary IP and no librenms_id - cannot proceed with LibreNMS sync -->
     <div class="alert alert-warning">
         <div>
             {% if visible_sync_device %}
             <i class="mdi mdi-alert"></i>
-            Virtual chassis sync device <a href="{{ visible_sync_device.url }}">{{ visible_sync_device.name }}</a> requires either a primary IP or a LibreNMS ID (custom field) for sync operations
+            Virtual chassis master <a href="{{ visible_sync_device.url }}">{{ visible_sync_device.name }}</a> requires either a primary IP or a LibreNMS ID (custom field) for sync operations
             {% else %}
-            Virtual chassis requires at least one member with a primary IP or LibreNMS ID configured for sync operations
+            The master of this virtual chassis requires either a primary IP or a LibreNMS ID (custom field) for sync operations
             {% endif %}
         </div>
     </div>

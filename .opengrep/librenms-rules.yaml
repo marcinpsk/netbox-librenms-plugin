@@ -72,7 +72,8 @@ rules:
       - pattern: resolve_device_write(...)
       - pattern: resolve_devices_write(...)
       - pattern: find_mapping(...)
-      - pattern: get_librenms_sync_device(...)
+      - pattern: mapping_owner(...)
+      - pattern: mapping_ownership(...)
       # a match an unrestricted search already bound into the validation dict
       - pattern: $V["existing_device"]
     pattern-sanitizers:
@@ -1994,6 +1995,14 @@ rules:
               $ROW = <... $MANAGER.restrict($USER, "change") ...>
               ...
               $ROW.save(...)
+          - pattern: |
+              $ROW = <... $VIEW.restricted_queryset($MODEL, "change") ...>
+              ...
+              persist_mapping($ROW, ...)
+          - pattern: |
+              $ROW = <... $MANAGER.restrict($USER, "change") ...>
+              ...
+              persist_mapping($ROW, ...)
       - pattern-not-inside: |
           def $F(...):
             ...

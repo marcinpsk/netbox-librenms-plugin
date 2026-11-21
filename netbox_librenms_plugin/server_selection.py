@@ -5,14 +5,9 @@ from enum import StrEnum
 
 from django.conf import settings as django_settings
 
-from netbox_librenms_plugin.ip_addressing import primary_ips
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-from netbox_librenms_plugin.server_mappings import (
-    PreferenceStatus,
-    prefetch_mappings,
-    read_mapping,
-    require_server_key,
-)
+from netbox_librenms_plugin.mapping_owner import MappingOwnership, mapping_ownership
+from netbox_librenms_plugin.server_mappings import PreferenceStatus, read_mapping
 
 
 class ServerSelectionState(StrEnum):
@@ -21,6 +16,8 @@ class ServerSelectionState(StrEnum):
     RESOLVED = "resolved"
     INVALID = "invalid"
     SELECTION_REQUIRED = "selection_required"
+    # The virtual chassis of the page object has no mapping owner.
+    OWNER_PROBLEM = "owner_problem"
 
 
 @dataclass(frozen=True)
@@ -70,6 +67,7 @@ class ObjectServerSelection:
     error: str | None = None
     warning: str | None = None
     preferred_key: str | None = None
+    ownership: MappingOwnership | None = None
 
     @property
     def has_multiple_usable_mappings(self) -> bool:
@@ -194,139 +192,22 @@ def build_server_mappings(owner, active_key=None, *, plugin_config=None, mapping
     return tuple(mappings)
 
 
-def get_librenms_sync_device(device, server_key: str | None = None):
-    """
-    Determine which Virtual Chassis member should handle LibreNMS sync operations.
-
-    LibreNMS treats a Virtual Chassis as a single logical device, so only one member
-    should have the librenms_id custom field set and be used for sync operations.
-
-    Priority order for selecting the sync device:
-    1. Any member with librenms_id custom field set for *server_key* (highest priority).
-       When *server_key* is None, matches any member that has any librenms_id set.
-    2. Master device with primary IP (if master is designated and is a member)
-    3. Any member with primary IP (fallback when no master or master lacks IP)
-    4. Member with lowest vc_position (for error messages when no IPs configured)
-
-    Args:
-        device (Device): Any device in the virtual chassis.
-        server_key: LibreNMS server key used to resolve the correct librenms_id mapping.
-                    Pass None to match any member that has any librenms_id (e.g. in
-                    contexts where the active server is not known, such as table columns).
-
-    Returns:
-        Optional[Device]: The device that should handle LibreNMS sync, or None if
-                         the device is not in a virtual chassis.
-
-    """
-    if server_key is not None:
-        server_key = require_server_key(server_key)
-
-    if not hasattr(device, "virtual_chassis") or not device.virtual_chassis:
-        return device
-
-    vc = device.virtual_chassis
-    return _select_sync_member(vc.master_id, prefetch_mappings(vc.members.all()), server_key)
-
-
-def chassis_sync_devices(devices, server_key: str | None = None) -> dict:
-    """
-    Return the sync member of each virtual chassis that *devices* belong to, keyed by chassis ID.
-
-    A list of many chassis rows uses this instead of one :func:`get_librenms_sync_device` call per
-    row: one query loads the members of every chassis, and one prefetch loads their mappings.
-
-    Args:
-        devices (Iterable[Device]): The listed devices; a device outside a chassis is skipped.
-        server_key (str | None): As for :func:`get_librenms_sync_device`.
-
-    Returns:
-        dict[int, Device | None]: The sync member of each chassis, chosen by the same rules.
-
-    """
-    from dcim.models import Device
-
-    if server_key is not None:
-        server_key = require_server_key(server_key)
-    chassis_ids = {device.virtual_chassis_id for device in devices if device.virtual_chassis_id is not None}
-    if not chassis_ids:
-        return {}
-    members_by_chassis = {}
-    members = Device.objects.filter(virtual_chassis_id__in=chassis_ids).select_related(
-        "virtual_chassis", "primary_ip4", "primary_ip6"
-    )
-    for member in prefetch_mappings(members):
-        members_by_chassis.setdefault(member.virtual_chassis_id, []).append(member)
-    return {
-        chassis_id: _select_sync_member(chassis_members[0].virtual_chassis.master_id, chassis_members, server_key)
-        for chassis_id, chassis_members in members_by_chassis.items()
-    }
-
-
-def _select_sync_member(master_id, all_members, server_key):  # noqa: C901
-    """Choose the sync member from the prefetched *all_members* of one chassis."""
-    # nosemgrep: mapping-read-loop-needs-prefetch  # noqa: ERA001  # each caller prefetches all_members
-    mappings = [(member, read_mapping(member)) for member in all_members]
-
-    if server_key is not None:
-        # Priority 1: a member with a real host id for server_key (a scoped mapping is
-        # preferred over a legacy bare value below).
-        for member, mapping in mappings:
-            entry = mapping.server(server_key)
-            if entry is not None and entry.own_id is not None:
-                return member
-
-        # Priority 1b (legacy fallback): any member whose host id resolves for this server
-        # (includes bare legacy IDs that are a universal fallback).
-        for member, mapping in mappings:
-            if mapping.own_id(server_key):
-                return member
-
-        # Priority 1c: OOB-only mapping for this server — a member linked only as an OOB
-        # controller. Evaluated LAST so a member holding the real host id always wins; without
-        # this pass an OOB-only member would fall through to the master/primary-IP fallback.
-        for member, mapping in mappings:
-            entry = mapping.server(server_key)
-            if entry is not None and entry.oob_id is not None:
-                return member
-    else:
-        # server_key is None (e.g. table columns without an active server): prefer a member
-        # with any host id on any server, then fall back to any OOB-only linkage. A bare legacy
-        # value counts only under the strict rule here.
-        for member, mapping in mappings:
-            if mapping.legacy.queryable_id is not None or any(entry.own_id is not None for entry in mapping.servers):
-                return member
-        for member, mapping in mappings:
-            if any(entry.oob_id is not None for entry in mapping.servers):
-                return member
-
-    # Priority 2: the master with a primary IP, read from the prefetched members; a link to an outside device names no owner.
-    master = next((member for member in all_members if member.pk == master_id), None)
-    if master and primary_ips(master):
-        return master
-
-    # Priority 3: Find any member with primary IP
-    for member in all_members:
-        if primary_ips(member):
-            return member
-
-    # Priority 4: Use member with lowest vc_position as fallback
-    try:
-        return min(all_members, key=lambda m: m.vc_position, default=None)
-    except (ValueError, TypeError):
-        return None
-
-
-def librenms_link_owner(device, server_key: str | None):
-    """Return the Device that holds the LibreNMS links of *device*: its chassis sync device, else *device* itself."""
-    return get_librenms_sync_device(device, server_key=server_key) or device
-
-
 def resolve_object_server(page_object, requested_key=None, installation_default_key=None) -> ObjectServerSelection:  # noqa: C901
     """Resolve the active server for an object page without contacting LibreNMS."""
     requested_key = requested_key.strip() if isinstance(requested_key, str) else None
     requested_key = requested_key or None
-    mapping_owner = get_librenms_sync_device(page_object, server_key=None) or page_object
+    ownership = mapping_ownership(page_object)
+    if ownership.problem is not None:
+        return ObjectServerSelection(
+            state=ServerSelectionState.OWNER_PROBLEM,
+            active_key=None,
+            requested_key=requested_key,
+            installation_default_key=installation_default_key,
+            mapping_owner=None,
+            mappings=(),
+            ownership=ownership,
+        )
+    mapping_owner = ownership.owner
     installation_default_key = installation_default_key or installation_default_server_key()
     available_servers = LibreNMSAPI.get_available_servers()
     if requested_key == "default" and requested_key not in available_servers and installation_default_key:
@@ -417,3 +298,8 @@ def resolve_object_server(page_object, requested_key=None, installation_default_
         warning=warning,
         preferred_key=preferred_key,
     )
+
+
+def librenms_link_owner(device):
+    """Return the Device that holds the LibreNMS links of *device*: its mapping owner, or *device* when its chassis has none."""
+    return mapping_ownership(device).owner or device

@@ -578,7 +578,7 @@ def _oob_candidate(matched, libre_device, matched_by, server_key) -> dict:
     Add as OOB writes. The type comes from the row's OS or hardware, then its name, then "oob". *matched_by*
     ("oob_ip", "primary_ip", "serial" or "hostname") names the match that Add as OOB checks again under its locks.
     """
-    target = librenms_link_owner(matched, server_key)
+    target = librenms_link_owner(matched)
     return {
         "device": target,
         # The host link of the target, which the dialog shows as the attach's unchanged host slot.
@@ -614,14 +614,14 @@ def _row_at_oob_ip(device, libre_device) -> bool:
         return False
 
 
-def row_at_oob_target_ip(matched, libre_device, server_key) -> bool:
+def row_at_oob_target_ip(matched, libre_device) -> bool:
     """
     Return whether the row's address is the OOB IP of the *matched* Device or of the offer's OOB target.
 
-    The OOB target is the owner of the LibreNMS links of *matched* (``librenms_link_owner``); either address is
+    The OOB target is the mapping owner of *matched* (``librenms_link_owner``); either address is
     controller evidence, and Add as OOB checks the same two addresses again under its locks.
     """
-    owner = librenms_link_owner(matched, server_key)
+    owner = librenms_link_owner(matched)
     return _row_at_oob_ip(matched, libre_device) or (owner.pk != matched.pk and _row_at_oob_ip(owner, libre_device))
 
 
@@ -642,7 +642,7 @@ def _oob_controller_evidence(result, libre_device, server_key) -> bool:
         return True
     if not isinstance(matched, Device) or match_type not in (*NAME_MATCH_TYPES, "serial", "primary_ip"):
         return False
-    if row_at_oob_target_ip(matched, libre_device, server_key):
+    if row_at_oob_target_ip(matched, libre_device):
         return True
     return bool(_reported_oob_type(libre_device) or _row_name_oob_type(libre_device, matched))
 
@@ -702,12 +702,12 @@ def _apply_serial_role(result, matched, libre_device, server_key) -> None:
 
 def _set_attach_offer(result, matched, libre_device, server_key) -> None:
     """Build the attach offer of a controller row from current facts, or withdraw it when the target has an OOB link."""
-    if read_mapping(librenms_link_owner(matched, server_key)).has_oob(server_key):
+    if read_mapping(librenms_link_owner(matched)).has_oob(server_key):
         _withdraw_attach_offer(result)
         if OOB_ALREADY_LINKED_WARNING not in result["warnings"]:
             result["warnings"].append(OOB_ALREADY_LINKED_WARNING)
         return
-    if row_at_oob_target_ip(matched, libre_device, server_key):
+    if row_at_oob_target_ip(matched, libre_device):
         matched_by = "oob_ip"
     elif result["existing_match_type"] == "primary_ip":
         matched_by = "primary_ip"
@@ -785,7 +785,7 @@ def _serial_role_facts(existing_by_serial, existing_link, hostname, libre_device
     # can override the heuristic (e.g. mark a "linux"-OS device as OOB or
     # demote an apparent host into the OOB slot).
     oob_type_from_libre = _reported_oob_type(libre_device)
-    existing_oob_recorded = read_mapping(librenms_link_owner(existing_by_serial, server_key)).has_oob(server_key)
+    existing_oob_recorded = read_mapping(librenms_link_owner(existing_by_serial)).has_oob(server_key)
 
     # Only treat this as a possible host/OOB chassis-pair situation when
     # there is a real ambiguity: either the existing NetBox device's name

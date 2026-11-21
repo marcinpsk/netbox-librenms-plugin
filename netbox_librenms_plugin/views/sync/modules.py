@@ -65,7 +65,7 @@ from netbox_librenms_plugin.serial_identity import (
     resolve_module,
     stored_form,
 )
-from netbox_librenms_plugin.server_selection import get_librenms_sync_device
+from netbox_librenms_plugin.mapping_owner import mapping_owner
 from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     apply_request_cache_transition,
@@ -348,7 +348,7 @@ def _authorize_module_grant(page_device, server_key, action, token, *, user):
         page_device = Device.objects.select_related("virtual_chassis").get(pk=page_device.pk)
     except Device.DoesNotExist as exc:
         raise GrantRefused(GrantRefusal.SNAPSHOT) from exc
-    sync_device = _get_sync_device_for_inventory(page_device, server_key)
+    sync_device = mapping_owner(page_device)
     if not Device.objects.filter(pk=sync_device.pk).exists():
         raise GrantRefused(GrantRefusal.SNAPSHOT)
     snapshot = source_cache.read(sync_device, Resource.MODULES, server_key, user=user)
@@ -418,11 +418,6 @@ class _ModuleComponentAdoptionUnavailable(Exception):
         self.component_model = component_model
         self.component_label = str(component_model._meta.verbose_name) if component_model is not None else "component"
         super().__init__(f"{self.component_label} is not available for module adoption")
-
-
-def _get_sync_device_for_inventory(device, server_key):
-    """Return the VC sync device used for module inventory cache keys."""
-    return get_librenms_sync_device(device, server_key=server_key) or device
 
 
 def _module_component_specs():

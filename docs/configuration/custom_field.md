@@ -73,36 +73,71 @@ If the field was not created automatically (fallback): follow these steps to cre
 
 ### Manually assign a value to `librenms_id`
 
-You can manually assign a value to the `librenms_id` custom field for a device using the following steps:
+Set or correct the mapping of a device or virtual machine on its LibreNMS Sync page. Do not edit the
+JSON value of the custom field by hand.
 
-1. **Edit the Device:**
+1. **Open the sync page:**
 
-    - Navigate to the device in NetBox.
-    - Click the **Edit** button.
+    - Navigate to the device or virtual machine in NetBox.
+    - Open the **LibreNMS Sync** tab.
 
-2. **Set the LibreNMS ID:**
+2. **Open the editor:**
 
-    - Scroll to the **Custom Fields** section.
-    - Enter the `librenms_id` value as a JSON object with your server key(s):
-      ```json
-      {"production": 42}
-      ```
-      For multiple servers: `{"production": 42, "staging": 17}`
+    - In the **LibreNMS Connections** card (or the **Active LibreNMS Server** card when the object has
+      no mapping yet), click **Edit server mappings**.
+    - The editor has one row for each configured LibreNMS server.
 
-      An object with multiple usable mappings can also store its preferred server:
+3. **Enter the IDs:**
 
-      ```json
-      {"production": 42, "staging": 17, "_preferred_server": "production"}
-      ```
+    - **LibreNMS ID:** the LibreNMS device ID of the object on that server.
+    - **OOB controller ID** and **OOB type:** the LibreNMS device ID of its out-of-band controller
+      (iDRAC, iLO, IPMI and others), and the controller type. See
+      [Out-of-Band Management](../device_import/oob_management.md).
+    - Clear the OOB controller ID to remove the OOB controller. You can replace a LibreNMS ID, but
+      you cannot remove it here: the next load of the sync page finds the device in LibreNMS and
+      stores its ID again.
 
-      Use the star control on the object sync page to manage this value. Do not use `_preferred_server` as a server identity key.
+4. **Save the row:**
 
-3. **Save Changes:**
+    - Click **Save** on the row. Each row saves only its own server.
+    - Replacing a LibreNMS ID or replacing or clearing an OOB ID opens a confirmation. It names
+      the server and each interface whose port ID it clears. Confirm the change to save it.
+    - A host change clears that server's port IDs on all interfaces of the object. For a virtual
+      chassis, it clears the port IDs on every member. It keeps the other servers' port IDs.
+    - Change the LibreNMS ID and the OOB controller one at a time. Each change has its own confirmation.
+    - The plugin refuses an ID that another NetBox device or virtual machine already holds on that
+      server. It names that object only when you have permission to view it.
+    - When another user changed the mapping after the page loaded, the plugin refuses the save.
+      Reload the page and enter the values again.
 
-    - Click **Update** to save the device.
+You need change permission on the object. A host change also needs view permission on every scope
+object, and view and change permission on each interface that it clears. Use **Convert ID** to convert a legacy value (a bare integer)
+before you edit it. The editor does not repair a value with an invalid format.
 
+### Virtual chassis
 
+The master of a virtual chassis holds all the mappings of the chassis: the LibreNMS ID and the OOB
+controller of each server, a legacy value, and the preferred server. Leave `librenms_id` empty on
+the other members. The sync page of each member shows and edits the mappings of the master.
 
+- When the chassis has no master, the sync page of each member shows an error, and no sync or
+  discovery runs. Set the master of the virtual chassis.
+- When a member that is not the master holds mapping data, the sync page of each member names that
+  member and the master, and no sync or discovery runs. Click **Move to master** to move the data.
+  The move needs change permission on the master and on each member that holds data. It moves
+  nothing when the master and a member hold different values for the same server or different
+  preferred servers: correct one of the two values first.
+- When the master has no primary IP and no LibreNMS ID, the plugin looks up the chassis in
+  LibreNMS only by the name of the master. It does not use the primary IP of another member.
+
+To remove the mapping for a server that is no longer configured, click **Remove** on its row in the
+**LibreNMS Connections** card. When an object has usable mappings on two or more servers, use the
+star control on the same card to select the preferred server. When you add a second mapping and
+no preferred server is stored, the first mapping becomes the preferred server. The preference is
+stored in the mapping as `_preferred_server`; do not use that name as a server key.
+
+Interfaces get their `librenms_id` value from the interface sync, so the sync page has no editor for
+them.
 
 ## Notes
 

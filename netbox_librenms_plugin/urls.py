@@ -103,7 +103,9 @@ from .views import (
     LocationMappingEditView,
     LocationMappingListView,
     LocationMappingView,
+    MappingLifecycleView,
     MarkBuiltInView,
+    MoveChassisMappingsView,
     MergeNetBoxDevicesView,
     ModuleBayMappingBulkDeleteView,
     ModuleBayMappingBulkExportYAMLView,
@@ -170,6 +172,7 @@ from .views import (
     SerialSensorTypePatternEditView,
     SerialSensorTypePatternListView,
     SerialSensorTypePatternView,
+    EditServerMappingView,
     SetPreferredServerView,
     SingleCableVerifyView,
     SingleInterfaceVerifyView,
@@ -537,9 +540,24 @@ urlpatterns = [
         name="assign_vc_serial",
     ),
     path(
+        "<str:object_type>/<int:pk>/mapping-lifecycle/",
+        MappingLifecycleView.as_view(),
+        name="mapping_lifecycle",
+    ),
+    path(
         "devices/<int:pk>/remove-server-mapping/",
         RemoveServerMappingView.as_view(),
         name="remove_server_mapping",
+    ),
+    path(
+        "devices/<int:pk>/edit-server-mapping/",
+        EditServerMappingView.as_view(),
+        name="edit_server_mapping",
+    ),
+    path(
+        "devices/<int:pk>/move-chassis-mappings/",
+        MoveChassisMappingsView.as_view(),
+        name="move_chassis_mappings",
     ),
     path(
         "devices/<int:pk>/preferred-server/",

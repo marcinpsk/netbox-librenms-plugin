@@ -516,6 +516,12 @@ class TestRequiredObjectPermissionsWiring:
         self._assert_has_mixins(RemoveServerMappingView)
         assert "POST" in RemoveServerMappingView.required_object_permissions
 
+    def test_mapping_lifecycle_has_required_object_permissions(self):
+        from netbox_librenms_plugin.views.sync.mapping_lifecycle import MappingLifecycleView
+
+        self._assert_has_mixins(MappingLifecycleView)
+        assert "POST" in MappingLifecycleView.required_object_permissions
+
     def test_single_cable_verify_has_object_permission_gate(self):
         """The read-only verify-cable endpoint exposes device cable/topology rows, so it must gate on dcim.view_device like the interface/module verify views (object-permission mixin in MRO + declared perms)."""
         from dcim.models import Device
@@ -816,9 +822,13 @@ class TestSingleCableVerifyServerKey:
         role, _ = DeviceRole.objects.get_or_create(name="SkRole", slug="skrole")
         site, _ = Site.objects.get_or_create(name="SkSite", slug="sksite")
         vc = VirtualChassis.objects.create(name=f"SkVC-{tag}")
-        return Device.objects.create(
+        device = Device.objects.create(
             name=f"sk-{tag}", device_type=dt, role=role, site=site, status="active", virtual_chassis=vc, vc_position=1
         )
+        # The device is the master, which holds the mapping of the chassis.
+        vc.master = device
+        vc.save()
+        return device
 
     @staticmethod
     def _view_and_request(device, body, *, api_server_key):

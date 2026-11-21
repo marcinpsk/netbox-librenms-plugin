@@ -1,9 +1,8 @@
 """
 Tests for SingleCableVerifyView and SingleInterfaceVerifyView VC resolution.
 
-Verifies that both views delegate VC device resolution to
-get_librenms_sync_device() and handle the None return gracefully
-(e.g. empty VC members or vc_position type errors).
+Verifies that both views read the cached rows of the chassis master, and refuse a chassis
+that has no mapping owner.
 """
 
 import json
@@ -54,6 +53,8 @@ def _real_vc_device(tag, name=None):
     device.virtual_chassis = vc
     device.vc_position = 1
     device.save()
+    vc.master = device
+    vc.save()
     return device
 
 
@@ -84,25 +85,22 @@ class TestSingleCableVerifyView:
         return view
 
     @pytest.mark.django_db
-    def test_vc_no_resolvable_sync_device_returns_an_empty_row(self):
-        """Verify a virtual chassis without a resolvable sync member returns the safe empty row."""
+    def test_vc_without_a_master_refuses_the_verify(self):
+        """A virtual chassis without a master has no mapping owner, so the verify refuses before any cache read."""
+        from netbox_librenms_plugin.mapping_owner import MappingOwnerError, OwnerProblem
         from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
-        from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
-        _virtual_chassis, (device, _sibling) = make_virtual_chassis_members("cbl-nosync")
-        device.vc_position = None
-        device.save(update_fields=["vc_position"])
-        assert get_librenms_sync_device(device, server_key=configured_server_key()) is None
+        virtual_chassis, (device, _sibling) = make_virtual_chassis_members("cbl-nosync")
+        virtual_chassis.master = None
+        virtual_chassis.save()
 
         view, request = _real_verify_view(
             SingleCableVerifyView, {"device_id": device.pk, "row_id": "42"}, _verify_superuser("cbl-nosync")
         )
-        response = view.post(request)
+        with pytest.raises(MappingOwnerError) as refused:
+            view.post(request)
 
-        data = json.loads(response.content)
-        assert data["status"] == "success"
-        assert data["formatted_row"]["cable_status"] == "Missing Ports"
-        assert data["formatted_row"]["local_port"] == ""
+        assert refused.value.ownership.problem is OwnerProblem.NO_MASTER
 
     def test_no_device_id_returns_empty_row(self):
         """Missing device_id: returns default empty formatted_row."""
@@ -133,7 +131,10 @@ def _snapshot_port(port_id, name, **fields):
 
 def _seed_parent_and_child(subject, child, parent, *, server_key="default", child_type="l2vlan", pair=(10, 20)):
     """Store the raw ports 10 (*child*) and 20 (*parent*) and one port_stack pair; assert the derived parent edge."""
-    seed_mapping(subject, server_key, own=63001)
+    from netbox_librenms_plugin.mapping_owner import mapping_owner
+
+    # A chassis member reads the snapshot of the chassis master, which holds the mapping.
+    seed_mapping(mapping_owner(subject), server_key, own=63001)
     seed_interfaces_snapshot(
         subject,
         [_snapshot_port(10, child.name, ifType=child_type), _snapshot_port(20, parent.name)],
@@ -506,7 +507,7 @@ class TestSingleInterfaceVerifyView:
     @pytest.mark.django_db
     @pytest.mark.parametrize("migrated", [False, True], ids=["active-page", "migrated-page"])
     def test_virtual_chassis_member_verify_uses_the_origin_page_mode(self, migrated):
-        """Member verification must keep the page mode and target the selected member."""
+        """Member verification targets the selected member; a migrated master serves no row, so no button returns."""
         from netbox_librenms_plugin.server_mappings import mark_migrated
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_virtual_chassis_members
         from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
@@ -535,13 +536,14 @@ class TestSingleInterfaceVerifyView:
             make_superuser("verify-migrated-page"),
         )
 
+        if migrated:
+            # The merge released the link of the master, so its snapshot no longer binds.
+            assert response.status_code == 404, response.content
+            return
         assert response.status_code == 200, response.content
         parent_html = json.loads(response.content)["formatted_row"]["parent"]
-        if migrated:
-            assert "parent-sync-btn" not in parent_html
-        else:
-            assert "parent-sync-btn" in parent_html
-            assert f"/device/{selected_device.pk}/sync-interface-parent/" in parent_html
+        assert "parent-sync-btn" in parent_html
+        assert f"/device/{selected_device.pk}/sync-interface-parent/" in parent_html
 
     @pytest.mark.django_db
     def test_verify_response_does_not_expose_inaccessible_vc_members(self):
@@ -991,10 +993,11 @@ def _make_vc_member_device(name="srvkey-vc-dev"):
     vc = VirtualChassis.objects.create(name=f"vc-{name}")
     device.virtual_chassis = vc
     device.vc_position = 1
-    # A dict-form librenms_id mapping: get_librenms_sync_device reads this dict with the
-    # caller's server_key, so an unhashable key actually reaches cf_dict.get(["a"]).
+    # A dict-form librenms_id mapping on the chassis master, so an unhashable key reaches the mapping readers.
     seed_mapping(device, "alpha", own=4242, save=False)
     device.save()
+    vc.master = device
+    vc.save()
     return device
 
 

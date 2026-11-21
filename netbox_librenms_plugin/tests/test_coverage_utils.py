@@ -139,61 +139,67 @@ class TestGetVirtualChassisMember:
         assert get_virtual_chassis_member(first, "Ethernet2", members_by_position={}) == second
 
 
-class TestGetLibreNMSSyncDevice:
+class TestMappingOwnership:
     def _members(self, tag, count=3):
         members = [make_device(f"vc-sync-{tag}-{index}") for index in range(1, count + 1)]
         vc = make_virtual_chassis(f"vc-sync-{tag}", *members)
         return vc, members
 
-    def test_explicit_server_mapping_has_highest_priority(self):
-        from netbox_librenms_plugin.server_selection import get_librenms_sync_device
+    def test_a_server_mapping_on_another_member_is_misplaced_whatever_its_server(self):
+        from netbox_librenms_plugin.mapping_owner import OwnerProblem, mapping_ownership
 
         _vc, (first, second, _third) = self._members("mapping")
         seed_mapping(first, "other", own=10)
         seed_mapping(second, own=42)
 
-        assert get_librenms_sync_device(first, server_key="default") == second
-        assert get_librenms_sync_device(first, server_key=None) == first
+        ownership = mapping_ownership(first)
 
-    def test_legacy_mapping_is_a_server_fallback(self):
-        from netbox_librenms_plugin.server_selection import get_librenms_sync_device
+        assert ownership.problem is OwnerProblem.MISPLACED
+        assert (ownership.master, ownership.holders) == (first, (second,))
+
+    def test_a_legacy_mapping_on_another_member_is_misplaced(self):
+        from netbox_librenms_plugin.mapping_owner import OwnerProblem, mapping_ownership
 
         _vc, (first, second, _third) = self._members("legacy")
         seed_stored_mapping(second, 55, save=True)
 
-        assert get_librenms_sync_device(first, server_key="default") == second
+        ownership = mapping_ownership(first)
 
-    def test_float_mapping_is_rejected_in_favor_of_a_valid_mapping(self):
-        from netbox_librenms_plugin.server_selection import get_librenms_sync_device
+        assert ownership.problem is OwnerProblem.MISPLACED
+        assert ownership.holders == (second,)
+
+    def test_an_unreadable_master_mapping_stays_on_the_master(self):
+        """A float ID that no reader accepts is still the master's own data; only another member's data is misplaced."""
+        from netbox_librenms_plugin.mapping_owner import OwnerProblem, mapping_owner, mapping_ownership
 
         _vc, (first, second, third) = self._members("float")
         seed_stored_mapping(first, {"default": 1.0}, save=True)
+
+        assert mapping_owner(second) == first
         seed_mapping(third, "other", own=5)
+        assert mapping_ownership(first).holders == (third,)
+        assert mapping_ownership(first).problem is OwnerProblem.MISPLACED
 
-        assert get_librenms_sync_device(first, server_key=None) == third
-
-    def test_master_then_any_primary_ip_then_lowest_position_fallbacks(self):
-        from netbox_librenms_plugin.server_selection import get_librenms_sync_device
+    def test_only_the_master_owns_the_chassis_whatever_the_primary_ips_and_positions(self):
+        from netbox_librenms_plugin.mapping_owner import OwnerProblem, mapping_owner, mapping_ownership
 
         vc, (first, second, third) = self._members("fallback")
-        _add_primary_ip(second, "second")
+        _add_primary_ip(first, "first")
         vc.master = second
         vc.save(update_fields=["master"])
-        assert get_librenms_sync_device(first, server_key="default") == second
+        assert mapping_owner(first) == second
+        assert mapping_owner(third) == second
 
         vc.master = None
         vc.save(update_fields=["master"])
-        assert get_librenms_sync_device(first, server_key="default") == second
+        assert mapping_ownership(first).problem is OwnerProblem.NO_MASTER
+        assert mapping_ownership(third).owner is None
 
-        second.primary_ip4 = None
-        second.save(update_fields=["primary_ip4"])
-        assert get_librenms_sync_device(third, server_key="default") == first
-
-    def test_standalone_device_is_its_own_sync_device(self):
-        from netbox_librenms_plugin.server_selection import get_librenms_sync_device
+    def test_a_standalone_device_owns_its_own_mapping(self):
+        from netbox_librenms_plugin.mapping_owner import mapping_owner
 
         device = make_device("sync-standalone")
-        assert get_librenms_sync_device(device, server_key="default") == device
+        assert mapping_owner(device) is device
 
 
 class TestPaginationAndUserPreferences:

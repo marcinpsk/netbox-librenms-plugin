@@ -45,7 +45,7 @@ from netbox_librenms_plugin.server_mappings import (
     read_mapping,
     resolve_device_port,
 )
-from netbox_librenms_plugin.server_selection import get_librenms_sync_device
+from netbox_librenms_plugin.mapping_owner import mapping_owner
 from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     apply_cable_manual_picks,
@@ -240,7 +240,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         self._snapshot_port_source_ids = set()
         self._cable_port_acquisition = None
         server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
-        cache_obj = get_librenms_sync_device(obj, server_key=server_key) or obj
+        cache_obj = mapping_owner(obj)
         if not self.restricted_queryset(Device, "view").filter(pk=cache_obj.pk).exists():
             self._cable_source_permission_error = True
             return None
@@ -1604,7 +1604,7 @@ class CableRemoteCreateView(SyncCablesView):
         if cache_device := getattr(self, "_cache_device", None):
             owner_ids.add(cache_device.pk)
         evidence_owner_ids = {port_owner_id(context["row"], side) for side in ("local", "remote")} - {None}
-        mapping_owner = self._hostname_mapping_owner(context["remote_device"], context["row"], server_key)
+        mapping_owner = self._hostname_mapping_owner(context["remote_device"], context["row"])
         chassis_id = None
         if mapping_owner is not None:
             chassis_id, member_ids = self._lock_remote_chassis(context["remote_device"])
@@ -1647,7 +1647,7 @@ class CableRemoteCreateView(SyncCablesView):
     def _locked_mapping_owner_still_holds(self, locked_owners, mapping_owner, chassis_id, context, server_key):
         """True when the locked remote device still selects *mapping_owner*, and its locked mapping names the neighbour."""
         locked_remote = locked_owners[context["remote_device"].pk]
-        rederived = self._hostname_mapping_owner(locked_remote, context["row"], server_key)
+        rederived = self._hostname_mapping_owner(locked_remote, context["row"])
         # Mapping writes lock the owner, so the locked row holds the mapping that the write uses.
         return (
             locked_remote.virtual_chassis_id == chassis_id
@@ -1716,7 +1716,7 @@ class CableRemoteCreateView(SyncCablesView):
                 content_type="text/plain",
             )
         if not self._hostname_neighbour_still_maps_to(
-            self._hostname_mapping_owner(remote_device, row, server_key), row, server_key
+            self._hostname_mapping_owner(remote_device, row), row, server_key
         ):
             return None, HttpResponse(
                 f"The LibreNMS mapping of {remote_device.name} changed. Refresh the cable data and try again.",
@@ -1773,11 +1773,17 @@ class CableRemoteCreateView(SyncCablesView):
         )
 
     @staticmethod
-    def _hostname_mapping_owner(remote_device, row, server_key):
-        """Return the Device whose mapping must still name the neighbour of a hostname-only row, else None."""
+    def _hostname_mapping_owner(remote_device, row):
+        """
+        Return the Device whose mapping must still name the neighbour of a hostname-only row, else None.
+
+        Raises:
+            MappingOwnerError: The virtual chassis of *remote_device* has no mapping owner.
+
+        """
         if row.get("remote_device_id") is not None:
             return None
-        return get_librenms_sync_device(remote_device, server_key=server_key) or remote_device
+        return mapping_owner(remote_device)
 
     @staticmethod
     def _hostname_neighbour_still_maps_to(mapping_owner, row, server_key):

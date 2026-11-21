@@ -97,6 +97,6 @@ If a linked OOB controller's inventory fails, host module rows remain available.
 the table until a successful refresh. The tab and each module action apply current inventory rules to
 the same source snapshot. Parent repair and OOB index offsets do not change the stored source facts.
 
-Data-shape capture keeps the selected device as its subject. In a Virtual Chassis, structural sources
-can belong to the sync owner while IP addresses belong to the selected member. Port compression
+Data-shape capture runs on a device outside a virtual chassis, or on the master of a virtual chassis:
+a member that is not the master has no LibreNMS device of its own. Port compression
 prunes only references that belong to the compressed device. Addresses of other members remain in the recording.
