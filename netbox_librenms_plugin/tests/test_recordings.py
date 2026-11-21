@@ -12,6 +12,7 @@ the plugin-config lookup is stubbed. VC detection reads the serial normalization
 rules and the member-name pattern, so the outcome tests use the test database.
 """
 
+from functools import partial
 from io import StringIO
 import json
 import re
@@ -39,6 +40,18 @@ def _ids(recording):
     return recording.get("name", "unnamed")
 
 
+def read_ip_addresses_as_acquisition(api, device_id):
+    """Read the IP route with the request and the contract that acquisition uses; return ``(obtained, rows)``."""
+    from netbox_librenms_plugin.acquisition import responses
+    from netbox_librenms_plugin.acquisition.snapshot import Outcome
+
+    endpoint = responses.ip_addresses(device_id)
+    decoded = endpoint.decode(*api.get_response(endpoint.request.path, dict(endpoint.request.params)))
+    if decoded.outcome is not Outcome.OBTAINED:
+        return False, decoded.reason
+    return True, decoded.value
+
+
 def test_recordings_present():
     """The recordings directory must contain at least one scenario."""
     assert iter_recording_paths(), "no recording JSON files found in data_shapes/recordings/"
@@ -49,7 +62,10 @@ def test_bundled_empty_responses_replay_as_success(recording_server, recording):
     _server, api = recording_server(recording)
     readers = {
         f"GET /api/v0/devices/{recording['device_id']}/links": (api.get_device_links, "links"),
-        f"GET /api/v0/devices/{recording['device_id']}/ip": (api.get_device_ips, "addresses"),
+        f"GET /api/v0/devices/{recording['device_id']}/ip": (
+            partial(read_ip_addresses_as_acquisition, api),
+            "addresses",
+        ),
         "GET /api/v0/routing/vrf": (api.get_device_vrfs, "vrfs"),
         f"GET /api/v0/inventory/{recording['device_id']}/all": (api.get_device_inventory, "inventory"),
     }

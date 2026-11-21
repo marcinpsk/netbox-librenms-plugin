@@ -11,10 +11,12 @@ from threading import Barrier, BrokenBarrierError, Event
 import pytest
 from django.apps import apps
 from django.contrib.auth import get_user_model
-from django.core.cache import cache
 from django.db import close_old_connections, connection
 
+from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.tests.conftest import bounded_executor, make_device, run_in_threads
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_source_snapshot
 from netbox_librenms_plugin.tests.view_test_helpers import (
     assert_locked_before_update,
     make_request,
@@ -103,8 +105,9 @@ def _sync_global_vlan(device, user, vid, lookup_wrapper):
 
         view = SyncVLANsView()
         view.request = request
-        cache_key = view.get_cache_key(device, "vlans", "default")
-        cache.set(cache_key, [{"vlan_vlan": vid, "vlan_name": "Concurrent global VLAN"}], timeout=60)
+        seed_source_snapshot(
+            device, Resource.VLANS, "default", vlans=[{"vlan_vlan": vid, "vlan_name": "Concurrent global VLAN"}]
+        )
 
         with connection.execute_wrapper(lookup_wrapper):
             view.post(request, object_type="device", object_id=device.pk)
@@ -127,7 +130,10 @@ def test_concurrent_global_vlan_sync_creates_one_vlan():
         password="test-password",
         is_superuser=True,
     )
-    devices = [make_device("global-vlan-device-a"), make_device("global-vlan-device-b")]
+    devices = [
+        seed_mapping(make_device("global-vlan-device-a"), "default", own=501),
+        seed_mapping(make_device("global-vlan-device-b"), "default", own=502),
+    ]
     lookup_barrier = Barrier(2, timeout=10)
     lookup_wrappers = [_GlobalVLANLookupBarrier(lookup_barrier) for _device in devices]
 
@@ -148,6 +154,7 @@ def _drive_grouped_sync(device, user, group, vid, librenms_name, *, intent=None)
     """POST one grouped VID into the real view and return the recorded messages."""
     from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
 
+    seed_mapping(device, "default", own=501)
     data = {
         "action": "create_vlans",
         "select": [str(vid)],
@@ -169,11 +176,7 @@ def _drive_grouped_sync(device, user, group, vid, librenms_name, *, intent=None)
         path="/sync/vlans/",
     )
     view = SyncVLANsView()
-    cache.set(
-        view.get_cache_key(device, "vlans", "default"),
-        [{"vlan_vlan": vid, "vlan_name": librenms_name}],
-        timeout=60,
-    )
+    seed_source_snapshot(device, Resource.VLANS, "default", vlans=[{"vlan_vlan": vid, "vlan_name": librenms_name}])
     post(view, request, object_type="device", object_id=device.pk)
     return messages_on(request)
 

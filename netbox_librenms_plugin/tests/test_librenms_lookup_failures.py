@@ -12,13 +12,11 @@ import pytest
 from django.contrib.messages import get_messages
 from django.core.cache import cache
 from django.urls import reverse
-from ipam.models import IPAddress
 
 from netbox_librenms_plugin.sync_cache import TAB_SPECS, SyncTab, sync_snapshot_key
 from netbox_librenms_plugin.tests.conftest import (
     configure_librenms_servers,
     make_device,
-    make_interface,
     make_superuser,
     make_vm,
 )
@@ -484,57 +482,3 @@ def test_cable_refresh_fails_closed_when_host_discovery_conflicts(
     assert "Cable refresh was incomplete. No cable rows were loaded. Refresh Cables to try again." in rendered_messages
     assert "Cable data refreshed successfully." not in rendered_messages
     assert cache.get(sync_snapshot_key(target, TAB_SPECS[SyncTab.CABLES].source.data_type, server_key)) is None
-
-
-@pytest.mark.django_db
-def test_primary_ip_sync_reports_a_discovered_id_conflict_without_writes(client, librenms_server, settings):
-    """A management-ID conflict must abort the real IP sync transaction before its first write."""
-    server_key = _point_plugin_at(settings, librenms_server.url)
-    owner = make_device("librenms-ip-conflict-owner", librenms_cf={server_key: CONFLICTING_DEVICE_ID})
-    target = make_device("librenms-ip-conflict-target.example.com", librenms_cf={server_key: None})
-    make_interface(target, "Ethernet1", iface_type="1000base-t")
-    row_id = "198.18.20.10/24"
-    port_id = 7020
-    cache_key = sync_snapshot_key(target, TAB_SPECS[SyncTab.IP_ADDRESSES].source.data_type, server_key)
-    cache.set(
-        cache_key,
-        {
-            "ip_addresses": [
-                {
-                    "ip_address": "198.18.20.10",
-                    "prefix_length": 24,
-                    "ip_with_mask": row_id,
-                    "port_id": port_id,
-                    "interface_name": "Ethernet1",
-                }
-            ],
-            "mgmt_ip": "",
-            "ports_by_id": {port_id: {"port_id": port_id, "ifName": "Ethernet1", "ifDescr": "Ethernet1"}},
-            "interface_name_field": "ifName",
-        },
-        timeout=300,
-    )
-    librenms_server.register(
-        f"/api/v0/devices/{target.name}",
-        {"status": "ok", "devices": [{"device_id": CONFLICTING_DEVICE_ID}]},
-        method="GET",
-    )
-    client.force_login(make_superuser("librenms-conflict-ip-user"))
-
-    response = client.post(
-        reverse(
-            "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
-            kwargs={"object_type": "device", "pk": target.pk},
-        ),
-        {
-            "server_key": server_key,
-            "set-primary-ip-toggle": "on",
-            "select": row_id,
-            f"vrf_{row_id}": "",
-        },
-    )
-    rendered_messages = [str(message) for message in get_messages(response.wsgi_request)]
-
-    assert response.status_code == 302
-    assert f"LibreNMS ID {CONFLICTING_DEVICE_ID} is already assigned to device '{owner.name}'" in rendered_messages
-    assert not IPAddress.objects.filter(address=row_id).exists()

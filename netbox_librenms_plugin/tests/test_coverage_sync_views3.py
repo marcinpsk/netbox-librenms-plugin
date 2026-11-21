@@ -18,6 +18,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
 )
 from netbox_librenms_plugin.tests.interface_sync_post_helpers import post_interface_sync, seed_ports
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.view_test_helpers import (
     grant,
     make_request,
@@ -501,24 +502,22 @@ class TestDeleteNetBoxInterfacesPost:
 class TestVlansGroupedUpdateAndSkip:
     def _setup(self, tag, cached_name, existing_name):
         """A real grouped VLAN plus a request selecting it; returns (view, request, device, vlan)."""
-        from django.core.cache import cache
         from ipam.models import VLAN, VLANGroup
 
+        from netbox_librenms_plugin.acquisition.registry import Resource
+        from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_source_snapshot
         from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
 
         group = VLANGroup.objects.create(name=f"grp-{tag}", slug=f"grp-{tag}")
         vlan = VLAN.objects.create(vid=100, group=group, name=existing_name, status="active")
-        dev = make_device(f"vlan-{tag}")
+        dev = seed_mapping(make_device(f"vlan-{tag}"), "default", own=501)
         req = make_request(
             "post", {"select": ["100"], "vlan_group_100": str(group.pk), "expected_vlan_name_100": cached_name}
         )
         view = make_view(SyncVLANsView, req)
         view._post_server_key = "default"
+        seed_source_snapshot(dev, Resource.VLANS, "default", vlans=[{"vlan_vlan": 100, "vlan_name": cached_name}])
         cache_key = view.get_cache_key(dev, "vlans", "default")
-        cache.set(
-            cache_key,
-            [{"vlan_vlan": 100, "vlan_name": cached_name}],
-        )
         return view, req, dev, vlan, cache_key
 
     def test_grouped_vlan_with_different_name_requires_confirmation(self):

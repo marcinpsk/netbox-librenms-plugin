@@ -29,6 +29,8 @@ This document provides an overview of the NetBox LibreNMS Plugin's codebase orga
   - `interface_sync.py` — Shared interface creation and update logic
   - `interface_relationships.py` — Parent, child, and LAG relationship resolution
   - `ip_addressing.py` — Shared IP address handling
+  - `acquisition/`: Source acquisition: the snapshot types, one contract per LibreNMS endpoint, the resource registry and the coordinator. `plan_acquisition` resolves owners before HTTP. A web caller authorizes all planned owners before discovery. `acquire(plan)` reads each owner's stored or cached identity without discovery or writes
+  - `source_cache.py`: Web transport for source snapshots. Refresh requires an authorized acquisition plan. Reads and storage check the current owner and effective identity. Cache deletion and refresh state use the planned owner
   - `sync_cache.py` and `cache_signals.py` — Sync-tab cache coordination and invalidation
   - `jobs.py` — Background import jobs
   - `signals.py` — Public extension signals

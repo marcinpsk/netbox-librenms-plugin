@@ -11,9 +11,12 @@ messaged separately and never claims success.
 import pytest
 from django.contrib.auth import get_user_model
 from django.contrib.messages.storage.fallback import FallbackStorage
-from django.core.cache import cache as real_cache
 from django.test import RequestFactory
 from django_htmx.middleware import HtmxDetails
+
+from netbox_librenms_plugin import source_cache
+from netbox_librenms_plugin.acquisition.registry import Resource
+from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_source_snapshot
 
 
 def _make_device(name):
@@ -23,7 +26,9 @@ def _make_device(name):
     dt, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model="VLM-DT", slug="vlm-dt")
     role, _ = DeviceRole.objects.get_or_create(name="VLM-Role", slug="vlm-role")
     site, _ = Site.objects.get_or_create(name="VLM-Site", slug="vlm-site")
-    return Device.objects.create(name=name, device_type=dt, role=role, site=site, status="active")
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+
+    return seed_mapping(Device.objects.create(name=name, device_type=dt, role=role, site=site, status="active"), own=7)
 
 
 def _post_request(device_pk, vid, group_pk):
@@ -49,14 +54,12 @@ def _drive_sync(device, vid, group_pk):
     view = SyncVLANsView()
     request = _post_request(device.pk, vid, group_pk)
     view.request = request  # dispatch() normally wires this; we call post() directly
-    # Seed the cache the exact way the view reads it (server_key "default" is posted, so the lazy
-    # librenms_api property is never built — no LibreNMS boundary is touched).
-    cache_key = view.get_cache_key(device, "vlans", "default")
-    real_cache.set(cache_key, [{"vlan_vlan": vid, "vlan_name": "Management"}], timeout=60)
+    # server_key "default" is posted, so the lazy librenms_api property is never built.
+    seed_source_snapshot(device, Resource.VLANS, "default", vlans=[{"vlan_vlan": vid, "vlan_name": "Management"}])
     try:
         view.post(request, object_type="device", object_id=device.pk)
     finally:
-        real_cache.delete(cache_key)
+        source_cache.delete(device, Resource.VLANS, "default")
     return [(m.level_tag, m.message) for m in request._messages]
 
 
@@ -106,12 +109,11 @@ class TestVlanSyncGroupMissing:
         request.htmx = HtmxDetails(request)
         view.request = request  # dispatch() normally wires this; we call post() directly
 
-        cache_key = view.get_cache_key(device, "vlans", "default")
-        real_cache.set(cache_key, [{"vlan_vlan": 20, "vlan_name": "Users"}], timeout=60)
+        seed_source_snapshot(device, Resource.VLANS, "default", vlans=[{"vlan_vlan": 20, "vlan_name": "Users"}])
         try:
             view.post(request, object_type="device", object_id=device.pk)
         finally:
-            real_cache.delete(cache_key)
+            source_cache.delete(device, Resource.VLANS, "default")
 
         messages = [(m.level_tag, m.message) for m in request._messages]
         assert any(level == "success" and "created" in msg for level, msg in messages), messages
