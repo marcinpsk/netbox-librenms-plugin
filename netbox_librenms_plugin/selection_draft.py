@@ -264,15 +264,34 @@ class SelectionDraft:
             DraftConflict: If the stored draft has another id or revision.
 
         """
+        return self.choose_rows(draft_id, expected_revision, field, {row_key: value})
+
+    def choose_rows(self, draft_id, expected_revision, field, values):
+        """
+        Set the choice *field* of each row in *values* in one mutation, and return the new revision.
+
+        A row whose value is None loses the choice.
+
+        Args:
+            draft_id (str): The draft id the client read.
+            expected_revision (int): The revision the client read.
+            field (str): The choice.
+            values (dict[str, object]): The new value of each row key.
+
+        Raises:
+            DraftConflict: If the stored draft has another id or revision.
+
+        """
 
         def change(entries):
-            entry = entries.get(row_key, {"intent": Intent.NONE.value, "choices": {}, "evidence": None})
-            if value is None:
-                entry["choices"].pop(field, None)
-            else:
-                entry["choices"][field] = value
-            _put(entries, row_key, entry)
-            return [row_key]
+            for row_key, value in values.items():
+                entry = entries.get(row_key, {"intent": Intent.NONE.value, "choices": {}, "evidence": None})
+                if value is None:
+                    entry["choices"].pop(field, None)
+                else:
+                    entry["choices"][field] = value
+                _put(entries, row_key, entry)
+            return values.keys()
 
         return self._mutate(draft_id, expected_revision, change)
 

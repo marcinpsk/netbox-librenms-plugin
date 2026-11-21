@@ -1,0 +1,109 @@
+[
+  {
+    "name": "off-page A and visible C require B; clear C; B stays",
+    "edges": {"A": ["B"], "C": ["B"]},
+    "page": ["B", "C"],
+    "intents": {"A": "on", "C": "on"},
+    "checked": ["B", "C"],
+    "steps": [
+      {"click": "C", "intents": {"A": "on", "C": "none"}, "checked": ["B"]}
+    ]
+  },
+  {
+    "name": "a selected row takes its required row; a click on the required row excludes it",
+    "edges": {"A": ["B"]},
+    "page": ["A", "B"],
+    "intents": {},
+    "checked": [],
+    "steps": [
+      {"click": "A", "intents": {"A": "on"}, "checked": ["A", "B"]},
+      {"click": "B", "intents": {"A": "on", "B": "off"}, "checked": ["A"]},
+      {"click": "B", "intents": {"A": "on", "B": "on"}, "checked": ["A", "B"]}
+    ]
+  },
+  {
+    "name": "the requirement is transitive",
+    "edges": {"A": ["B"], "B": ["C"]},
+    "page": ["A", "B", "C"],
+    "intents": {},
+    "checked": [],
+    "steps": [
+      {"click": "A", "intents": {"A": "on"}, "checked": ["A", "B", "C"]},
+      {"click": "A", "intents": {"A": "none"}, "checked": []}
+    ]
+  },
+  {
+    "name": "an exclusion stays when the requiring row is cleared and selected again",
+    "edges": {"A": ["B"]},
+    "page": ["A", "B"],
+    "intents": {"A": "on", "B": "off"},
+    "checked": ["A"],
+    "steps": [
+      {"click": "A", "intents": {"A": "none", "B": "off"}, "checked": []},
+      {"click": "A", "intents": {"A": "on", "B": "off"}, "checked": ["A"]}
+    ]
+  },
+  {
+    "name": "a selected row that is also required is excluded when the user clears it",
+    "edges": {"A": ["B"]},
+    "page": ["A", "B"],
+    "intents": {"A": "on", "B": "on"},
+    "checked": ["A", "B"],
+    "steps": [
+      {"click": "B", "intents": {"A": "on", "B": "off"}, "checked": ["A"]}
+    ]
+  },
+  {
+    "name": "a blocked row is never taken, and the walk does not go through it",
+    "edges": {"A": ["B"], "B": ["C"]},
+    "blocked": ["B"],
+    "page": ["A", "C"],
+    "intents": {},
+    "checked": [],
+    "steps": [
+      {"click": "A", "intents": {"A": "on"}, "checked": ["A"]}
+    ]
+  },
+  {
+    "name": "a LAG member takes its aggregate and the other members",
+    "edges": {"M1": ["G"], "M2": ["G"], "G": ["M1", "M2"]},
+    "page": ["G", "M1", "M2"],
+    "intents": {},
+    "checked": [],
+    "steps": [
+      {"click": "M1", "intents": {"M1": "on"}, "checked": ["G", "M1", "M2"]},
+      {"click": "M2", "intents": {"M1": "on", "M2": "off"}, "checked": ["G", "M1"]}
+    ]
+  },
+  {
+    "name": "an excluded row is walked through: its own requirements stay taken",
+    "edges": {"A": ["B"], "B": ["C"]},
+    "page": ["A", "B", "C"],
+    "intents": {"A": "on", "B": "off"},
+    "checked": ["A", "C"]
+  },
+  {
+    "name": "without the option a selection takes nothing along",
+    "edges": {"A": ["B"]},
+    "enabled": false,
+    "page": ["A", "B"],
+    "intents": {},
+    "checked": [],
+    "steps": [
+      {"click": "A", "intents": {"A": "on"}, "checked": ["A"]},
+      {"click": "B", "intents": {"A": "on", "B": "on"}, "checked": ["A", "B"]},
+      {"click": "B", "intents": {"A": "on", "B": "none"}, "checked": ["A"]}
+    ]
+  },
+  {
+    "name": "an off-page requirer keeps a row checked until the user excludes it",
+    "edges": {"A": ["B"]},
+    "page": ["B"],
+    "intents": {"A": "on"},
+    "checked": ["B"],
+    "steps": [
+      {"click": "B", "intents": {"A": "on", "B": "off"}, "checked": []},
+      {"click": "B", "intents": {"A": "on", "B": "on"}, "checked": ["B"]}
+    ]
+  }
+]

@@ -32,21 +32,16 @@ _HEAD = re.compile(
 )
 _SELECTOR = re.compile(r"\.(?:closest|matches)\(\s*'([^']+)'")
 
-# The unconverted tabs' code and the page's UI preferences; B2 and B3 take the tabs' entries out.
+# The unconverted tabs' code (Cables and Modules) and the page's UI preferences; B3 takes the tabs' entries out.
 SYNC_SCRIPT_ALLOWED = {
     "fetch": {
         "checkSyncCacheStatus",
         "deleteSelectedInterfaces",
-        "document:click .lag-sync-btn, .parent-sync-btn, .bridge-sync-btn",
         "handleCableChange",
-        "handleInterfaceChange",
         "handleModuleChange",
         "initializeVCReportButtons",
-        "initializeVlanModalSave",
         "saveInterfaceNameFieldPreference",
         "sendSyncOptionPreference",
-        "verifyVlanInGroup",
-        "verifyVlanSyncGroup",
     },
     "storage": {
         "pruneOtherSelectionScopes",
@@ -57,17 +52,11 @@ SYNC_SCRIPT_ALLOWED = {
     },
     "html": {
         "deleteSelectedInterfaces",
-        "document:click .lag-sync-btn, .parent-sync-btn, .bridge-sync-btn",
         "handleCableChange",
-        "handleInterfaceChange",
         "handleModuleChange",
         "initializeSyncFormSpinners",
         "initializeVCReportButtons",
-        "initializeVlanModalSave",
-        "openVlanDetailModal",
         "syncConfirmModal",
-        "verifyVlanInGroup",
-        "verifyVlanSyncGroup",
         "wireCopyButton",
     },
 }
@@ -124,16 +113,26 @@ def test_storage_html_writes_and_fetch_stay_in_their_allowlists(script, indent, 
     assert scan(script.read_text(encoding="utf-8"), indent) == allowed
 
 
-def test_the_old_script_touches_the_ip_table_only_for_its_vrf_dropdowns():
+# The statements of the old script that may name a converted table: none of them selects or writes a row.
+CONVERTED_TABLE_OWNERS = {
+    "librenms-ipaddress-table": {"initializeVRFSelects"},
+    "librenms-interface-table": {"SYNC_TABLE_FIT_HIDE_ORDER"},
+    "librenms-interface-table-vm": {"SYNC_TABLE_FIT_HIDE_ORDER"},
+    "librenms-vlan-table": set(),
+}
+
+
+@pytest.mark.parametrize(("table_id", "owners"), CONVERTED_TABLE_OWNERS.items(), ids=list(CONVERTED_TABLE_OWNERS))
+def test_the_old_script_names_a_converted_table_only_in_its_allowed_statements(table_id, owners):
     lines = SYNC_SCRIPT.read_text(encoding="utf-8").split("\n")
-    owners = set()
+    found = set()
     current = None
     for number, line in enumerate(lines):
         if line and not line[0].isspace() and not line.startswith(("}", ")", "//", "*", "/*")):
             current = _statement_key(lines, number, 0)
-        if "librenms-ipaddress-table" in line and not line.strip().startswith(("*", "//")):
-            owners.add(current)
-    assert owners == {"initializeVRFSelects"}
+        if re.search(rf"{re.escape(table_id)}(?![-\w])", line) and not line.strip().startswith(("*", "//")):
+            found.add(current)
+    assert found == owners
 
 
 @pytest.mark.parametrize(

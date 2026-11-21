@@ -11,6 +11,7 @@ import json
 from dataclasses import replace
 
 from django.template.loader import render_to_string
+from django_tables2.utils import AttributeDict
 from django.urls import reverse
 
 from netbox_librenms_plugin import source_cache
@@ -148,9 +149,13 @@ def selectable(row):
     return row["row_id"] is not None and offers_selection(row)
 
 
-def selection_problem(entry, row):
+def evidence_problem(entry, current):
     """
     Return why a selected draft entry cannot be submitted as approved, or None when it can.
+
+    Args:
+        entry (Entry): The draft entry of a selected row.
+        current (dict | None): The evidence payload of the row now; None when the row is gone or cannot be selected.
 
     Returns:
         str | None: ``"pending"`` when the entry approves no evidence, ``"changed"`` when the row is gone,
@@ -159,9 +164,14 @@ def selection_problem(entry, row):
     """
     if entry.evidence is None:
         return "pending"
-    if row is None or not selectable(row) or evidence_changed(entry.evidence, row["evidence"]):
+    if current is None or evidence_changed(entry.evidence, current):
         return "changed"
     return None
+
+
+def selection_problem(entry, row):
+    """Return why a selected IP draft entry cannot be submitted as approved (see :func:`evidence_problem`), or None."""
+    return evidence_problem(entry, row["evidence"] if row is not None and selectable(row) else None)
 
 
 def management_assignments(rows, selected, shown_evidence):
@@ -200,12 +210,39 @@ def seed_management_rows(request, assessment, draft):
     return True
 
 
-def _row_url(query, obj, server_key, row_key):
+def row_url(query, obj, server_key, url_name, row_key):
+    """Return the row read URL of one row of a tab: the route *url_name* with the page query and the server."""
     path = reverse(
-        "plugins:netbox_librenms_plugin:ip_row",
+        f"plugins:netbox_librenms_plugin:{url_name}",
         kwargs={"object_type": obj._meta.model_name, "pk": obj.pk, "row_key": row_key},
     )
     return query.url(path, {"server_key": server_key})
+
+
+def bind_draft(table, query, obj, server_key, draft, url_names):
+    """
+    Give the table the draft it shows and the URLs of its draft commands, for the page's draft writer.
+
+    Args:
+        table (Table): The table of a tab on the draft.
+        query (SyncQuery): The page query, which every command URL carries.
+        obj (Device | VirtualMachine): The subject of the sync page.
+        server_key (str): The LibreNMS server of the tab.
+        draft (SelectionDraft): The draft the table shows.
+        url_names (dict[str, str]): The route name of each table attribute, for example ``data-selection-url``.
+
+    """
+    kwargs = {"object_type": obj._meta.model_name, "pk": obj.pk}
+    for attribute, name in url_names.items():
+        path = reverse(f"plugins:netbox_librenms_plugin:{name}", kwargs=kwargs)
+        table.attrs[attribute] = query.url(path, {"server_key": server_key})
+    table.attrs["data-draft-id"] = draft.draft_id
+    table.attrs["data-draft-revision"] = str(draft.revision)
+
+
+def render_rows(request, table_rows):
+    """Return the ``<tr>`` markup of *table_rows* (BoundRows or a list of BoundRow) as the table body renders them."""
+    return render_to_string(ROWS_TEMPLATE, {"rows": table_rows}, request=request)
 
 
 def _show_selection(request, obj, server_key, rows, entries):
@@ -220,30 +257,7 @@ def _show_selection(request, obj, server_key, rows, entries):
         row["selected"] = on and not changed
         row["evidence_changed"] = changed
         row["evidence_token"] = sign_evidence(IP_TAB, row["evidence"]) if selectable(row) else ""
-        row["row_read_url"] = _row_url(query, obj, server_key, row["row_id"]) if row["row_id"] else ""
-
-
-def _bind_draft(table, request, obj, server_key, draft, rows):
-    """
-    Give the table the draft it shows and the URLs of the draft commands, for the page's draft writer.
-
-    The table also carries the evidence token of each management row of *rows*, also of a row that no page
-    of the table shows: Set Primary IP approves only that evidence.
-    """
-    query = SyncQuery.from_request(request)
-    kwargs = {"object_type": obj._meta.model_name, "pk": obj.pk}
-    for attribute, name in (
-        ("data-selection-url", "ip_selection"),
-        ("data-choice-url", "ip_selection_choice"),
-        ("data-management-url", "ip_selection_management"),
-    ):
-        path = reverse(f"plugins:netbox_librenms_plugin:{name}", kwargs=kwargs)
-        table.attrs[attribute] = query.url(path, {"server_key": server_key})
-    table.attrs["data-draft-id"] = draft.draft_id
-    table.attrs["data-draft-revision"] = str(draft.revision)
-    table.attrs["data-management-evidence"] = json.dumps(
-        {row["row_id"]: row["evidence_token"] for row in rows if row.get("is_mgmt_ip") and selectable(row)}
-    )
+        row["row_read_url"] = row_url(query, obj, server_key, "ip_row", row["row_id"]) if row["row_id"] else ""
 
 
 def ip_table(request, obj, server_key, assessment, draft):
@@ -263,29 +277,60 @@ def ip_table(request, obj, server_key, assessment, draft):
     """
     _show_selection(request, obj, server_key, assessment.rows, draft.entries())
     table, filters, filtered_from = filter_sync_table(request, assessment.rows, IPAddressTable)
-    _bind_draft(table, request, obj, server_key, draft, assessment.rows)
+    bind_draft(
+        table,
+        SyncQuery.from_request(request),
+        obj,
+        server_key,
+        draft,
+        {
+            "data-selection-url": "ip_selection",
+            "data-choice-url": "ip_selection_choice",
+            "data-management-url": "ip_selection_management",
+        },
+    )
+    # Set Primary IP approves only these tokens, also of a management row that no page of the table shows.
+    table.attrs["data-management-evidence"] = json.dumps(
+        {row["row_id"]: row["evidence_token"] for row in assessment.rows if row.get("is_mgmt_ip") and selectable(row)}
+    )
     table.configure(request)
     return table, filters, filtered_from
 
 
-def offpage_selection(table, rows, filters):
+def offpage_selection(table, selected_keys, filters, row_key):
     """
-    Return the keys of the selected rows that the shown page of *table* does not show.
+    Return the keys of *selected_keys* that the shown page of *table* does not show.
 
     The page states their number above the table: the submit takes them too, and the user cannot see them
     (they are on another page, or the filter excludes them). An invalid filter shows no row at all.
 
     Args:
-        table (IPAddressTable): The configured table of :func:`ip_table`.
-        rows (list[dict]): Every row of the snapshot, as :func:`ip_table` showed them.
-        filters (SyncFilters): The filters of :func:`ip_table`.
+        table (Table): The configured table of a tab on the draft.
+        selected_keys (list[str]): The keys of the rows that a submit takes, in snapshot order.
+        filters (SyncFilters): The filters of the table.
+        row_key (Callable[[dict], str | None]): Returns the row key of a record of the table.
 
     Returns:
-        list[str]: The row keys, in snapshot order.
+        list[str]: The row keys, in the order of *selected_keys*.
 
     """
-    shown = {bound.record["row_id"] for bound in table.page.object_list} if filters.is_valid else set()
-    return [row["row_id"] for row in rows if row.get("selected") and row["row_id"] not in shown]
+    shown = {row_key(bound.record) for bound in table.page.object_list} if filters.is_valid else set()
+    return [key for key in selected_keys if key not in shown]
+
+
+def hidden_selection(table, selected_keys, filters, row_key):
+    """
+    Return the context of the selection that a tab on the draft does not show, for ``inc/_ip_offpage_selection.html``.
+
+    ``offpage_selected`` names the rows of :func:`offpage_selection`. ``draft_attrs`` carries the draft of the
+    table without the table, for a page that shows no row (an invalid filter): Clear and the submit name it.
+    """
+    offpage = offpage_selection(table, selected_keys, filters, row_key)
+    return {
+        "offpage_selected": offpage,
+        "offpage_selected_json": json.dumps(offpage),
+        "draft_attrs": AttributeDict({name: value for name, value in table.attrs.items() if name.startswith("data-")}),
+    }
 
 
 def ip_row_html(request, obj, server_key, snapshot, draft, row_key):
@@ -302,4 +347,4 @@ def ip_row_html(request, obj, server_key, snapshot, draft, row_key):
     _show_selection(request, obj, server_key, [row], entries)
     table = IPAddressTable([row])
     table.configure(request)
-    return render_to_string(ROWS_TEMPLATE, {"rows": table.rows}, request=request)
+    return render_rows(request, table.rows)

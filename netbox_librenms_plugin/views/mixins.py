@@ -1101,26 +1101,6 @@ class CacheMixin(SyncSubjectClaimMixin):
 
         return sync_snapshot_key(obj, data_type, server_key)
 
-    def get_vlan_overrides_key(self, obj, server_key):
-        """
-        Get the cache key for user VLAN group override selections.
-
-        Stores a {vid_str: group_id_str} map so that "apply to all" VLAN
-        group choices persist across table pages. Including server_key scopes
-        overrides per-server to avoid leakage when multiple servers are configured.
-
-        Args:
-            obj (Device): The device whose VLAN group override selections are cached.
-            server_key (str): The configured LibreNMS server key; a blank key raises ValueError.
-
-        Returns:
-            str: The cache key for the device and server.
-
-        """
-        from netbox_librenms_plugin.sync_cache import sync_vlan_overrides_key
-
-        return sync_vlan_overrides_key(obj, server_key)
-
 
 class VlanAssignmentMixin:
     """
@@ -1405,21 +1385,21 @@ class VlanAssignmentMixin:
         }
         return self._index_vlans(vlans.values())
 
-    def _add_vlan_group_selection(self, port, lookup_maps, device, vlan_group_overrides=None):
+    def _add_vlan_group_selection(self, port, lookup_maps, device, vlan_group_choices=None):
         """
         Add per-VLAN group auto-selection data to port record.
 
         Sets:
         - vlan_group_map: {vid: {"group_id": str, "group_name": str, "is_ambiguous": bool}}
           Maps each VID to its auto-selected VLAN group based on scope hierarchy.
-          If vlan_group_overrides contains a user selection for a VID, that takes
+          If vlan_group_choices contains the user's choice for a VID, that takes
           precedence over auto-selection.
 
         Args:
             port (dict): The LibreNMS port record to update.
             lookup_maps (dict): The VLAN lookup maps for the row's device.
             device (Device): The device used for scope-specific group selection.
-            vlan_group_overrides (dict | None): Optional apply-to-all selections keyed by VID.
+            vlan_group_choices (dict | None): The groups that the user's draft chose for the row, keyed by VID text.
 
         """
         vid_to_groups = lookup_maps.get("vid_to_groups", {})
@@ -1461,16 +1441,16 @@ class VlanAssignmentMixin:
                     "is_ambiguous": False,
                 }
 
-        # Apply user overrides from "apply to all" selections (persisted in cache)
-        if vlan_group_overrides:
+        # The user's choices, from the selection draft
+        if vlan_group_choices:
             from ipam.models import VLANGroup
 
             # Batch-fetch all referenced override group IDs to avoid N+1 queries
             override_group_ids = {
                 group_id
                 for vid in all_vids
-                if str(vid) in vlan_group_overrides
-                and (group_id := coerce_model_pk(vlan_group_overrides[str(vid)])) is not None
+                if str(vid) in vlan_group_choices
+                and (group_id := coerce_model_pk(vlan_group_choices[str(vid)])) is not None
             }
             override_groups_by_id = {}
             if override_group_ids:
@@ -1480,13 +1460,13 @@ class VlanAssignmentMixin:
 
             for vid in all_vids:
                 vid_str = str(vid)
-                if vid_str in vlan_group_overrides:
-                    raw_override_group_id = vlan_group_overrides[vid_str]
+                if vid_str in vlan_group_choices:
+                    raw_override_group_id = vlan_group_choices[vid_str]
                     override_group_id = coerce_model_pk(raw_override_group_id)
                     if override_group_id is not None:
                         group = override_groups_by_id.get(override_group_id)
                         # The row's in-scope groups, not only groups that already carry the VID:
-                        # "apply to all" exists to put the VLAN into a group that lacks it.
+                        # a choice can put the VLAN into a group that lacks it.
                         if group and group.pk in allowed_group_ids:
                             vlan_group_map[vid] = {
                                 "group_id": str(group.pk),
@@ -1494,8 +1474,8 @@ class VlanAssignmentMixin:
                                 "is_ambiguous": False,
                             }
                         # Keep auto-selection when the group was deleted or is out of the row's scope.
-                    elif raw_override_group_id == "" and (vid, None) in lookup_maps.get("vid_group_to_vlan", {}):
-                        # User explicitly chose "No Group (Global)"
+                    elif raw_override_group_id == "":
+                        # The user chose "No Group (Global)": it stays, also when Global holds no such VLAN.
                         vlan_group_map[vid] = {
                             "group_id": "",
                             "group_name": "Global",

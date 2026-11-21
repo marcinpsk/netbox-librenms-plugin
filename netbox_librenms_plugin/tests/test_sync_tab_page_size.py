@@ -1,5 +1,6 @@
 """Each sync tab remembers the page size the user picked, per tab, in the user's preferences."""
 
+import json
 from copy import deepcopy
 
 import pytest
@@ -9,14 +10,8 @@ from django.test import RequestFactory
 from django.urls import reverse
 
 from netbox_librenms_plugin.tests.conftest import make_device
-from netbox_librenms_plugin.tests.test_interface_sync_htmx_swap import (
-    FIRST_PORT,
-    _port,
-    _post,
-    _row_names,
-    _sync_data,
-)
-from netbox_librenms_plugin.tests.test_interface_sync_htmx_swap import _seed as _seed_ports
+from netbox_librenms_plugin.tests._html_helpers import open_tags
+from netbox_librenms_plugin.tests.interface_sync_post_helpers import seed_ports, sync_port
 from netbox_librenms_plugin.tests.test_ip_address_sync_safety import _configure_test_server, _serve_librenms_ip_rows
 from netbox_librenms_plugin.tests.test_sync_option_preferences import SERVER_KEY, _user
 from netbox_librenms_plugin.utils import get_table_paginate_count
@@ -27,6 +22,8 @@ IP_ROWS = [
     {"address": f"198.18.42.{n}", "prefix_length": 24, "port_id": 7200 + n, "interface": f"Ethernet{n}"}
     for n in range(1, 4)
 ]
+
+FIRST_PORT = 5000
 
 pytestmark = pytest.mark.django_db
 
@@ -45,7 +42,7 @@ def _set_netbox_page_size(user, size):
 def _device(name):
     """Return a device with 120 interface rows, more than any page size these tests pick plus its orphans."""
     device = make_device(name, librenms_cf={SERVER_KEY: {"id": 42}})
-    _seed_ports(device, [_port(FIRST_PORT + index, f"eth{index:03d}") for index in range(120)])
+    seed_ports(device, [sync_port(FIRST_PORT + index, f"eth{index:03d}") for index in range(120)])
     return device
 
 
@@ -60,7 +57,7 @@ def _interfaces(client, device, **params):
     )
     assert response.status_code == 200
     # Every page size these tests pick is below the row count, so the first page shows that many rows.
-    return len(_row_names(response.content.decode()))
+    return len([attrs for attrs in open_tags(response.content.decode(), "tr") if attrs.get("data-row-key")])
 
 
 def _ip_refresh(client, device, live_librenms, **params):
@@ -169,10 +166,48 @@ def test_a_sync_post_that_carries_the_rendered_size_saves_nothing(client):
     device = _device("page-size-sync-post-device")
     _set_netbox_page_size(user, 10)
 
-    response = _post(client, device, _sync_data(FIRST_PORT + 12), interfaces_page="2", interfaces_per_page="10")
+    # The user ticks a row on page 2, which the tab renders at the NetBox page size.
+    response = client.get(
+        reverse(
+            "plugins:netbox_librenms_plugin:sync_cache_fragment",
+            kwargs={"object_type": "device", "pk": device.pk, "tab": "interfaces"},
+        ),
+        {
+            "server_key": SERVER_KEY,
+            "interface_name_field": "ifName",
+            "interfaces_page": "2",
+            "interfaces_per_page": "10",
+        },
+    )
+    html = response.content.decode()
+    (table,) = [attrs for attrs in open_tags(html, "table") if attrs.get("data-draft-id")]
+    (row,) = [attrs for attrs in open_tags(html, "tr") if attrs.get("data-row-key") == str(FIRST_PORT + 12)]
+    selected = client.post(
+        table["data-selection-url"],
+        {
+            "draft_id": table["data-draft-id"],
+            "expected_revision": table["data-draft-revision"],
+            "assignments": json.dumps({str(FIRST_PORT + 12): {"state": "on", "token": row["data-evidence"]}}),
+        },
+    )
+    assert selected.status_code == 204
+    draft = {"draft_id": table["data-draft-id"], "expected_revision": selected["X-Draft-Revision"]}
+    url = reverse(
+        "plugins:netbox_librenms_plugin:sync_selected_interfaces",
+        kwargs={"object_type": "device", "object_id": device.pk},
+    )
+
+    # The form action carries the page query of the rendered tab.
+    response = client.post(
+        f"{url}?interface_name_field=ifName&interfaces_page=2&interfaces_per_page=10",
+        {"server_key": SERVER_KEY, "exclude_columns": ["vlans", "mac_address"], **draft},
+        HTTP_HX_REQUEST="true",
+    )
 
     assert response.status_code == 200
-    assert "Showing 11-20 of 120" in response.content.decode()
+    assert _stored(user, INTERFACES_PREFERENCE) is None
+    # The page then reads the tab again with the same page query.
+    assert _interfaces(client, device, interfaces_page="2", interfaces_per_page="10") == 10
     assert _stored(user, INTERFACES_PREFERENCE) is None
 
 

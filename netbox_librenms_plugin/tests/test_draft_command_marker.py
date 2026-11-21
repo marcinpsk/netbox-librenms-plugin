@@ -1,12 +1,13 @@
 """
-Guard: every element of the IP tab and its dialogs that posts carries ``data-draft-command``.
+Guard: every element of a tab on the draft (IP, Interfaces, VLANs) and its dialogs that posts carries ``data-draft-command``.
 
 The draft writer of the sync page (``sync_draft.js``) keys on that marker alone. A post that it does not see
 as a command neither waits for the draft writes nor makes the READs sent before it stale, so an older READ
-can show the tab from before the change. The scan reads the templates that the IP views name and every
-plugin template that they include. Limit: an include whose name is a variable is not followed.
+can show the tab from before the change. The scan reads the templates that the views of each tab name and
+every plugin template that they include, and the markup that the tables of the tabs render in Python. Limit: an include whose name is a variable is not followed.
 """
 
+import ast
 import re
 from pathlib import Path
 
@@ -14,7 +15,11 @@ import pytest
 
 PACKAGE = Path(__file__).resolve().parents[1]
 TEMPLATES = PACKAGE / "templates"
-IP_VIEWS = (PACKAGE / "views/base/ip_addresses_view.py", PACKAGE / "views/sync/ip_addresses.py")
+TAB_VIEWS = {
+    "ipaddresses": ("views/base/ip_addresses_view.py", "views/sync/ip_addresses.py"),
+    "interfaces": ("views/base/interfaces_view.py", "views/sync/interfaces.py"),
+    "vlans": ("views/base/vlan_table_view.py", "views/sync/vlans.py"),
+}
 PLUGIN_TEMPLATE = re.compile(r"""["'](netbox_librenms_plugin/[\w/.-]+\.html)["']""")
 INCLUDE = re.compile(r"""\{%\s*include\s+["'](netbox_librenms_plugin/[\w/.-]+\.html)["']""")
 # One opening tag; a template tag inside it can hold ">".
@@ -23,9 +28,23 @@ POSTS = re.compile(r"""\bmethod\s*=\s*["']post["']|\bhx-(?:post|put|patch|delete
 MARKER = re.compile(r"""\bdata-draft-command\s*=\s*["'](?:draft|action|refresh)["']""")
 
 
-def ip_tab_templates():
-    """Return the plugin templates that the IP views render, with every plugin template that they include."""
-    pending = {name for view in IP_VIEWS for name in PLUGIN_TEMPLATE.findall(view.read_text(encoding="utf-8"))}
+# The tables of the tabs on the draft, which render some posting elements in Python.
+TAB_TABLES = ("tables/interfaces.py", "tables/vlans.py", "tables/ipaddresses.py", "tables/draft_rows.py")
+
+
+def python_markup(path):
+    """Return each string constant of the module *path*: adjacent literals are one constant."""
+    tree = ast.parse((PACKAGE / path).read_text(encoding="utf-8"))
+    return [node.value for node in ast.walk(tree) if isinstance(node, ast.Constant) and isinstance(node.value, str)]
+
+
+def tab_templates(tab):
+    """Return the plugin templates that the views of *tab* render, with every plugin template that they include."""
+    pending = {
+        name
+        for view in TAB_VIEWS[tab]
+        for name in PLUGIN_TEMPLATE.findall((PACKAGE / view).read_text(encoding="utf-8"))
+    }
     found = set()
     while pending:
         name = pending.pop()
@@ -44,19 +63,42 @@ def unmarked_posting_tags(text):
     ]
 
 
-def test_the_scan_reads_the_ip_tab_and_its_dialogs():
-    assert {
-        "netbox_librenms_plugin/_ipaddress_sync_content.html",
-        "netbox_librenms_plugin/inc/_ipaddress_sync_refresh.html",
-        "netbox_librenms_plugin/htmx/ip_address_conflicts.html",
-        "netbox_librenms_plugin/ip_address_conflicts_page.html",
-    } <= ip_tab_templates()
+@pytest.mark.parametrize(
+    ("tab", "templates"),
+    [
+        (
+            "ipaddresses",
+            {
+                "_ipaddress_sync_content.html",
+                "inc/_ipaddress_sync_refresh.html",
+                "htmx/ip_address_conflicts.html",
+                "ip_address_conflicts_page.html",
+            },
+        ),
+        (
+            "interfaces",
+            {"_interface_sync_content.html", "inc/_interface_sync_refresh.html", "htmx/interface_vlan_groups.html"},
+        ),
+        (
+            "vlans",
+            {
+                "_vlan_sync_content.html",
+                "inc/_vlan_sync_refresh.html",
+                "htmx/vlan_conflicts.html",
+                "vlan_conflicts_page.html",
+            },
+        ),
+    ],
+)
+def test_the_scan_reads_the_tab_and_its_dialogs(tab, templates):
+    assert {f"netbox_librenms_plugin/{name}" for name in templates} <= tab_templates(tab)
 
 
-def test_every_element_that_posts_in_the_ip_tab_and_its_dialogs_is_a_draft_command():
+@pytest.mark.parametrize("tab", sorted(TAB_VIEWS))
+def test_every_element_that_posts_in_the_tab_and_its_dialogs_is_a_draft_command(tab):
     unmarked = {
         name: tags
-        for name in sorted(ip_tab_templates())
+        for name in sorted(tab_templates(tab))
         if (tags := unmarked_posting_tags((TEMPLATES / name).read_text(encoding="utf-8")))
     }
 
@@ -78,3 +120,14 @@ def test_every_element_that_posts_in_the_ip_tab_and_its_dialogs_is_a_draft_comma
 )
 def test_the_check_finds_an_element_that_posts_without_a_marker(markup, unmarked):
     assert bool(unmarked_posting_tags(markup)) is unmarked
+
+
+@pytest.mark.parametrize("path", TAB_TABLES)
+def test_every_element_that_posts_in_the_tables_of_the_tabs_is_a_draft_command(path):
+    unmarked = [tag for text in python_markup(path) for tag in unmarked_posting_tags(text)]
+
+    assert not unmarked, f"give each of these a data-draft-command marker (see sync_draft.js): {unmarked}"
+
+
+def test_the_table_scan_reads_the_relationship_buttons():
+    assert any("hx-post=" in text and "data-draft-command=" in text for text in python_markup("tables/interfaces.py"))
