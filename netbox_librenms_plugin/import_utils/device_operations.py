@@ -92,7 +92,8 @@ logger = logging.getLogger(__name__)
 # not-reliably-checked. Keep it a shared constant so the producer and every consumer can't drift
 # apart — a silent text change would otherwise defeat the fail-closed guarantee.
 VALIDATION_ERROR_ISSUE_PREFIX = "Validation error:"
-# The fragment of the blocker of a row whose serial no lookup can read; the refresh strips a stale copy by it.
+# Refresh uses these fragments to remove stale serial blockers.
+SERIAL_DUPLICATE_ISSUE_MARKER = "Multiple NetBox devices share serial"
 SERIAL_UNAVAILABLE_ISSUE_MARKER = "cannot be matched:"
 STACK_DETECTION_FAILED_MESSAGE = "Stack detection failed. Refresh LibreNMS data and try again."
 
@@ -1456,9 +1457,10 @@ def _match_and_validate(  # noqa: C901
                         return result
                     if discovery.kind is ResolutionKind.AMBIGUOUS:
                         # Leave the row unbound before the weaker IP lookup.
+                        result["existing_match_type"] = "ambiguous_hostname_or_serial"
                         result["serial_duplicate"] = True
                         result["issues"].append(
-                            f"Multiple NetBox devices share serial '{serial}'; resolve the duplicate "
+                            f"{SERIAL_DUPLICATE_ISSUE_MARKER} '{serial}'; resolve the duplicate "
                             "serial before importing."
                         )
                         result["can_import"] = False
