@@ -95,6 +95,7 @@ from netbox_librenms_plugin.server_mappings import (
     IDENTITY_BUSY_MESSAGE,
     AmbiguousLibreNMSIdError,
     IdentityBusy,
+    MalformedCustomFieldData,
     MappingRole,
     assign_own,
     find_mapping,
@@ -104,6 +105,7 @@ from netbox_librenms_plugin.server_mappings import (
     persist_mapping,
     prefetch_mappings,
     read_mapping,
+    resolve_mapping_matches,
 )
 
 logger = logging.getLogger(__name__)
@@ -1049,14 +1051,19 @@ def _storable_text(value) -> bool:
 class _ImportObjects(NamedTuple):
     """The objects and mapping matches loaded for one batch of import rows."""
 
+    server_key: str
     by_pk: dict[tuple[type, int], Device | VirtualMachine]
-    by_identity: dict[tuple[type, int], list[Device | VirtualMachine]]
+    by_identity: dict[tuple[type, int, MappingRole], list[Device | VirtualMachine]]
 
     def find_identity(self, model, identity):
-        matches = self.by_identity.get((model, coerce_librenms_id(identity)), ())
-        if len(matches) > 1:
-            raise AmbiguousLibreNMSIdError(f"LibreNMS ID {identity!r} matches multiple {model.__name__} records.")
-        return matches[0] if matches else None
+        normalized_id = coerce_librenms_id(identity)
+        return resolve_mapping_matches(
+            model,
+            server=self.server_key,
+            identity=identity,
+            own_matches=self.by_identity.get((model, normalized_id, MappingRole.OWN), ()),
+            oob_matches=self.by_identity.get((model, normalized_id, MappingRole.OOB), ()),
+        )
 
 
 def _index_import_objects(objects, server_key) -> _ImportObjects:
@@ -1065,11 +1072,18 @@ def _index_import_objects(objects, server_key) -> _ImportObjects:
     matches = {}
     if is_server_key(server_key):
         for obj in objects:
-            mapping = read_mapping(obj)
+            try:
+                mapping = read_mapping(obj)
+            except MalformedCustomFieldData:
+                # The record holds no identity. Report the error only if a row matches it.
+                continue
             own_id = mapping.legacy.queryable_id if mapping.legacy.is_legacy else mapping.own_id(server_key)
-            for identity in {own_id, mapping.oob_id(server_key)} - {None}:
-                matches.setdefault((type(obj), identity), []).append(obj)
-    return _ImportObjects(by_pk, matches)
+            oob_id = mapping.oob_id(server_key)
+            if own_id is not None:
+                matches.setdefault((type(obj), own_id, MappingRole.OWN), []).append(obj)
+            if oob_id is not None:
+                matches.setdefault((type(obj), oob_id, MappingRole.OOB), []).append(obj)
+    return _ImportObjects(server_key, by_pk, matches)
 
 
 def preload_import_objects(
