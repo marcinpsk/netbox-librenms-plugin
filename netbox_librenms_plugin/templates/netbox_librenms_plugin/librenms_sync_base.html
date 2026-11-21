@@ -404,7 +404,7 @@
                                     <i class="mdi mdi-check-circle"></i>
                                 </span>
                                 {% if serial_stored_form_differs %}
-                                <span class="badge text-bg-info ms-1" title="NetBox stores '{{ object.serial }}', which names the same hardware. Sync to store the LibreNMS text.">stored form differs</span>
+                                <span class="badge text-bg-info ms-1"{% if not object.virtual_chassis %} title="NetBox stores '{{ object.serial }}', which names the same hardware. Sync to store the LibreNMS text."{% endif %}>stored form differs</span>
                                 {% endif %}
                                 {% endif %}
                             </td>
@@ -622,6 +622,18 @@
                                                     title="View VC member serials from inventory">
                                                 <i class="mdi mdi-server-network"></i> VC Serials ({{ vc_inventory_serials|length }})
                                             </button>
+                                        {% elif vc_inventory_unavailable %}
+                                            <span class="text-warning small" data-vc-inventory-error>
+                                                Could not read the LibreNMS inventory.
+                                            </span>
+                                        {% elif object.virtual_chassis and serial_unavailable %}
+                                            <span class="text-warning small" data-vc-serial-context-unavailable>
+                                                {{ serial_unavailable }}
+                                            </span>
+                                        {% elif object.virtual_chassis %}
+                                            <span class="text-muted small" data-vc-serial-unavailable>
+                                                LibreNMS inventory did not identify the virtual chassis members.
+                                            </span>
                                         {% else %}
                                             {% if serial_admitted and not serial_unavailable %}
                                                 {% if not serial_matches or serial_stored_form_differs %}
@@ -1202,6 +1214,8 @@ that may well be correct.
                                         <span class="text-success ms-1" title="Already assigned">
                                             <i class="mdi mdi-check-circle"></i>
                                         </span>
+                                    {% elif item.assigned_hidden %}
+                                        <span class="text-muted">A member you cannot view</span>
                                     {% else %}
                                         <span class="text-muted">-</span>
                                     {% endif %}
@@ -1210,7 +1224,7 @@ that may well be correct.
                                     <input type="hidden" name="librenms_serial_{{ forloop.counter }}" value="{{ item.librenms_serial }}">
                                     <select name="member_id_{{ forloop.counter }}" class="form-select form-select-sm">
                                         <option value="">Select member...</option>
-                                        {% for member in object.virtual_chassis.members.all %}
+                                        {% for member in vc_serial_members %}
                                         <option value="{{ member.pk }}" {% if item.assigned_member and item.assigned_member.pk == member.pk %}selected{% endif %}>
                                             {{ member.name }}
                                         </option>

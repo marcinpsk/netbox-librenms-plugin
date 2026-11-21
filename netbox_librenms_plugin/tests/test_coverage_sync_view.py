@@ -303,6 +303,8 @@ class TestSyncPageRouting:
         assert response.context["serial_stored_form_differs"] is matches
         sync_serial_url = reverse("plugins:netbox_librenms_plugin:update_device_serial", kwargs={"pk": device.pk})
         assert sync_serial_url in response.content.decode()
+        badge = re.search(rb'<span class="badge text-bg-info ms-1" title=', response.content)
+        assert (badge is not None) is matches
 
     @pytest.mark.parametrize(("stored", "reported", "matches"), [("100200", 100200, True), ("0", 0, False)])
     def test_a_numeric_serial_matches_its_stored_text_when_it_has_an_identity(
@@ -520,6 +522,32 @@ class TestLibreNMSDeviceInfo:
         assert result["mismatched_device"] is False
         assert result["librenms_device_details"]["librenms_device_hardware"] == "-"
 
+    def test_an_answer_for_another_device_id_is_unavailable_not_absent(self, librenms_server):
+        """LibreNMS answers the request for 6633 with device 6634, so 6633's existence is unknown: no Add Device."""
+        device = make_device("info-other-device-id")
+        librenms_server.register(
+            "/api/v0/devices/6633", {"status": "ok", "devices": [{"device_id": 6634, "hostname": device.name}]}
+        )
+        view = _device_view()
+        view.librenms_id = 6633
+
+        result = view.get_librenms_device_info(device)
+
+        assert result["found_in_librenms"] is False
+        assert result["device_info_unavailable"] is True
+
+    def test_a_cached_row_for_another_device_id_is_read_again(self, librenms_server):
+        """An older worker cached device 6636 under 6635; the client reads 6635 again instead of serving it."""
+        from django.core.cache import cache
+
+        _register_device(librenms_server, 6635, "info-cached-other-id")
+        view = _device_view()
+        cache.set(f"librenms_device_info_{SERVER_KEY}_6635", (True, {"device_id": 6636, "hostname": "other"}), 60)
+
+        found, row = view.librenms_api.get_device_info(6635)
+
+        assert (found, row["device_id"]) == (True, 6635)
+
     def test_real_live_info_populates_details_and_matches_short_hostname(self, librenms_server):
         device = make_device("info-matched")
         _register_device(
@@ -580,6 +608,11 @@ class TestLibreNMSDeviceInfo:
         assert result["librenms_device_details"]["netbox_dns_name"] == "dns-identity.example.test"
 
 
+def _all_members(device):
+    """Return every member of the chassis of *device*: a viewer who may view them all."""
+    return list(device.virtual_chassis.members.all())
+
+
 def _stack_inventory(*members, extra=()):
     """Return a stack root, its chassis members and *extra* rows as one inventory."""
     root = {"entPhysicalIndex": 1, "entPhysicalClass": "stack", "entPhysicalContainedIn": 0}
@@ -634,6 +667,60 @@ _JUNOS_VC_INVENTORY = [
 
 @pytest.mark.django_db
 class TestVirtualChassisInventory:
+    @pytest.mark.parametrize("action", ["display", "write"])
+    def test_incomplete_junos_inventory_blocks_direct_serial_sync(self, logged_in_client, librenms_server, action):
+        from netbox_librenms_plugin.tests.view_test_helpers import message_texts
+
+        _vc, (first, second) = make_virtual_chassis_members("inventory-junos-incomplete", count=2)
+        first.serial = "12"
+        first.save()
+        device_id = 6654
+        seed_mapping(first, SERVER_KEY, own=device_id)
+        serials = {1: "ABC123", 120: "12", 121: "ABC123"}
+        inventory = [
+            {**entry, "entPhysicalSerialNum": serials[entry["entPhysicalIndex"]]}
+            for entry in _JUNOS_VC_INVENTORY
+            if entry["entPhysicalIndex"] in serials
+        ]
+        _register_device(librenms_server, device_id, first.name, serial="ABC123", inventory=inventory)
+        direct_url = reverse("plugins:netbox_librenms_plugin:update_device_serial", kwargs={"pk": first.pk})
+
+        if action == "display":
+            response = logged_in_client.get(_sync_url(first))
+            assert response.status_code == 200
+            assert response.context["vc_inventory_serials"] == []
+            assert direct_url not in response.content.decode()
+            assert b"data-vc-serial-unavailable" in response.content
+            assert b"data-vc-inventory-error" not in response.content
+        else:
+            response = logged_in_client.post(direct_url, {"server_key": SERVER_KEY})
+            first.refresh_from_db()
+            second.refresh_from_db()
+            assert (first.serial, second.serial) == ("12", "")
+            assert response.status_code == 302
+            assert message_texts(response.wsgi_request, "error")
+
+    def test_a_chassis_serial_badge_has_no_direct_sync_tooltip(self, logged_in_client, librenms_server):
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        NormalizationRule.objects.get_or_create(
+            scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+        )
+        _vc, (member,) = make_virtual_chassis_members("inventory-serial-badge", count=1)
+        member.serial = "ABC123"
+        member.save()
+        seed_mapping(member, SERVER_KEY, own=6655)
+        _register_device(librenms_server, 6655, member.name, serial="S/N ABC123")
+
+        response = logged_in_client.get(_sync_url(member))
+
+        assert response.status_code == 200
+        assert response.context["serial_stored_form_differs"] is True
+        assert response.context["vc_inventory_serials"] == []
+        badge = re.search(rb'<span class="badge text-bg-info ms-1"[^>]*>', response.content)
+        assert badge is not None
+        assert b" title=" not in badge.group()
+
     def test_junos_fpc_members_are_both_offered_in_the_serials_modal(self, logged_in_client, librenms_server):
         """A Junos VC lists every FPC member serial, not only the root chassis serial."""
         _vc, members = make_virtual_chassis_members("inventory-junos", count=2)
@@ -654,6 +741,30 @@ class TestVirtualChassisInventory:
         assert "12348" not in form
         assert "12351" not in form
 
+    def test_a_master_outside_its_chassis_reports_unavailable_serial_context(self, logged_in_client, librenms_server):
+        from dcim.models import VirtualChassis
+
+        from netbox_librenms_plugin.serial_identity import UNAVAILABLE_MASTER_LINK
+
+        chassis, (first, _second) = make_virtual_chassis_members("inventory-broken-master")
+        outside_master = make_device("inventory-outside-master")
+        VirtualChassis.objects.filter(pk=chassis.pk).update(master=outside_master)
+        seed_mapping(first, SERVER_KEY, own=6656)
+        inventory = _stack_inventory(
+            {"entPhysicalSerialNum": "VC-FIRST-SERIAL"}, {"entPhysicalSerialNum": "VC-SECOND-SERIAL"}
+        )
+        _register_device(librenms_server, 6656, first.name, serial="", inventory=inventory)
+
+        response = logged_in_client.get(_sync_url(first))
+
+        assert response.status_code == 200
+        assert response.context["found_in_librenms"] is True
+        assert response.context["serial_unavailable"] == UNAVAILABLE_MASTER_LINK
+        assert response.context["vc_inventory_serials"] == []
+        assert response.context["vc_inventory_unavailable"] is False
+        assert b"data-vc-serial-unavailable" not in response.content
+        assert b"data-vc-serial-context-unavailable" in response.content
+
     @pytest.mark.parametrize("stored", [("VC-DUP", "S/N VC-DUP"), ("S/N VC-DUP", "VC-DUP")])
     def test_a_serial_that_two_members_share_assigns_neither(self, librenms_server, stored):
         """Two members normalize to one serial key, so the modal names no assigned member."""
@@ -671,7 +782,7 @@ class TestVirtualChassisInventory:
         view = _device_view()
         view.librenms_id = 6648
 
-        result = view._get_vc_inventory_serials(members[0])
+        result = view._get_vc_inventory_serials(members[0], _all_members(members[0]))
 
         assert [(item["serial"], item["assigned_member"]) for item in result] == [("VC-DUP", None), ("VC-OTHER", None)]
 
@@ -697,7 +808,7 @@ class TestVirtualChassisInventory:
         view = _device_view()
         view.librenms_id = 6641
 
-        result = view._get_vc_inventory_serials(members[0])
+        result = view._get_vc_inventory_serials(members[0], _all_members(members[0]))
 
         assert len(result) == 2
         assert result[0]["assigned_member"] == members[0]
@@ -722,7 +833,7 @@ class TestVirtualChassisInventory:
         view = _device_view()
         view.librenms_id = 6644
 
-        result = view._get_vc_inventory_serials(members[0])
+        result = view._get_vc_inventory_serials(members[0], _all_members(members[0]))
 
         assert len(result) == 2
         assert result[0]["serial"] == "S/N BCFB9793"
@@ -759,7 +870,7 @@ class TestVirtualChassisInventory:
         view = _device_view()
         view.librenms_id = 6646
 
-        result = view._get_vc_inventory_serials(member)
+        result = view._get_vc_inventory_serials(member, _all_members(member))
 
         assert result[0]["serial"] == "VENDOR:MEMBER-SERIAL"
         assert result[0]["assigned_member"] == member
@@ -793,7 +904,7 @@ class TestVirtualChassisInventory:
         view = _device_view()
         view.librenms_id = 6650
 
-        result = view._get_vc_inventory_serials(page)
+        result = view._get_vc_inventory_serials(page, _all_members(page))
 
         assert result[0]["serial"] == "TAG ABC-DIALOG"
         assert result[0]["assigned_member"] is None
@@ -825,7 +936,7 @@ class TestVirtualChassisInventory:
         view = _device_view()
         view.librenms_id = 6651
 
-        result = view._get_vc_inventory_serials(page)
+        result = view._get_vc_inventory_serials(page, _all_members(page))
 
         assert [(item["serial"], item["assigned_member"]) for item in result][0] == ("TAG-AB", member)
 
@@ -856,7 +967,7 @@ class TestVirtualChassisInventory:
         view = _device_view()
         view.librenms_id = 6652
 
-        result = view._get_vc_inventory_serials(page)
+        result = view._get_vc_inventory_serials(page, _all_members(page))
 
         assert [(item["serial"], item["assigned_member"]) for item in result] == [("ROOT123", None), ("TAG-AB", member)]
 
@@ -882,9 +993,10 @@ class TestVirtualChassisInventory:
         _register_device(librenms_server, 6645, members[0].name, inventory=inventory)
         view = _device_view()
         view.librenms_id = 6645
+        viewable = _all_members(members[0])
 
         with CaptureQueriesContext(connection) as captured:
-            result = view._get_vc_inventory_serials(members[0])
+            result = view._get_vc_inventory_serials(members[0], viewable)
 
         assert len(result) == 5
         rule_queries = [q for q in captured.captured_queries if "normalizationrule" in q["sql"].lower()]
@@ -898,13 +1010,34 @@ class TestVirtualChassisInventory:
         ]
         assert per_member == []
 
-    def test_failed_inventory_lookup_returns_an_empty_list(self, librenms_server):
-        _vc, members = make_virtual_chassis_members("inventory-failure", count=1)
-        librenms_server.register("/api/v0/inventory/6642/all", {"status": "error"}, status=404)
-        view = _device_view()
-        view.librenms_id = 6642
+    @pytest.mark.parametrize(("status", "read_error"), [(404, False), (503, True)])
+    def test_inventory_lookup_distinguishes_empty_from_failed(
+        self, logged_in_client, librenms_server, status, read_error
+    ):
+        _vc, (member,) = make_virtual_chassis_members("inventory-failure", count=1)
+        seed_mapping(member, SERVER_KEY, own=6642)
+        _register_device(librenms_server, 6642, member.name)
+        librenms_server.register("/api/v0/inventory/6642/all", {"status": "error"}, status=status)
 
-        assert view._get_vc_inventory_serials(members[0]) == []
+        response = logged_in_client.get(_sync_url(member))
+
+        assert response.status_code == 200
+        assert response.context["found_in_librenms"] is True
+        assert response.context["vc_inventory_unavailable"] is read_error
+        assert (b"data-vc-inventory-error" in response.content) is read_error
+        assert (b"data-vc-serial-unavailable" in response.content) is (not read_error)
+
+    def test_the_dialog_offers_no_row_for_a_serial_that_is_not_text_or_a_number(self, librenms_server):
+        """The dialog posts text, so a JSON `true` would reach Sync All as the serial "True"."""
+        _vc, members = make_virtual_chassis_members("inventory-boolean", count=2)
+        inventory = _stack_inventory({"entPhysicalSerialNum": True}, {"entPhysicalSerialNum": "VC-REAL-SERIAL"})
+        _register_device(librenms_server, 6649, members[0].name, inventory=inventory)
+        view = _device_view()
+        view.librenms_id = 6649
+
+        result = view._get_vc_inventory_serials(members[0], _all_members(members[0]))
+
+        assert [item["librenms_serial"] for item in result] == ["VC-REAL-SERIAL"]
 
     def test_the_dialog_stores_the_raw_serial_and_shows_the_member_as_assigned(self, logged_in_client, librenms_server):
         """The dialog posts and shows the LibreNMS serial, and finds the member on the next render."""
@@ -939,6 +1072,34 @@ class TestVirtualChassisInventory:
         response = logged_in_client.get(_sync_url(owner))
         shown = {item["serial"]: item["assigned_member"] for item in response.context["vc_inventory_serials"]}
         assert shown == {"S/N OWNER-RAW": owner, "S/N MEMBER-RAW": member}
+
+    def test_the_dialog_names_and_offers_only_the_members_the_viewer_may_view(self, client, librenms_server):
+        """A hidden member holds a reported serial: the dialog shows the row, but no name, link or choice of it."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+
+        _vc, (page, visible, hidden) = make_virtual_chassis_members("inventory-scope", count=3)
+        hidden.serial = "VC-HIDDEN-SERIAL"
+        hidden.save()
+        seed_mapping(page, SERVER_KEY, own=6653)
+        inventory = _stack_inventory(
+            {"entPhysicalSerialNum": "VC-PAGE-SERIAL"}, {"entPhysicalSerialNum": "VC-HIDDEN-SERIAL"}
+        )
+        _register_device(librenms_server, 6653, page.name, inventory=inventory)
+        user = make_user_with_perms("inventory-scope-viewer", [])
+        client.force_login(grant(user, "view", Device, constraints={"pk__in": [page.pk, visible.pk]}))
+
+        response = client.get(_sync_url(page))
+
+        html = response.content.decode()
+        start = html.index('id="vc-serials-form"')
+        form = html[start : html.index("</form>", start)]
+        assert "VC-HIDDEN-SERIAL" in form
+        assert hidden.name not in form
+        assert hidden.get_absolute_url() not in form
+        assert f'value="{hidden.pk}"' not in form
+        assert f'value="{visible.pk}"' in form
 
     def test_the_serials_form_submits_the_active_server_and_tab(self, logged_in_client, librenms_server):
         """AssignVCSerialView can only preserve the context the rendered form posts."""

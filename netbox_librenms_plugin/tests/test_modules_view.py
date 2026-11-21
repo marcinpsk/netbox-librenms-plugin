@@ -1453,6 +1453,33 @@ class TestPostInventoryRefresh:
             method="GET",
         )
 
+    def test_post_saves_no_discovered_id_on_a_master_outside_the_chassis(self, librenms_server, server_keys):
+        """The chassis names an outside master with a primary IP; ID discovery must not write that device."""
+        from dcim.models import Device, VirtualChassis
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip, make_virtual_chassis
+        from netbox_librenms_plugin.tests.mapping_fixtures import stored_mapping_for_test
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, post
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        server_key, _ = server_keys
+        page = make_device("module-outside-master-page")
+        member = make_device("module-outside-master-member")
+        chassis = make_virtual_chassis("module-outside-master-vc", page, member)
+        outside = make_device("module-outside-master")
+        address = make_ip("198.18.52.9/24", assigned_object=make_interface(outside, "eth0"))
+        Device.objects.filter(pk=outside.pk).update(primary_ip4=address)
+        VirtualChassis.objects.filter(pk=chassis.pk).update(master=outside)
+        librenms_server.register(
+            "/api/v0/devices/198.18.52.9", {"status": "ok", "devices": [{"device_id": 777}]}, method="GET"
+        )
+        self._register_successful_refresh(librenms_server)
+
+        response = post(DeviceModuleTableView(), make_request("post", {"server_key": server_key}), pk=page.pk)
+
+        assert response.status_code == 200
+        assert stored_mapping_for_test(Device.objects.get(pk=outside.pk)) is None
+
     @pytest.mark.parametrize("entity_index", [300, 7], ids=["entity-index", "port-ifindex"])
     def test_post_compares_optic_serials_with_the_device_manufacturer_rules(
         self, librenms_server, server_keys, entity_index
@@ -2233,6 +2260,85 @@ class TestPostInventoryRefresh:
         status = SyncCacheConsistency(device).status(server_key)[SyncTab.MODULES.value]
         assert status["state"] == SyncTabState.REFRESH_FAILED.value
         assert cache.get(cache_key) is None
+
+    @pytest.mark.parametrize("serial", [["ABC123"], {"serial": "ABC123"}, True, 12345, 123.5, None])
+    def test_post_treats_a_malformed_main_serial_as_fetch_failure(self, librenms_server, server_keys, serial):
+        """A main inventory serial that is not text or a number fails the refresh, so no writer locks or resolves it."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        server_key, _ = server_keys
+        device = _mapped_device("module-refresh-main-serial-shape", server_key)
+        view = DeviceModuleTableView()
+        cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
+        self._register_successful_refresh(
+            librenms_server,
+            inventory=[{"entPhysicalIndex": 5, "entPhysicalClass": "module", "entPhysicalSerialNum": serial}],
+        )
+        request = make_request("post", {"server_key": server_key})
+
+        response = post(view, request, pk=device.pk)
+
+        well_formed = isinstance(serial, (int, float, type(None))) and not isinstance(serial, bool)
+        assert response.status_code == 200
+        assert (cache.get(cache_key) is not None) is well_formed
+        assert bool(message_texts(request, "error")) is not well_formed
+
+    @pytest.mark.parametrize("serial", [["OPTIC123"], {"serial": "OPTIC123"}, True, 12345, None])
+    def test_post_treats_a_malformed_transceiver_serial_as_fetch_failure(self, librenms_server, server_keys, serial):
+        """A transceiver serial that is not text or a number leaves the refresh incomplete, so no row carries it."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        server_key, _ = server_keys
+        device = _mapped_device("module-refresh-optic-serial-shape", server_key)
+        view = DeviceModuleTableView()
+        cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
+        self._register_successful_refresh(
+            librenms_server,
+            transceivers=[{"entity_physical_index": 300, "model": "SFP-10G-LR", "serial": serial, "type": "SFP+"}],
+        )
+        request = make_request("post", {"server_key": server_key})
+
+        response = post(view, request, pk=device.pk)
+
+        well_formed = isinstance(serial, (int, type(None))) and not isinstance(serial, bool)
+        assert response.status_code == 200
+        assert (cache.get(cache_key) is not None) is well_formed
+        assert bool(message_texts(request, "warning")) is not well_formed
+
+    def test_post_treats_a_malformed_oob_serial_as_fetch_failure(self, librenms_server, server_keys):
+        """An OOB inventory serial that is not text or a number leaves the refresh incomplete."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.server_mappings import attach_oob
+        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        server_key, _ = server_keys
+        device = _mapped_device("module-refresh-oob-serial-shape", server_key)
+        apply_mapping_change(device, attach_oob(device, server_key, 999, oob_type="idrac9"))
+        device.save(update_fields=["custom_field_data"])
+        view = DeviceModuleTableView()
+        cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
+        self._register_successful_refresh(librenms_server)
+        librenms_server.register(
+            "/api/v0/inventory/999/all",
+            {"status": "ok", "inventory": [{"entPhysicalIndex": 5, "entPhysicalSerialNum": ["ABC123"]}]},
+            method="GET",
+        )
+        request = make_request("post", {"server_key": server_key})
+
+        response = post(view, request, pk=device.pk)
+
+        assert response.status_code == 200
+        assert cache.get(cache_key) is None
+        assert len(message_texts(request, "warning")) == 1
 
     def test_post_treats_non_int_oob_index_as_fetch_failure(self, librenms_server, server_keys):
         """An OOB inventory row with a non-int entPhysicalIndex fails closed. It must not raise an offset TypeError or cache a partial snapshot."""

@@ -31,6 +31,7 @@ from ..serial_identity import (
     is_identity,
     resolve_device,
     resolve_device_write,
+    serial_refusal,
     stored_form,
 )
 from ..transactions import atomic_with_events
@@ -47,6 +48,7 @@ from ..platform_versions import (
 )
 from ..utils import (
     cached_row_matches,
+    row_identity_matches,
     exception_text_for,
     find_matching_location,
     find_matching_site,
@@ -65,6 +67,7 @@ from .virtual_chassis import (
     get_virtual_chassis_data,
     numbering_refusal_text,
     prepare_virtual_chassis,
+    prepared_master,
     unnumbered_virtual_chassis,
 )
 from netbox_librenms_plugin.server_mappings import (
@@ -414,6 +417,16 @@ def _flag_serial_conflict(result, existing_device, incoming_serial, serial_rules
         "unavailable": other.reason,
     }
     return True
+
+
+def _member_serial_refusals(prepared) -> list:
+    """Return the blockers of the member serials that a chassis create refuses; it stores each non-master member."""
+    master = prepared_master(prepared)
+    if master is None:
+        return []
+    members = prepared["members"]
+    refusals = ((member, serial_refusal(member.get("serial"), Device)) for member in members if member is not master)
+    return [f"Stack member {member.get('position')}: {refusal}" for member, refusal in refusals if refusal]
 
 
 def serial_unavailable_issue(incoming_serial) -> str:
@@ -1129,6 +1142,9 @@ def validate_device_for_import(  # noqa: C901
             serial_matches = []
             if not result["existing_device"]:
                 if not import_as_vm:
+                    if refusal := serial_refusal(incoming_serial, Device):
+                        # The create refuses this value in stored_form(), so the row is never ready.
+                        result["issues"].append(refusal)
                     # Serial is not unique in NetBox, so .first() would bind an arbitrary row
                     # and the downstream serial/OOB/merge flow would derive its guidance from a
                     # random device. Require a unique match before binding, mirroring the
@@ -1698,6 +1714,9 @@ def validate_device_for_import(  # noqa: C901
                                     serial_rules=serial_rules,
                                     numbering_rules=numbering_rules,
                                 )
+                                # The DeviceType sets only the member numbers, so the text names no NetBox object.
+                                # nosemgrep: import-disclosure
+                                result["issues"].extend(_member_serial_refusals(result["virtual_chassis"]))
                             except (VCNumberingError, RuleConfigurationError) as exc:
                                 # The import numbers the stack again for its final DeviceType.
                                 refusal = numbering_refusal_text(exc)
@@ -2094,6 +2113,7 @@ def import_single_device(  # noqa: C901
             # Create the device with its mapping: the claim and the owner check come before the insert.
             device = Device(**device_data)
             persist_mapping(device, assign_own(device, api.server_key, device_id), write=_validate_and_insert)
+            warnings = import_platform_warnings(f"device {device_id}", platform_plan, text_viewer)
 
         # Sync additional data based on options
         sync_options = sync_options or {}
@@ -2120,7 +2140,7 @@ def import_single_device(  # noqa: C901
             "message": f"Successfully imported device: {device.name}",
             "error": None,
             "synced": synced,
-            "warnings": import_platform_warnings(f"device {device_id}", platform_plan, text_viewer),
+            "warnings": warnings,
         }
 
     except Exception as e:
@@ -2212,7 +2232,8 @@ def fetch_device_with_cache(
     cache_key = get_import_device_cache_key(device_id, server_key or api.server_key)
     libre_device = cache.get(cache_key)
 
-    if not libre_device:
+    # The live read checks the device ID of its row, so a cached row of another device counts as a miss.
+    if not row_identity_matches(libre_device, device_id):
         # Fallback to API fetch. Read LIVE: both this function's caches (the pre-fetched dict and the
         # import Django cache) have already missed, so the fallback must reflect current LibreNMS
         # state — not the separate 60s get_device_info snapshot a sync-tab render may have populated —

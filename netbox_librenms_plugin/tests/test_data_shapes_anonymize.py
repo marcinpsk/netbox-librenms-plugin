@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 from ipaddress import ip_address, ip_network
+import json
 import re
 
 import pytest
@@ -173,6 +174,57 @@ def test_expected_member_serials_follow_anonymized_inventory():
     assert expected_serials == inventory_serials
     assert expected_serials != original
     assert rec["expected"]["virtual_chassis"]["member_serials"] == original
+
+
+@pytest.mark.parametrize(
+    "serial",
+    [
+        ["ASSET123"],
+        [["ASSET123"]],
+        {"value": "ASSET123"},
+        [{"value": "ASSET123"}],
+        {"ASSET123": True},
+        [{"ASSET123": None}],
+        {"id": "ASSET123"},
+    ],
+)
+def test_a_malformed_serial_value_is_pseudonymized_and_reads_the_serial_context(serial):
+    from netbox_librenms_plugin.data_shapes.anonymize import has_serial_input
+
+    recording = _ports({"entPhysicalSerialNum": serial})
+    recording["expected"] = {"virtual_chassis": {"member_serials": [serial]}}
+
+    anonymized = anonymize_recording(recording)
+
+    assert has_serial_input(recording)
+    assert "ASSET123" not in json.dumps(anonymized)
+    stored = _response(anonymized, "GET /api/v0/devices/1/ports")["ports"][0]["entPhysicalSerialNum"]
+    assert stored == anonymized["expected"]["virtual_chassis"]["member_serials"][0]
+    assert type(stored) is type(serial)
+
+
+def test_a_serial_object_keeps_every_entry_without_its_keys():
+    serial = {"A": 1, "B": 2, "ASSET123": 3, " ASSET123 ": 4}
+    recording = _ports({"entPhysicalSerialNum": serial})
+
+    first = anonymize_recording(recording, salt="keys")
+    second = anonymize_recording(recording, salt="keys")
+
+    stored = _response(first, "GET /api/v0/devices/1/ports")["ports"][0]["entPhysicalSerialNum"]
+    assert len(stored) == len(serial)
+    assert not set(stored) & set(serial)
+    assert "ASSET123" not in json.dumps(first)
+    assert first["responses"] == second["responses"]
+
+
+def test_a_scalar_in_a_list_takes_the_rule_of_the_lists_field():
+    recording = _ports({"hostname": ["core-rtr01"]})
+
+    anonymized = anonymize_recording(recording, salt="s")
+
+    port = _response(anonymized, "GET /api/v0/devices/1/ports")["ports"][0]
+    assert "core-rtr01" not in json.dumps(anonymized)
+    assert port["hostname"][0].startswith("device-")
 
 
 def test_hostname_and_model_pseudonymized():
@@ -2169,10 +2221,22 @@ def test_database_id_absence_sentinels_survive_anonymization(field, value):
     assert _response(anonymized, "GET /api/v0/devices/1/ports")["ports"][0][field] == value
 
 
-@pytest.mark.parametrize("value", [True, False, 1.5, "invalid", {}, []])
+@pytest.mark.parametrize("value", [True, False, 1.5, "invalid", {}, [], "9" * 5000])
 def test_anonymization_rejects_invalid_database_ids(value):
-    with pytest.raises(ValueError, match="Database IDs"):
+    from netbox_librenms_plugin.data_shapes.anonymize import MalformedRecordingError
+
+    with pytest.raises(MalformedRecordingError, match="Database IDs"):
         anonymize_recording(_ports({"port_id": value}), salt="invalid-id")
+
+
+def test_anonymization_rejects_an_oversized_device_id_in_a_route():
+    from netbox_librenms_plugin.data_shapes.anonymize import MalformedRecordingError
+
+    recording = _ports({"port_id": 1})
+    recording["responses"]["GET /api/v0/devices/" + "9" * 5000] = {"devices": []}
+
+    with pytest.raises(MalformedRecordingError, match="Database IDs"):
+        anonymize_recording(recording, salt="invalid-id")
 
 
 def test_bare_database_ids_share_their_containing_table_mapping():

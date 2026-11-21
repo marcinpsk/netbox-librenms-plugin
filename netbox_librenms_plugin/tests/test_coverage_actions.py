@@ -1599,6 +1599,55 @@ class TestDeviceValidationDetailsView:
         assert response.content.count(existing.serial.encode()) >= 2
         assert b"mdi-check-circle" in response.content
 
+    @pytest.mark.parametrize("status", [404, 503], ids=["absent", "unavailable"])
+    def test_a_cold_cache_tells_an_unavailable_librenms_from_an_absent_device(self, status):
+        """On a cache miss the dialog says 'not found' only for a 404; a 503 is reported as unavailable."""
+        self.primary_server.register("/api/v0/devices/1", {"status": "error"}, status=status)
+
+        _view, response = self._get("default")
+
+        content = response.content.decode()
+        assert response.status_code == 200
+        assert ("not found in LibreNMS" in content) is (status == 404)
+        assert ("Try again" in content) is (status == 503)
+
+    def test_a_cached_row_of_another_device_is_not_shown(self):
+        """The import cache of device 1 holds the row of device 2, so the dialog reads device 1 live."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
+
+        cache.set(
+            get_import_device_cache_key(1, "default"),
+            {"device_id": 2, "hostname": "details-cached-other-row", "sysName": "details-cached-other-row"},
+        )
+        self.primary_server.device_info_response(
+            device_id=1, hostname="details-live-row", hardware="Test chassis", os="ios", serial="", ip=""
+        )
+        self.primary_server.vc_inventory_callable(1, [], {})
+
+        _view, response = self._get("default")
+
+        content = response.content.decode()
+        assert "details-live-row" in content
+        assert "details-cached-other-row" not in content
+
+    def test_a_rejected_cache_entry_with_an_unavailable_librenms_reports_unavailable(self):
+        """The import cache of device 1 holds the row of device 2, and LibreNMS answers 503 for device 1."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
+
+        cache.set(get_import_device_cache_key(1, "default"), {"device_id": 2, "hostname": "details-stale-other"})
+        self.primary_server.register("/api/v0/devices/1", {"status": "error", "message": "busy"}, status=503)
+
+        _view, response = self._get("default")
+
+        content = response.content.decode()
+        assert response.status_code == 200
+        assert "alert-warning" in content
+        assert "alert-danger" not in content
+
     def test_a_serial_that_cannot_be_compared_shows_the_reason_not_a_match(self):
         from dcim.models import Device, VirtualChassis
         from django.utils.html import escape
@@ -1724,6 +1773,29 @@ class TestDeviceValidationDetailsView:
         assert re.findall(r'data-serial-state="([a-z]+)"', content) == [badge]
         assert re.findall(r'data-force-reason="([a-z]+)"', form) == ([] if holders == "sole" else [badge])
 
+    def test_a_json_boolean_serial_confirms_no_legacy_id_conversion(self):
+        """The device stores "True" and LibreNMS sends `serial: true`: the text matches, but the value is no serial."""
+        existing = make_device("details-legacy-boolean", serial="True", librenms_cf=1)
+        self.primary_server.device_info_response(
+            device_id=1,
+            hostname=existing.name,
+            hardware=existing.device_type.model,
+            os="ios",
+            serial=True,
+            ip="198.18.0.6",
+        )
+        self.primary_server.vc_inventory_callable(1, [], {})
+
+        _view, response = self._get("default")
+
+        assert response.status_code == 200
+        content = response.content.decode()
+        start = content.index('value="migrate_librenms_id"')
+        form = content[start : content.index("</form>", start)]
+        assert 'name="force"' in form
+        assert " disabled" in re.search(r"<button[^>]*migrate-btn[^>]*>", form).group(0)
+        assert "confirmed" not in re.findall(r'data-serial-state="([a-z]+)"', content)
+
     def test_a_serial_without_identity_shows_no_match_and_no_sync_action(self):
         existing = make_device("details-no-identity", serial="ABC123", librenms_cf={"default": {"id": 1}})
         self.primary_server.device_info_response(
@@ -1745,6 +1817,66 @@ class TestDeviceValidationDetailsView:
         assert "A-7" in serial_row
         assert "mdi-check-circle" not in serial_row
         assert "sync_serial" not in serial_row
+
+    def test_a_chassis_member_offers_no_direct_serial_sync(self):
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+
+        _chassis, (member, _sibling) = make_virtual_chassis_members("import-details-serial-chassis")
+        member.serial = "MEMBER-OLD"
+        member.save()
+        seed_mapping(member, "default", own=1)
+        self.primary_server.device_info_response(device_id=1, hostname=member.name, serial="SIBLING-SERIAL")
+        self.primary_server.vc_inventory_callable(1, [], {})
+
+        _view, response = self._get("default")
+
+        assert response.status_code == 200
+        assert b'value="sync_serial"' not in response.content
+
+    @pytest.mark.parametrize("match_type", ["hostname", "serial", "primary_ip"])
+    def test_linking_a_chassis_member_preserves_its_name_and_serial(self, match_type):
+        from netbox_librenms_plugin.tests._html_helpers import open_tags
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+        from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
+
+        _chassis, (member, _sibling) = make_virtual_chassis_members("import-details-chassis-link")
+        member.name = "SW01"
+        member.serial = "MEMBER-OLD"
+        hostname = "sw01" if match_type == "hostname" else "test-switch"
+        serial = member.serial if match_type == "serial" else "CHASSIS-SERIAL"
+        ip = "198.18.0.8"
+        if match_type == "primary_ip":
+            member.primary_ip4 = make_ip(f"{ip}/24", assigned_object=make_interface(member, "eth0"))
+        member.save()
+        self.primary_server.device_info_response(device_id=1, hostname=hostname, serial=serial, ip=ip)
+        self.primary_server.vc_inventory_callable(1, [], {})
+
+        _view, response = self._get("default")
+
+        assert response.status_code == 200
+        action_url = url_for("plugins:netbox_librenms_plugin:device_conflict_action", kwargs={"device_id": 1})
+        link_forms = []
+        for form in re.findall(r"<form\b.*?</form>", response.content.decode(), re.DOTALL):
+            if open_tags(form, "form")[0].get("hx-post") != action_url:
+                continue
+            controls = open_tags(form, "input") + open_tags(form, "button")
+            data = {
+                tag["name"]: tag["value"]
+                for tag in controls
+                if tag.get("type") in {"hidden", "submit"} and "name" in tag and "disabled" not in tag
+            }
+            if data.get("action") in {"link", "update", "update_serial"}:
+                link_forms.append(data)
+        assert [form["action"] for form in link_forms] == ["link"]
+
+        request = make_view_request("post", link_forms[0], user=make_superuser(), HTTP_HX_REQUEST="true")
+        response = post_view(DeviceConflictActionView(), request, device_id=1)
+
+        assert response.status_code == 200
+        member.refresh_from_db()
+        assert stored_mapping_for_test(member) == {"default": 1}
+        assert member.serial == "MEMBER-OLD"
+        assert member.name == "SW01"
 
     def test_a_viewer_who_cannot_view_platforms_sees_no_platform_name(self):
         from dcim.models import Platform
@@ -3341,6 +3473,49 @@ class TestDeviceConflictActionMigrateLibreNMSId:
         assert response.content.strip()
         assert stored_mapping_for_test(Device.objects.get(pk=device.pk)) == {self.server_key: 42}
 
+    def test_a_replaced_serial_read_live_confirms_no_migration(self):
+        """LibreNMS reports new hardware under the legacy ID after the search; the cached serial must not waive force."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.import_utils.device_operations import fetch_device_with_cache
+
+        view = self._make_view()
+        device = make_device("migrate-replaced-serial", serial="MIGRATE-OLD-HW", librenms_cf=42)
+        self._register_device(42, "migrate-replaced-serial", serial="MIGRATE-OLD-HW")
+        # The import search cached the row with the serial of the old hardware.
+        assert fetch_device_with_cache(42, view.librenms_api)["serial"] == "MIGRATE-OLD-HW"
+        self._register_device(42, "migrate-replaced-serial", serial="MIGRATE-NEW-HW")
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "action": "migrate_librenms_id", "existing_device_id": str(device.pk)},
+            user=make_view_user("migrate-replaced-serial-user", [("change", Device)]),
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = post_view(view, request, device_id=42)
+
+        assert response.headers.get("HX-Reswap") == "none"
+        assert stored_mapping_for_test(Device.objects.get(pk=device.pk)) == 42
+
+    def test_a_json_boolean_serial_confirms_no_device_that_stores_its_text(self):
+        """LibreNMS sends `serial: true` and the device stores "True": the text matches, but the value is no serial."""
+        from dcim.models import Device
+
+        device = make_device("migrate-boolean-serial", serial="True", librenms_cf=42)
+        self._register_device(42, "migrate-boolean-serial", serial=True)
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "action": "migrate_librenms_id", "existing_device_id": str(device.pk)},
+            user=make_view_user("migrate-boolean-serial-user", [("change", Device)]),
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = post_view(self._make_view(), request, device_id=42)
+
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"Serial number not confirmed" in response.content
+        assert stored_mapping_for_test(Device.objects.get(pk=device.pk)) == 42
+
     def test_migrates_a_vm_when_force_is_supplied(self):
         """Migrate a VM mapping when the request explicitly supplies force."""
         from virtualization.models import VirtualMachine
@@ -3812,8 +3987,7 @@ class TestDeviceConflictActionBranches:
                 ],
             },
         )
-        # fetch_device_with_cache accepts a live dictionary without re-checking its own device_id.
-        # Validation can therefore bind the real row by hostname before the action rejects the bad ID.
+        # The action reads the device live and refuses an answer that does not carry the requested ID.
         self.librenms_server.vc_inventory_callable(invalid_payload_id, [], {})
         request = self._request(
             "link",
@@ -3823,7 +3997,7 @@ class TestDeviceConflictActionBranches:
 
         response = post_view(view, request, device_id=42)
 
-        self._assert_htmx_error(response, "Invalid or missing LibreNMS device_id in payload")
+        assert response.headers.get("HX-Reswap") == "none"
         reloaded = Device.objects.get(pk=target.pk)
         assert reloaded.name == "branches-invalid-payload-id-target"
         assert stored_mapping_for_test(reloaded) is None
@@ -4084,6 +4258,122 @@ class TestDeviceConflictActionBranches:
         self._assert_success(response)
         assert stored_mapping_for_test(Device.objects.get(pk=target.pk)) == {self.server_key: 42}
 
+    def test_a_serial_match_reads_a_replaced_serial_live_and_links_no_device(self):
+        """LibreNMS reports new hardware under the same ID after the search; the cached serial must not link the old Device."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.import_utils.device_operations import fetch_device_with_cache
+
+        view = self._make_view()
+        target = make_device("branches-serial-replaced", serial="SERIAL-REPLACED-1")
+        self._register_device(42, f"{target.name}-source", serial="SERIAL-REPLACED-1")
+        # The import search cached the row with the serial of the old hardware.
+        assert fetch_device_with_cache(42, view.librenms_api)["serial"] == "SERIAL-REPLACED-1"
+        self._register_device(42, f"{target.name}-source", serial="SERIAL-REPLACED-2")
+
+        response = post_view(view, self._request("link", target, f"{target.name}-user"), device_id=42)
+
+        assert response.headers.get("HX-Reswap") == "none"
+        assert self.server_key not in (stored_mapping_for_test(Device.objects.get(pk=target.pk)) or {})
+
+    def test_a_live_read_that_fails_is_no_absence(self):
+        """LibreNMS answers HTTP 500: the action refuses, but it does not report the device as absent."""
+        from html import unescape
+
+        from dcim.models import Device
+
+        view = self._make_view()
+        target = make_device("branches-live-unavailable", serial="SERIAL-LIVE-UNAVAILABLE")
+        self.librenms_server.register("/api/v0/devices/42", {"status": "error"}, status=500)
+
+        response = post_view(view, self._request("link", target, f"{target.name}-user"), device_id=42)
+
+        assert response.headers.get("HX-Reswap") == "none"
+        assert "LibreNMS device not found" not in unescape(response.content.decode())
+        assert self.server_key not in (stored_mapping_for_test(Device.objects.get(pk=target.pk)) or {})
+
+    @pytest.mark.parametrize("answer", ["html-page", "json-error", "error-empty-list"])
+    def test_a_live_answer_that_is_not_json_keeps_the_cached_row(self, answer):
+        """An HTTP 200 HTML page or JSON error body says nothing about the device, so the row stays and Link refuses."""
+        from html import unescape
+
+        from dcim.models import Device
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
+        from netbox_librenms_plugin.import_utils.device_operations import fetch_device_with_cache
+
+        view = self._make_view()
+        target = make_device("branches-live-not-json", serial="SERIAL-LIVE-NOT-JSON")
+        self._register_device(42, f"{target.name}-source", serial=target.serial)
+        # The import search cached the row.
+        assert fetch_device_with_cache(42, view.librenms_api) is not None
+        if answer == "html-page":
+            self.librenms_server.register_raw("/api/v0/devices/42", "<html>gateway</html>", content_type="text/html")
+        elif answer == "json-error":
+            self.librenms_server.register("/api/v0/devices/42", {"status": "error", "message": "database unavailable"})
+        else:
+            self.librenms_server.register(
+                "/api/v0/devices/42", {"status": "error", "message": "database unavailable", "devices": []}
+            )
+
+        response = post_view(view, self._request("link", target, f"{target.name}-user"), device_id=42)
+
+        assert response.headers.get("HX-Reswap") == "none"
+        assert "LibreNMS device not found" not in unescape(response.content.decode())
+        assert cache.get(get_import_device_cache_key(42, self.server_key)) is not None
+        assert self.server_key not in (stored_mapping_for_test(Device.objects.get(pk=target.pk)) or {})
+
+    def test_a_live_serial_with_a_second_holder_links_no_device(self):
+        """Only the target's maker strips "TAG-": the live "TAG-ABC" names the target and a Device that stores it."""
+        from dcim.models import Device, DeviceType, Manufacturer
+
+        from netbox_librenms_plugin.import_utils.device_operations import fetch_device_with_cache
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        view = self._make_view()
+        target = make_device("branches-serial-two-holders", serial="ABC-TWO-HOLDERS")
+        NormalizationRule.objects.create(
+            scope="serial", match_pattern=r"^TAG-(.+)$", replacement=r"\1", manufacturer=target.device_type.manufacturer
+        )
+        other = make_device("branches-serial-two-holders-other", serial="TAG-ABC-TWO-HOLDERS")
+        plain_maker = Manufacturer.objects.create(name="Two holders plain maker", slug="two-holders-plain-maker")
+        Device.objects.filter(pk=other.pk).update(
+            device_type=DeviceType.objects.create(manufacturer=plain_maker, model="Two holders", slug="two-holders")
+        )
+        self._register_device(42, f"{target.name}-source", serial="ABC-TWO-HOLDERS")
+        assert fetch_device_with_cache(42, view.librenms_api)["serial"] == "ABC-TWO-HOLDERS"
+        self._register_device(42, f"{target.name}-source", serial="TAG-ABC-TWO-HOLDERS")
+
+        response = post_view(view, self._request("link", target, f"{target.name}-user"), device_id=42)
+
+        assert response.headers.get("HX-Reswap") == "none"
+        assert self.server_key not in (stored_mapping_for_test(Device.objects.get(pk=target.pk)) or {})
+
+    def test_a_live_read_that_describes_another_device_id_links_no_device(self):
+        """The LibreNMS answer for ID 42 carries ID 43, so it confirms nothing about 42 and is not cached."""
+        from dcim.models import Device
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
+        from netbox_librenms_plugin.import_utils.device_operations import fetch_device_with_cache
+
+        view = self._make_view()
+        target = make_device("branches-serial-other-id", serial="SERIAL-OTHER-ID")
+        self._register_device(42, f"{target.name}-source", serial="SERIAL-OTHER-ID")
+        cached = fetch_device_with_cache(42, view.librenms_api)
+        self.librenms_server.register("/api/v0/devices/42", {"status": "ok", "devices": [{**cached, "device_id": 43}]})
+
+        response = post_view(view, self._request("link", target, f"{target.name}-user"), device_id=42)
+
+        assert response.headers.get("HX-Reswap") == "none"
+        assert self.server_key not in (stored_mapping_for_test(Device.objects.get(pk=target.pk)) or {})
+        assert cache.get(get_import_device_cache_key(42, self.server_key))["device_id"] == 42
+        # The client's device-info cache holds nothing for 42 either: a cached read asks LibreNMS again.
+        self._register_device(42, f"{target.name}-source", serial="SERIAL-OTHER-ID")
+        found, row = view.librenms_api.get_device_info(42)
+        assert (found, row["device_id"]) == (True, 42)
+
     @pytest.mark.parametrize("action", ["link", "update", "update_serial", "update_type"])
     def test_a_forced_type_change_refuses_when_another_device_then_holds_the_stored_serial(self, action):
         """Under the old manufacturer's rule "XABC" has no identity; under the new type it is the holder's serial."""
@@ -4114,6 +4404,51 @@ class TestDeviceConflictActionBranches:
         assert response.headers.get("HX-Reswap") == "none"
         assert holder.name.encode() not in response.content
         assert Device.objects.get(pk=target.pk).device_type_id == old_type_id
+
+    @pytest.mark.parametrize(
+        ("match_type", "new_prefix", "refused"),
+        [("serial", "Y", True), ("serial", "X", False), ("hostname", "Y", False)],
+    )
+    def test_a_forced_chassis_link_keeps_its_serial_match(self, match_type, new_prefix, refused):
+        from dcim.models import DeviceType, Manufacturer
+
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+
+        _chassis, (master, sibling) = make_virtual_chassis_members("branches-chassis-retype")
+        master.serial = "XABC123"
+        master.save()
+        sibling.serial = "YABC123"
+        sibling.save()
+        old_type_id = master.device_type_id
+        new_maker = Manufacturer.objects.create(name="Chassis retype maker", slug="chassis-retype-maker")
+        new_type = DeviceType.objects.create(
+            manufacturer=new_maker, model="Chassis retype", slug="chassis-retype", part_number="CHASSIS-RETYPE"
+        )
+        NormalizationRule.objects.create(
+            scope="serial", match_pattern=r"^X(.+)$", replacement=r"\1", manufacturer=master.device_type.manufacturer
+        )
+        NormalizationRule.objects.create(
+            scope="serial", match_pattern=rf"^{new_prefix}(.+)$", replacement=r"\1", manufacturer=new_maker
+        )
+        hostname = master.name if match_type == "hostname" else "branches-chassis-retype-source"
+        self._register_device(42, hostname, serial="ABC123", hardware=new_type.part_number)
+        request = self._request("link", master, "branches-chassis-retype-user", force="on")
+
+        response = post_view(self._make_view(), request, device_id=42)
+
+        master.refresh_from_db()
+        sibling.refresh_from_db()
+        if refused:
+            assert response.headers.get("HX-Reswap") == "none"
+            assert master.device_type_id == old_type_id
+            assert stored_mapping_for_test(master) is None
+        else:
+            self._assert_success(response)
+            assert master.device_type_id == new_type.pk
+            assert stored_mapping_for_test(master) == {self.server_key: 42}
+        assert stored_mapping_for_test(sibling) is None
+        assert (master.serial, sibling.serial) == ("XABC123", "YABC123")
 
     @pytest.mark.parametrize("shape", ["chassis-members", "device-modules"])
     def test_a_forced_type_change_refuses_two_serials_that_the_new_rules_key_to_one(self, shape):
@@ -4172,9 +4507,8 @@ class TestDeviceConflictActionBranches:
         assert reloaded.device_type_id == reported_type.pk
         assert reloaded.serial == "OLD-0"
 
-    @pytest.mark.parametrize(("member_serial", "written"), [("PREFIX-ABC123", True), ("ABC123", False)])
-    def test_a_forced_type_and_serial_update_checks_the_members_under_the_new_master_type(self, member_serial, written):
-        """The old master rule strips "PREFIX-", the new one does not: only a member that still keys to ABC123 refuses."""
+    @pytest.mark.parametrize(("member_serial", "linked"), [("PREFIX-OTHER123", True), ("PREFIX-ABC123", False)])
+    def test_a_forced_link_checks_member_serials_under_the_new_master_type(self, member_serial, linked):
         from dcim.models import Device, DeviceType, Manufacturer, VirtualChassis
 
         from netbox_librenms_plugin.models import NormalizationRule
@@ -4182,13 +4516,7 @@ class TestDeviceConflictActionBranches:
 
         view = self._make_view()
         tag = f"branches-projected-{member_serial}".lower()
-        target = make_device(tag, serial="BEFORE123", librenms_cf={self.server_key: 42})
-        NormalizationRule.objects.create(
-            scope="serial",
-            match_pattern=r"^PREFIX-(.+)$",
-            replacement=r"\1",
-            manufacturer=target.device_type.manufacturer,
-        )
+        target = make_device(tag, serial="ABC123")
         member = make_device(f"{tag}-member", serial=member_serial)
         chassis = make_virtual_chassis(f"{tag}-chassis", target, member)
         VirtualChassis.objects.filter(pk=chassis.pk).update(master=target)
@@ -4198,18 +4526,24 @@ class TestDeviceConflictActionBranches:
             slug=f"{tag}-type",
             part_number=f"{tag}-hw".upper(),
         )
-        self._register_device(42, target.name, serial="ABC123", hardware=reported_type.part_number)
-        request = self._request("update", target, f"{tag}-user", force="on")
+        NormalizationRule.objects.create(
+            scope="serial", match_pattern=r"^PREFIX-(.+)$", replacement=r"\1", manufacturer=reported_type.manufacturer
+        )
+        self._register_device(42, target.name, serial="CHASSIS-SERIAL", hardware=reported_type.part_number)
+        request = self._request("link", target, f"{tag}-user", force="on")
 
         response = post_view(view, request, device_id=42)
 
         reloaded = Device.objects.get(pk=target.pk)
-        if written:
+        assert reloaded.serial == "ABC123"
+        if linked:
             self._assert_success(response)
-            assert (reloaded.device_type_id, reloaded.serial) == (reported_type.pk, "ABC123")
+            assert reloaded.device_type_id == reported_type.pk
+            assert stored_mapping_for_test(reloaded) == {self.server_key: 42}
         else:
             assert response.headers.get("HX-Reswap") == "none"
-            assert (reloaded.device_type_id, reloaded.serial) == (target.device_type_id, "BEFORE123")
+            assert reloaded.device_type_id == target.device_type_id
+            assert stored_mapping_for_test(reloaded) is None
 
     def test_update_serial_reports_a_real_serial_conflict(self):
         from dcim.models import Device
@@ -4340,6 +4674,43 @@ class TestDeviceConflictActionBranches:
         self._assert_success(response)
         assert Device.objects.get(pk=target.pk).serial == "BRANCHES-SYNC-SERIAL-NEW"
 
+    def test_sync_serial_refuses_a_device_level_serial_for_a_chassis_member(self):
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+
+        _chassis, (target, sibling) = make_virtual_chassis_members("import-sync-serial-chassis")
+        target.serial = "MEMBER-OLD"
+        target.save()
+        seed_mapping(target, self.server_key, own=42)
+        self._register_device(42, target.name, serial="SIBLING-SERIAL")
+        request = self._request("sync_serial", target, "import-sync-serial-chassis-user")
+
+        response = post_view(self._make_view(), request, device_id=42)
+
+        target.refresh_from_db()
+        sibling.refresh_from_db()
+        assert (target.serial, sibling.serial) == ("MEMBER-OLD", "")
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+
+    @pytest.mark.parametrize("action", ["update_serial", "update"])
+    def test_a_link_update_refuses_a_device_level_serial_for_a_chassis_member(self, action):
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+
+        _chassis, (target, sibling) = make_virtual_chassis_members("import-chassis-link-update")
+        target.serial = "MEMBER-OLD"
+        target.save()
+        self._register_device(42, target.name, serial="CHASSIS-SERIAL")
+        request = self._request(action, target, "import-chassis-link-update-user")
+
+        response = post_view(self._make_view(), request, device_id=42)
+
+        target.refresh_from_db()
+        sibling.refresh_from_db()
+        assert (target.serial, sibling.serial) == ("MEMBER-OLD", "")
+        assert stored_mapping_for_test(target) is None
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+
     def test_sync_serial_reports_a_real_save_error(self):
         from dcim.models import Device
 
@@ -4381,6 +4752,35 @@ class TestDeviceConflictActionBranches:
 
         self._assert_htmx_error(response, "No valid serial from LibreNMS")
         assert Device.objects.get(pk=target.pk).serial == "BRANCHES-SYNC-SERIAL-KEEP"
+
+    @pytest.mark.parametrize("action", ["sync_serial", "update_serial"])
+    def test_a_serial_write_stores_no_json_boolean_serial(self, action):
+        """A JSON boolean has no serial identity, so these actions refuse it before a write."""
+        from dcim.models import Device
+
+        target = make_device(f"branches-boolean-serial-{action}".replace("_", "-"))
+        self._register_device(42, target.name, serial=True)
+
+        response = post_view(self._make_view(), self._request(action, target, f"boolean-serial-{action}"), device_id=42)
+
+        self._assert_htmx_error(response, "No valid serial from LibreNMS")
+        reloaded = Device.objects.get(pk=target.pk)
+        assert reloaded.serial == ""
+        assert stored_mapping_for_test(reloaded) is None
+
+    def test_a_json_boolean_serial_finds_no_target_for_a_field_sync(self):
+        """A device stores the text "True"; LibreNMS sends `serial: true` and no other key matches that device."""
+        from dcim.models import Device
+
+        holder = make_device("branches-boolean-holder", serial="True")
+        self._register_device(42, "branches-boolean-librenms-name", serial=True)
+
+        response = post_view(
+            self._make_view(), self._request("sync_name", holder, "boolean-serial-sync-name"), device_id=42
+        )
+
+        self._assert_htmx_error(response, "Missing validated conflict target")
+        assert Device.objects.get(pk=holder.pk).name == "branches-boolean-holder"
 
     def test_sync_serial_reports_when_the_row_is_deleted_before_the_lock(self):
         from dcim.models import Device
@@ -5323,6 +5723,83 @@ class TestCreatePlatformAssignmentIndependence:
 
         assert b"Selected manufacturer not found" in response.content
         assert not Platform.objects.filter(name="Missing Manufacturer OS").exists()
+
+    @pytest.mark.parametrize("live_serial", ["PLATFORM-NEW-SERIAL", None, "missing"], ids=["other", "null", "missing"])
+    def test_replaced_hardware_behind_the_librenms_id_gets_no_platform_on_the_old_serial_holder(self, live_serial):
+        """The cached row matched the target by its serial; the live read that decides the target reports another or none."""
+        from netbox_librenms_plugin.import_utils.device_operations import fetch_device_with_cache
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        target = make_device("platform-serial-target", serial="PLATFORM-OLD-SERIAL")
+
+        def register(serial):
+            self.librenms_server.device_info_response(
+                device_id=42, hostname="platform-serial-source", os="test-os", serial=serial, ip=""
+            )
+
+        register(target.serial)
+        self.librenms_server.vc_inventory_callable(42, [], {})
+        # The import search cached the row with the serial of the old hardware.
+        assert fetch_device_with_cache(42, LibreNMSAPI(server_key=self.server_key))["serial"] == target.serial
+        if live_serial == "missing":
+            register(None)
+            _status, body = self.librenms_server.routes["/api/v0/devices/42"]
+            del body["devices"][0]["serial"]
+        else:
+            register(live_serial)
+
+        self._post(target, "Replacement OS", target.device_type.manufacturer_id)
+
+        target.refresh_from_db()
+        assert target.platform is None
+
+    @pytest.mark.parametrize("status", [404, 500], ids=["absent", "unavailable"])
+    def test_a_failed_live_read_assigns_nothing_and_says_why(self, status):
+        """A confirmed absence drops the cached row; a LibreNMS failure is no absence and keeps it."""
+        from html import unescape
+
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
+        from netbox_librenms_plugin.import_utils.device_operations import fetch_device_with_cache
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        target = self._mapped_device(f"platform-live-{status}")
+        # The import search cached the row.
+        assert fetch_device_with_cache(42, LibreNMSAPI(server_key=self.server_key)) is not None
+        self.librenms_server.register("/api/v0/devices/42", {"status": "error"}, status=status)
+
+        response = self._post(target, f"Live {status} OS", target.device_type.manufacturer_id)
+
+        target.refresh_from_db()
+        assert target.platform is None
+        assert response.headers.get("HX-Reswap") == "none"
+        absent = "Device not found in LibreNMS." in unescape(response.content.decode())
+        cached = cache.get(get_import_device_cache_key(42, self.server_key))
+        assert (absent, cached is None) == (status == 404, status == 404)
+
+    def test_a_live_row_that_names_another_device_gets_no_platform_on_the_cached_target(self):
+        """The cached hostname selected one Device; the live row for the same LibreNMS ID now names another."""
+        from netbox_librenms_plugin.import_utils.device_operations import fetch_device_with_cache
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        cached_target = make_device("platform-host-cached")
+        live_target = make_device("platform-host-live")
+
+        def register(hostname):
+            self.librenms_server.device_info_response(device_id=42, hostname=hostname, os="test-os", ip="")
+
+        register(cached_target.name)
+        self.librenms_server.vc_inventory_callable(42, [], {})
+        # The import search cached the row under the hostname of the first Device.
+        assert fetch_device_with_cache(42, LibreNMSAPI(server_key=self.server_key))["hostname"] == cached_target.name
+        register(live_target.name)
+
+        self._post(cached_target, "Renamed Host OS", cached_target.device_type.manufacturer_id)
+
+        cached_target.refresh_from_db()
+        live_target.refresh_from_db()
+        assert (cached_target.platform, live_target.platform) == (None, None)
 
     def test_device_platform_manufacturer_match_assigns_and_renders_updates(self):
         from dcim.models import Platform
@@ -6776,7 +7253,7 @@ class _MergeViewHarness:
             self.librenms_server = server
             yield
 
-    def _post_merge(self, winner, donor, *, device_id=99, after_validation=None):
+    def _post_merge(self, winner, donor, *, device_id=99, after_validation=None, serial=None):
         from dcim.models import Device
         from netbox_librenms_plugin.views.imports.actions import MergeNetBoxDevicesView
 
@@ -6788,7 +7265,7 @@ class _MergeViewHarness:
             hostname=winner.name,
             hardware=winner.device_type.model,
             os="ios",
-            serial=donor.serial,
+            serial=donor.serial if serial is None else serial,
             ip="",
         )
         self.librenms_server.vc_inventory_callable(device_id, [], {})
@@ -6812,6 +7289,29 @@ class _MergeViewHarness:
 
             view.get_validated_device_with_selections = validate_then_change
         return post_view(view, request, device_id=device_id)
+
+
+class TestMergeReadsTheSerialLive(_MergeViewHarness):
+    """The merge selects its donor by serial, so it reads the serial from LibreNMS, not from the row cache."""
+
+    def test_a_replaced_serial_read_live_merges_nothing(self):
+        from netbox_librenms_plugin.import_utils.device_operations import fetch_device_with_cache
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        winner = make_device("merge-replaced-winner", librenms_cf={self.server_key: {"id": 20}})
+        donor = make_device("merge-replaced-donor", serial="MERGE-OLD-HW", librenms_cf={self.server_key: {"id": 10}})
+        self.librenms_server.device_info_response(
+            device_id=99, hostname=winner.name, hardware=winner.device_type.model, os="ios", serial=donor.serial, ip=""
+        )
+        self.librenms_server.vc_inventory_callable(99, [], {})
+        # The import search cached the row with the serial of the old hardware.
+        assert fetch_device_with_cache(99, LibreNMSAPI(server_key=self.server_key))["serial"] == "MERGE-OLD-HW"
+
+        response = self._post_merge(winner, donor, serial="MERGE-NEW-HW")
+
+        assert response.headers.get("HX-Reswap") == "none"
+        assert stored_mapping_for_test(type(winner).objects.get(pk=winner.pk)) == {self.server_key: {"id": 20}}
+        assert stored_mapping_for_test(type(donor).objects.get(pk=donor.pk)) == {self.server_key: {"id": 10}}
 
 
 class TestMergeNetBoxDevicesViewOOBTransfer(_MergeViewHarness):
@@ -8857,6 +9357,42 @@ class TestConflictActionsObjectScope:
 
         assert b"Existing device not found" not in response.content
         assert stored_mapping_for_test(Device.objects.get(pk=in_scope.pk))["default"] == 4242
+
+    def test_an_ip_matched_oob_attach_never_writes_to_a_master_outside_the_chassis(self):
+        """No member is linked, and the chassis names an outside master with a primary IP: it owns nothing."""
+        from dcim.models import Device, VirtualChassis
+
+        from netbox_librenms_plugin.tests.conftest import make_interface, make_ip, make_virtual_chassis
+        from netbox_librenms_plugin.views.imports.actions import AddAsOOBView
+
+        target = make_device("oob-outside-member")
+        other_member = make_device("oob-outside-other-member")
+        chassis = make_virtual_chassis("oob-outside-vc", target, other_member)
+        outside = make_device("oob-outside-master")
+        outside_ip = make_ip("198.18.51.9/24", assigned_object=make_interface(outside, "eth0"))
+        Device.objects.filter(pk=outside.pk).update(primary_ip4=outside_ip)
+        VirtualChassis.objects.filter(pk=chassis.pk).update(master=outside)
+        address = make_ip("198.18.51.4/24", assigned_object=make_interface(target, "mgmt0"))
+        Device.objects.filter(pk=target.pk).update(oob_ip=address)
+        self.librenms_server.device_info_response(
+            device_id=4343,
+            hostname=f"{target.name}-idrac",
+            hardware="Integrated Remote Access Controller",
+            os="idrac",
+            serial="OOB-OUTSIDE-UNMATCHED",
+            ip="198.18.51.4",
+        )
+        self.librenms_server.vc_inventory_callable(4343, [], {})
+        request = make_view_request(
+            "post",
+            {"existing_device_id": str(target.pk), "server_key": "default"},
+            user=make_superuser(),
+            HTTP_HX_REQUEST="true",
+        )
+
+        post_view(AddAsOOBView(), request, device_id=4343)
+
+        assert stored_mapping_for_test(Device.objects.get(pk=outside.pk)) is None
 
     def test_add_as_oob_cannot_attach_to_an_out_of_scope_device(self):
         """AddAsOOB must object-scope its target too: a constrained grant cannot attach an OOB link elsewhere."""

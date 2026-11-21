@@ -501,6 +501,21 @@ def test_capture_view_reports_an_unanonymizable_recording(recording_server, monk
 
 
 @pytest.mark.django_db
+def test_capture_view_reports_a_malformed_database_id(recording_server):
+    recording = deepcopy(load_recording("iosxe-c8300"))
+    recording["responses"][f"GET /api/v0/devices/{recording['device_id']}"]["devices"][0]["poller_group"] = ["7"]
+    server, api = recording_server(recording)
+    device = make_device("capture-malformed-id", librenms_cf={"test": {"id": recording["device_id"]}})
+
+    response = _run_capture(_view_with_api(api), server, device)
+
+    html = response.content.decode()
+    assert response.status_code == 200
+    assert "Capture failed" in html
+    assert "Anonymized recording" not in html
+
+
+@pytest.mark.django_db
 def test_capture_view_reports_an_unavailable_novelty_manifest(recording_server, monkeypatch):
     """A broken packaged manifest must render an error instead of a false novelty verdict."""
     server, api = recording_server(load_recording("cisco-stackwise-3member"))
@@ -776,6 +791,34 @@ def test_a_capture_under_a_master_outside_the_chassis_renders_the_unavailable_re
 
 
 @pytest.mark.django_db
+def test_a_capture_never_reads_a_linked_master_outside_the_chassis(recording_server):
+    """No member holds a mapping, and the chassis names a linked master outside it: the owner stays a member."""
+    from dcim.models import Device, VirtualChassis
+    from ipam.models import IPAddress
+
+    from netbox_librenms_plugin.server_selection import get_librenms_sync_device
+
+    recording = load_recording("iosxe-c8300")
+    server, api = recording_server(recording)
+    device = make_device("capture-unlinked-member")
+    chassis = VirtualChassis.objects.create(name="capture-unlinked-member-vc")
+    device.virtual_chassis = chassis
+    device.vc_position = 1
+    device.save()
+    outsider = make_device("capture-linked-outsider", librenms_cf={"test": {"id": recording["device_id"]}})
+    address = IPAddress.objects.create(address="198.18.0.20/32")
+    Device.objects.filter(pk=outsider.pk).update(primary_ip4=address)
+    VirtualChassis.objects.filter(pk=chassis.pk).update(master=outsider)
+    device.refresh_from_db()
+    assert get_librenms_sync_device(device, server_key="test") == device
+
+    response = _run_capture(_view_with_api(api), server, device)
+
+    assert response.status_code == 200
+    assert "Anonymized recording" not in response.content.decode()
+
+
+@pytest.mark.django_db
 def test_a_junos_stack_under_a_master_outside_the_chassis_renders_the_unavailable_reason(recording_server):
     """Another serial context can explain the FPC stack, but the device's own context is Unavailable."""
     from dcim.models import VirtualChassis
@@ -804,6 +847,20 @@ def test_a_junos_stack_under_a_master_outside_the_chassis_renders_the_unavailabl
     assert response.status_code == 200
     assert UNAVAILABLE_MASTER_LINK in html
     assert "Anonymized recording" not in html
+
+
+@pytest.mark.django_db
+def test_a_capture_pseudonymizes_a_list_valued_serial(recording_server):
+    recording = deepcopy(load_recording("iosxe-c8300"))
+    route = next(key for key, body in recording["responses"].items() if "/inventory/" in key and body.get("inventory"))
+    recording["responses"][route]["inventory"][0]["entPhysicalSerialNum"] = ["ASSET123"]
+    server, api = recording_server(recording)
+    device = make_device("capture-list-serial", librenms_cf={"test": {"id": recording["device_id"]}})
+
+    response = _run_capture(_view_with_api(api), server, device)
+
+    assert response.status_code == 200
+    assert "ASSET123" not in json.dumps(_captured_recording(response))
 
 
 def _junos_fpc_recording(root_serial, fpc_serials):
