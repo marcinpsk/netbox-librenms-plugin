@@ -304,19 +304,17 @@ def test_confirmed_rename_out_of_the_change_scope_is_rolled_back(client, setting
     _seed_vlan_snapshot(device, [{"vlan_vlan": 102, "vlan_name": "other"}])
     user = make_user_with_perms("vlan-rename-scope-user", [("view", Device), ("view", VLANGroup), ("add", VLAN)])
     client.force_login(grant(user, "change", VLAN, constraints={"name__startswith": "managed-"}))
-    url = _sync_url(device)
-    form = {
-        "server_key": "default",
-        "action": "create_vlans",
-        "select": "102",
-        "vlan_group_102": str(group.pk),
-        "expected_vlan_name_102": "other",
-    }
-    conflict = client.post(url, form, HTTP_HX_REQUEST="true").context["conflicts"][0]
+    conflict = _submit(client, device, [102], groups={102: group}).context["conflicts"][0]
 
     response = client.post(
-        url,
-        {**form, "confirm_conflicts": "1", "force_conflict": "102", "conflict_intent": conflict["intent"]},
+        _sync_url(device),
+        {
+            "server_key": "default",
+            "action": "create_vlans",
+            "confirm_conflicts": "1",
+            "force_conflict": "102",
+            "conflict_intent": conflict["intent"],
+        },
     )
 
     assert response.status_code == 302
