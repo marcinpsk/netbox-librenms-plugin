@@ -1023,11 +1023,11 @@ class LibreNMSAPI:
             return False, error_message
 
     def get_device_inventory(self, device_id, missing_is_empty=False):
-        """Read full inventory through the shared endpoint contract."""
+        """Read full inventory through the shared endpoint contract; the caller checks each row's serial identity."""
         from netbox_librenms_plugin.acquisition import responses
         from netbox_librenms_plugin.acquisition.snapshot import Outcome
 
-        endpoint = responses.inventory(device_id, missing_is_empty=missing_is_empty)
+        endpoint = responses.inventory(device_id, missing_is_empty=missing_is_empty, validate_serials=False)
         status, body = self.get_response(endpoint.request.path, dict(endpoint.request.params))
         decoded = endpoint.decode(status, body)
         return (True, decoded.value) if decoded.outcome is Outcome.OBTAINED else (False, decoded.reason)
