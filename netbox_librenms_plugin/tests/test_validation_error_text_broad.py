@@ -10,9 +10,10 @@ message.
 from uuid import uuid4
 
 import pytest
+
+from netbox_librenms_plugin.tests.source_snapshot_helpers import sensor_row, seed_cables_snapshot
 from django.contrib.auth import get_user_model
 from django.contrib.messages import get_messages
-from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.db.models.signals import pre_save
 from django.urls import reverse
@@ -153,28 +154,19 @@ def test_the_cable_create(client, superuser):
     from extras.models import Tag
 
     from netbox_librenms_plugin.tests.test_cable_overwrite import SERVER_KEY, _rendered_sync_data
-    from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
     tag = f"vetext-cable-{int(superuser)}"
     acs, (csp,), _ = make_serial_device(f"{tag}-acs", csp_names=["ttyS5"])
     _router, _, (cp,) = make_serial_device(f"{tag}-router", cp_names=["console-B"])
     hidden = make_device(f"{tag}-hidden")
-    link = {
-        "local_port": "ttyS5",
-        "local_port_id": f"serial:{csp.pk}-s",
-        "_source": "serial",
-        "device_id": acs.id,
-        "remote_device": _router.name,
-        "netbox_local_interface_id": csp.pk,
-        "netbox_remote_interface_id": cp.pk,
-        "can_create_cable": True,
-        "is_configured": True,
-        "sensor_id": 1,
-        "sensor_index_int": 5,
-    }
-    cache.set(object.__new__(SyncCablesView).get_cache_key(acs, "links", SERVER_KEY), {"links": [link]}, timeout=300)
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+
+    seed_mapping(acs, SERVER_KEY, own=404)
+    seed_cables_snapshot(
+        acs, sensors=[sensor_row(1005, 5, device_id=404, sensor_descr=f"{_router.name} Status")], server_key=SERVER_KEY
+    )
     client.force_login(make_superuser(f"{tag}-renderer"))
-    post_data = _rendered_sync_data(client, acs, link["local_port_id"])
+    post_data = _rendered_sync_data(client, acs, "serial:1005")
     if superuser:
         client.force_login(make_superuser(f"{tag}-superuser"))
     else:

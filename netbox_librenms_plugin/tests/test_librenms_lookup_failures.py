@@ -9,11 +9,10 @@ reached are three different problems with three different fixes. Reporting all o
 from html import unescape
 
 import pytest
+from django.contrib import messages
 from django.contrib.messages import get_messages
-from django.core.cache import cache
 from django.urls import reverse
 
-from netbox_librenms_plugin.sync_cache import TAB_SPECS, SyncTab, sync_snapshot_key
 from netbox_librenms_plugin.tests.conftest import (
     configure_librenms_servers,
     make_device,
@@ -429,12 +428,14 @@ def test_status_lists_report_each_discovery_conflict_once(
 
 
 @pytest.mark.django_db
-def test_cable_refresh_fails_closed_when_host_discovery_conflicts(
+def test_cable_refresh_of_an_oob_only_owner_sends_no_conflicting_host_lookup(
     client,
     librenms_server,
     settings,
 ):
-    """Valid OOB rows must not hide an unresolved host identity."""
+    """The OOB mapping covers the owner: a host lookup that would conflict is never sent, and the OOB rows show."""
+    from netbox_librenms_plugin.server_mappings import read_mapping
+
     oob_id = 1277
     server_key = _point_plugin_at(settings, librenms_server.url)
     make_device("cable-conflict-owner", librenms_cf={server_key: CONFLICTING_DEVICE_ID})
@@ -476,9 +477,11 @@ def test_cable_refresh_fails_closed_when_host_discovery_conflicts(
         {"server_key": server_key},
         headers={"HX-Request": "true"},
     )
-    rendered_messages = [str(message) for message in get_messages(response.wsgi_request)]
+    notices = list(get_messages(response.wsgi_request))
 
     assert response.status_code == 200
-    assert "Cable refresh was incomplete. No cable rows were loaded. Refresh Cables to try again." in rendered_messages
-    assert "Cable data refreshed successfully." not in rendered_messages
-    assert cache.get(sync_snapshot_key(target, TAB_SPECS[SyncTab.CABLES].source.data_type, server_key)) is None
+    assert not any(notice.level == messages.ERROR for notice in notices)
+    assert f"/api/v0/devices/{target.name}" not in [request["path"] for request in librenms_server.requests]
+    assert response.context["cable_sync"]["table"] is not None
+    target.refresh_from_db()
+    assert read_mapping(target).own_id(server_key) is None

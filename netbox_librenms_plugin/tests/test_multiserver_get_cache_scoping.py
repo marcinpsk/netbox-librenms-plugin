@@ -5,6 +5,7 @@ import pytest
 from netbox_librenms_plugin.sync_cache import module_inventory_cache_payload
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip, make_superuser
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+from netbox_librenms_plugin.tests.source_snapshot_helpers import link_row, port_row, seed_cables_snapshot
 
 pytestmark = pytest.mark.django_db
 
@@ -65,15 +66,19 @@ class TestConfiguredServerCacheScoping:
         assert list(context["table"].data)[0]["port_id"] == 11
 
     def test_cables_render_the_requested_servers_snapshot(self, configured_servers):
-        from django.core.cache import cache
 
         from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
 
         device = make_device("multiserver-cable")
         view = DeviceCableTableView()
         request = _request("production")
-        key = view.get_cache_key(device, "links", "production")
-        cache.set(key, {"links": [{"local_port": "Ethernet2", "local_port_id": 12}]})
+        seed_mapping(device, "production", own=402)
+        seed_cables_snapshot(
+            device,
+            [link_row(12, "", local_port="Ethernet2")],
+            [port_row(12, "Ethernet2", device_id=402)],
+            server_key="production",
+        )
 
         context = _bind(view, request).get_context_data(request, device)
 
@@ -210,10 +215,7 @@ class TestRemovedServerFailsClosed:
         )
 
         view_class = import_string(view_path)
-        device = make_device(
-            f"removed-{data_type}",
-            librenms_cf={"removed": 22} if data_type in {"ip_addresses", "vlans", "ports"} else None,
-        )
+        device = make_device(f"removed-{data_type}", librenms_cf={"removed": 22})
         if data_type == "ports":
             make_interface(device, "Ethernet4")
         view = view_class()
@@ -227,6 +229,14 @@ class TestRemovedServerFailsClosed:
         elif data_type == "ip_addresses":
             snapshot = seed_ip_snapshot(device, payload, server_key="removed")
             assert source_cache.read(device, Resource.IP_ADDRESSES, "removed", user=request.user) == snapshot
+        elif data_type == "links":
+            snapshot = seed_cables_snapshot(
+                device,
+                [link_row(21, "", local_port="Ethernet4")],
+                [port_row(21, "Ethernet4", device_id=22)],
+                server_key="removed",
+            )
+            assert source_cache.read(device, Resource.CABLES, "removed", user=request.user) == snapshot
         else:
             cache.set(view.get_cache_key(device, data_type, "removed"), payload)
 
