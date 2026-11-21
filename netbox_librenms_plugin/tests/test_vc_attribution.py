@@ -7,7 +7,7 @@ Plain ENTITY-MIB rows and real NetBox member Devices; the modules-tab tests in
 
 import pytest
 
-from netbox_librenms_plugin.import_utils.virtual_chassis import attribute_inventory, chassis_serial_key
+from netbox_librenms_plugin.import_utils.virtual_chassis import attribute_inventory
 from netbox_librenms_plugin.tests.conftest import junos_vc_inventory, make_junos_vc_members
 
 pytestmark = pytest.mark.django_db
@@ -15,13 +15,17 @@ pytestmark = pytest.mark.django_db
 
 def _owners(page, members, inventory):
     """Return ``{entPhysicalIndex: owning Device}``; an unowned row stays on *page*, as the modules tab shows it."""
-    owners = attribute_inventory(inventory, members, chassis_serial_key(page))
+    from netbox_librenms_plugin.serial_identity import SerialRules
+
+    owners = attribute_inventory(inventory, members, SerialRules.load().for_device(page))
     return {row["entPhysicalIndex"]: member or page for row, (member, _source) in zip(inventory, owners, strict=True)}
 
 
 def _attribution(page, members, row):
     """Return ``(owning Device, source)`` for one row on its own."""
-    member, source = attribute_inventory([row], members, chassis_serial_key(page))[0]
+    from netbox_librenms_plugin.serial_identity import SerialRules
+
+    member, source = attribute_inventory([row], members, SerialRules.load().for_device(page))[0]
     return member or page, source
 
 
@@ -74,15 +78,14 @@ class TestSerialEvidence:
         assert target.pk == member2.pk
         assert source == "serial"
 
-    def test_zero_item_serial_is_not_dropped_as_falsey(self):
-        """A serial of JSON number 0 is real; dropping it silently attributes the item to the wrong VC member."""
+    def test_a_serial_without_three_letters_or_digits_is_no_serial_evidence(self):
+        """A serial of JSON number 0 has no hardware identity, so it never attributes a row to a member."""
         master, member2 = _vc_members(["0", "100003"])
         item = {"entPhysicalIndex": 2, "entPhysicalSerialNum": 0, "entPhysicalContainedIn": 0}
 
-        target, source = _attribution(member2, [master, member2], item)
+        _target, source = _attribution(member2, [master, member2], item)
 
-        assert target.pk == master.pk
-        assert source == "serial"
+        assert source != "serial"
 
     def test_a_decorated_serial_is_serial_evidence(self):
         """Juniper reports "S/N 100007"; the serial rules strip the mark, so it matches the stored "100007"."""
@@ -176,6 +179,8 @@ class TestUnrecognizedShape:
 
     def test_a_chassis_can_resolve_below_an_unattributed_stack_root(self):
         """A generic stack root must not suppress a chassis member position."""
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
         page, member = _vc_members(["100012", "100013"])
         inventory = [
             {
@@ -199,7 +204,7 @@ class TestUnrecognizedShape:
             },
         ]
 
-        owners = attribute_inventory(inventory, [page, member], chassis_serial_key(page))
+        owners = attribute_inventory(inventory, [page, member], SerialRules.load().for_device(page))
 
         assert owners[0] == (None, "default")
         assert owners[1][0] == member
@@ -209,6 +214,8 @@ class TestUnrecognizedShape:
     @pytest.mark.parametrize("root_name", ["Switch stack", "StackSub-0/0"])
     def test_a_vc_root_at_position_zero_does_not_claim_member_zero(self, root_class, root_name):
         """The root holds the members; its own position 0 or "0/0" name is not member 0."""
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
         first, second = _zero_based_members(f"root-zero-{root_class}-{len(root_name)}")
         inventory = [
             {
@@ -234,7 +241,7 @@ class TestUnrecognizedShape:
         ]
 
         # The page is member 1, so a stack child takes its own position 1 and a chassis root's child stays on the page.
-        owners = attribute_inventory(inventory, [first, second], chassis_serial_key(second))
+        owners = attribute_inventory(inventory, [first, second], SerialRules.load().for_device(second))
 
         assert owners[0] == (None, "default")
         assert (owners[1][0] or second) == second
@@ -342,9 +349,9 @@ class TestRecognizedStack:
             device.save(update_fields=["serial"])
         fpc = {"entPhysicalDescr": "FPC: EX4400-24X @ 1/*/*", "entPhysicalName": "EX4400-24X-S"}
         inventory = [
-            _row(1, "chassis", 0, entPhysicalDescr="Juniper Virtual Chassis Switch", entPhysicalSerialNum="S-A"),
-            _row(120, "container", 1, position=1, entPhysicalSerialNum="S-A", **fpc),
-            _row(121, "container", 1, position=1, entPhysicalSerialNum="S-B", **fpc),
+            _row(1, "chassis", 0, entPhysicalDescr="Juniper Virtual Chassis Switch", entPhysicalSerialNum="SN-AAA"),
+            _row(120, "container", 1, position=1, entPhysicalSerialNum="SN-AAA", **fpc),
+            _row(121, "container", 1, position=1, entPhysicalSerialNum="SN-BBB", **fpc),
             _row(1210, "module", 121, position=2, entPhysicalModelName="PIC"),
             # "FPC 1" names a slot that two FPCs share, so it names no member.
             _row(4, "powerSupply", 1, position=2, entPhysicalDescr="FPC 1 Power Supply 0", entPhysicalModelName="PSU"),
@@ -382,3 +389,94 @@ def test_serial_matches_device_keys_the_serial_of_the_attributed_member(stored):
     context = contexts[("index", 5)]
     assert context["selected_device"].pk == member.pk
     assert _check_ignore_rules(row, None, context["ignore_rules"], {5: row}, context["device_identity"]) == "skip"
+
+
+def test_serial_matches_device_keys_a_masterless_member_serial_under_its_own_rules():
+    """Only the page maker strips "TAG ", so the member's own rules keep "TAG ABC" and "ABC" apart."""
+    from dcim.models import Device, DeviceType, Manufacturer
+
+    from netbox_librenms_plugin.inventory_policy import load_inventory_policy
+    from netbox_librenms_plugin.models import InventoryIgnoreRule, NormalizationRule
+    from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView, _check_ignore_rules
+
+    page, member = _vc_members(["PAGE-MASTERLESS", "ABC-MASTERLESS"])
+    NormalizationRule.objects.create(
+        scope="serial", match_pattern=r"^TAG (.+)$", replacement=r"\1", manufacturer=page.device_type.manufacturer
+    )
+    other_maker = Manufacturer.objects.create(name="Masterless member maker", slug="masterless-member-maker")
+    member_type = DeviceType.objects.create(
+        manufacturer=other_maker, model="Masterless member", slug="masterless-member"
+    )
+    Device.objects.filter(pk=member.pk).update(device_type=member_type)
+    InventoryIgnoreRule.objects.all().delete()
+    InventoryIgnoreRule.objects.create(
+        name="Hide the member board", match_type="serial_matches_device", pattern="", action="skip"
+    )
+    row = _row(5, "module", 0, position=2, entPhysicalSerialNum="TAG ABC-MASTERLESS")
+    policy = load_inventory_policy(page.pk)
+
+    _default, contexts = BaseModuleTableView._build_inventory_ignore_contexts(
+        policy.page_device, [row], policy.vc_members, policy
+    )
+
+    context = contexts[("index", 5)]
+    assert context["selected_device"].pk == member.pk
+    assert _check_ignore_rules(row, None, context["ignore_rules"], {5: row}, context["device_identity"]) is None
+
+
+def test_a_masterless_member_serial_names_its_owner_only_under_its_own_rules():
+    """Only the page maker strips "TAG ", so "TAG ABC" names no member that stores "ABC", and the position decides."""
+    from dcim.models import Device, DeviceType, Manufacturer
+
+    from netbox_librenms_plugin.inventory_policy import load_inventory_policy
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+    page, member = _vc_members(["PAGE-POSN", "ABC-POSN"])
+    NormalizationRule.objects.create(
+        scope="serial", match_pattern=r"^TAG (.+)$", replacement=r"\1", manufacturer=page.device_type.manufacturer
+    )
+    other_maker = Manufacturer.objects.create(name="Positioned member maker", slug="positioned-member-maker")
+    member_type = DeviceType.objects.create(
+        manufacturer=other_maker, model="Positioned member", slug="positioned-member"
+    )
+    Device.objects.filter(pk=member.pk).update(device_type=member_type)
+    row = _row(5, "module", 0, position=1, entPhysicalSerialNum="TAG ABC-POSN")
+    policy = load_inventory_policy(page.pk)
+
+    _default, contexts = BaseModuleTableView._build_inventory_ignore_contexts(
+        policy.page_device, [row], policy.vc_members, policy
+    )
+
+    assert contexts[("index", 5)]["selected_device"].pk == page.pk
+
+
+def test_a_masterless_junos_stack_is_detected_under_the_rules_of_any_member():
+    """The page maker strips "TAG-" to a short value; the member's rules keep FPC 1's serial, so its PSU follows it."""
+    from dcim.models import Device, DeviceType, Manufacturer
+
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.serial_identity import SerialRules
+
+    page, member = make_junos_vc_members("junos-masterless-admits")
+    # FPC 1 carries the serial of the NetBox device at position 0, so only the stack rows, not the position, name it.
+    maker = Manufacturer.objects.create(name="Junos masterless member maker", slug="junos-masterless-member-maker")
+    member_type = DeviceType.objects.create(manufacturer=maker, model="Junos masterless", slug="junos-masterless")
+    Device.objects.filter(pk=page.pk).update(vc_position=9, serial="12345")
+    Device.objects.filter(pk=member.pk).update(vc_position=0, serial="TAG-AB", device_type=member_type)
+    Device.objects.filter(pk=page.pk).update(vc_position=1)
+    page.refresh_from_db()
+    member.refresh_from_db()
+    NormalizationRule.objects.create(
+        scope="serial", match_pattern=r"^TAG-(.+)$", replacement=r"\1", manufacturer=page.device_type.manufacturer
+    )
+    inventory = [
+        {**row, "entPhysicalSerialNum": "TAG-AB"} if row["entPhysicalSerialNum"] == "12350" else row
+        for row in junos_vc_inventory()
+    ]
+    rules = SerialRules.load()
+
+    owners = attribute_inventory(inventory, [page, member], rules.for_device(page), member_context=rules.for_device)
+
+    owner = {row["entPhysicalIndex"]: found or page for row, (found, _source) in zip(inventory, owners, strict=True)}
+    assert (owner[121], owner[4]) == (member, member)

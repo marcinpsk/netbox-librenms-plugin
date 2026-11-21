@@ -2162,8 +2162,8 @@ class TestModuleCreationIsGuarded:
     # qualified function -> why it may create a Module without the device-scoped guard
     EXEMPT = {
         "ReplaceModuleView.post": (
-            "runs its own global serial-conflict resolution under select_for_update, including the "
-            "permission-masked count refusal; deliberately not narrowed to the device"
+            "runs its own global serial-conflict resolution inside the complete Device scope, including "
+            "the permission-masked count refusal; deliberately not narrowed to the device"
         ),
     }
 
@@ -2593,6 +2593,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         from django.core.cache import cache
 
         from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+        from netbox_librenms_plugin.module_grants import GrantRefusal
         from netbox_librenms_plugin.tests.view_test_helpers import message_texts, rendered_modal_form
         from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
 
@@ -2660,7 +2661,76 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         assert target.serial == "OLD-CONFLICT"
         assert hidden.serial == "INCOMING-CONFLICT"
         assert Module.objects.filter(serial="INCOMING-CONFLICT").count() == 1
-        assert any("cannot remove" in text for text in message_texts(request, "error"))
+        # The preview showed no holder of the serial, so the grant refuses the holder that appeared since.
+        assert message_texts(request, "error") == [GrantRefusal.STALE.message]
+
+    def test_module_replace_keeps_a_previewed_serial_holder_outside_delete_scope(self):
+        """The preview shows the holder, so the grant is fresh; the delete scope of the holder must refuse."""
+        from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+        from netbox_librenms_plugin.tests.view_test_helpers import message_texts, rendered_modal_form
+        from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView, _SerialConflictUnavailable
+
+        device = make_device("scope-replace-kept")
+        other_device = make_device("scope-replace-kept-holder")
+        module_type = make_module_type("MT-scope-replace-kept")
+        target = Module.objects.create(
+            device=device,
+            module_bay=make_module_bay(device, "Slot 1"),
+            module_type=module_type,
+            serial="OLD-KEPT",
+        )
+        holder = Module.objects.create(
+            device=other_device,
+            module_bay=make_module_bay(other_device, "Holder Slot"),
+            module_type=module_type,
+            serial="INCOMING-KEPT",
+        )
+        # The viewer sees the holder, its Device and its bay, so the preview signs the Replace with the holder.
+        user = self._user(
+            "scope-replace-kept",
+            [
+                (Device, "view", {"pk__in": [device.pk, other_device.pk]}),
+                (ModuleBay, "view", {"pk__in": [target.module_bay_id, holder.module_bay_id]}),
+                (ModuleType, "view", {"pk": module_type.pk}),
+                (Module, "view", {"pk__in": [target.pk, holder.pk]}),
+                (Module, "add", None),
+                (Module, "change", {"pk": target.pk}),
+                (Module, "delete", {"pk": target.pk}),
+                (Interface, "add", None),
+                (Interface, "change", None),
+                (Interface, "delete", None),
+            ],
+        )
+        view = ReplaceModuleView()
+        server_key = configured_server_key()
+        view._librenms_api = LibreNMSAPI(server_key=server_key)
+        inventory_item = {
+            "entPhysicalIndex": 100,
+            "entPhysicalClass": "module",
+            "entPhysicalName": target.module_bay.name,
+            "entPhysicalModelName": module_type.model,
+            "entPhysicalSerialNum": "INCOMING-KEPT",
+        }
+        cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
+        cache.set(cache_key, trusted_module_inventory_payload(device, [inventory_item], server_key=server_key))
+        _action, fields = rendered_modal_form(device, 100, "replace-module", user=user, server_key=server_key)
+        assert fields["conflict_module_id"] == str(holder.pk)
+        request = self._request(user, fields)
+        view.setup(request)
+        try:
+            view.post(request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        target.refresh_from_db()
+        holder.refresh_from_db()
+        assert (target.serial, holder.serial) == ("OLD-KEPT", "INCOMING-KEPT")
+        # The refusal of the holder's delete scope, not an earlier refusal of the preview.
+        assert message_texts(request, "error") == [_SerialConflictUnavailable.MESSAGE.format(serial="INCOMING-KEPT")]
 
     def test_module_preview_does_not_expose_a_hidden_serial_conflict(self):
         """The preview must not render the location or id of a conflict outside view scope."""
@@ -3149,3 +3219,192 @@ def test_import_reexports_document_the_active_lint_policy():
     assert "F401" in config["tool"]["ruff"]["lint"]["per-file-ignores"]["__init__.py"]
     assert "per-file ignore" in import_utils.__doc__
     assert callable(import_utils.bulk_import_devices)
+
+
+class TestModuleWriterOwnership:
+    """A narrow participation check for the nine known writer groups.
+
+    This does not prove runtime scope completeness. It does not follow aliases,
+    raw SQL, dynamic dispatch, external writers or arbitrary delegated functions.
+    Real owner and concurrency tests establish the runtime contract.
+    """
+
+    WRITERS = {
+        "InstallModuleView.post",
+        "InstallBranchView._install_branch",
+        "InstallSelectedView.post",
+        "UpdateModuleSerialView.post",
+        "UpdateModuleInterfaceView.post",
+        "ApplyModuleInterfaceTypesView.post",
+        "ReplaceModuleView.post",
+        "MoveModuleView.post",
+        "AddBayTemplateView.post",
+    }
+    TYPE_GUARDS = {
+        "InstallModuleView.post": "lock_module_types",
+        "InstallBranchView._install_branch": "lock_module_types",
+        "InstallSelectedView.post": "lock_module_types",
+        "ReplaceModuleView.post": "lock_module_types",
+        "AddBayTemplateView.post": "lock_template_type",
+    }
+    DOWNSTREAM = {
+        "select_for_update",
+        "save",
+        "delete",
+        "bulk_create",
+        "bulk_update",
+        "update_existing_row",
+        "_install_single",
+        "_save_module_with_scoped_component_adoption",
+        "_save_module_with_expected_component_adoption",
+        "_instantiate_template_on_existing",
+        "_bind_and_adopt",
+    }
+
+    @classmethod
+    def _violations(cls, tree, writers):
+        import ast
+
+        failures = []
+        definitions = dict(TestModuleCreationIsGuarded._definitions(tree))
+        for name in sorted(writers):
+            method = definitions.get(name)
+            if method is None:
+                failures.append(f"{name}: missing writer")
+                continue
+            calls = []
+
+            def walk(node, parents=(), method=method, calls=calls):
+                # A move's mutation callback executes through update_existing_row.
+                if node is not method and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                    return
+                for child in ast.iter_child_nodes(node):
+                    walk(child, (*parents, node))
+                # After its receiver and arguments, so the list is in call order.
+                if isinstance(node, ast.Call):
+                    calls.append((getattr(node.func, "id", getattr(node.func, "attr", "")), node, parents))
+
+            walk(method)
+            # A conditional expression arm or a short-circuited operand can skip a lock, as an if statement can.
+            conditional = (ast.For, ast.AsyncFor, ast.While, ast.If, ast.IfExp, ast.BoolOp)
+            order = {id(node): position for position, (_call, node, _parents) in enumerate(calls)}
+            scopes = [(node, parents) for call, node, parents in calls if call == "lock_module_write"]
+            if len(scopes) != 1:
+                failures.append(f"{name}: expected one complete owner lock")
+                continue
+            lock, parents = scopes[0]
+            if any(isinstance(parent, conditional) for parent in parents):
+                failures.append(f"{name}: owner lock is conditional or incremental")
+            if not any(call == "observe_module_write" for call, _node, _parents in calls):
+                failures.append(f"{name}: missing observation")
+            if any(call in cls.DOWNSTREAM and order[id(node)] < order[id(lock)] for call, node, _parents in calls):
+                failures.append(f"{name}: downstream lock or write precedes owner lock")
+            if type_guard := cls.TYPE_GUARDS.get(name):
+                claims = [(node, parents) for call, node, parents in calls if call == type_guard]
+                if len(claims) != 1:
+                    failures.append(f"{name}: expected one complete type lock")
+                    continue
+                claim, parents = claims[0]
+                if order[id(claim)] < order[id(lock)] or any(isinstance(parent, conditional) for parent in parents):
+                    failures.append(f"{name}: type lock precedes Devices or is conditional or incremental")
+                if any(call in cls.DOWNSTREAM and order[id(node)] < order[id(claim)] for call, node, _parents in calls):
+                    failures.append(f"{name}: downstream lock or write precedes type lock")
+        return failures
+
+    def test_known_writers_take_one_complete_scope_before_downstream_locks(self):
+        import ast
+
+        from netbox_librenms_plugin.views.sync import modules
+
+        tree = ast.parse(Path(modules.__file__).read_text())
+        assert not self._violations(tree, self.WRITERS)
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "observe_module_write(device_ids=targets)\nModule().save()",
+            "if indexed:\n    lock_module_write(observe_module_write(device_ids=targets))\nModule().save()",
+            "for target in targets:\n    lock_module_write(observe_module_write(device_ids=[target]))\n    Module().save()",
+            "Module.objects.select_for_update()\nlock_module_write(observe_module_write(device_ids=targets))",
+            "lock_module_write(observe_module_write(device_ids=targets), incoming=[Module.objects.select_for_update()])",
+            "lock_module_write(observe_module_write(device_ids=targets)) if indexed else None\nModule().save()",
+            "indexed and lock_module_write(observe_module_write(device_ids=targets))\nModule().save()",
+        ],
+        ids=[
+            "missing",
+            "carrier-unguarded",
+            "incremental-bulk",
+            "late-owner",
+            "write-in-owner-argument",
+            "owner-in-conditional-expression",
+            "owner-in-short-circuit",
+        ],
+    )
+    def test_guard_rejects_known_omissions(self, body):
+        import ast
+        import textwrap
+
+        tree = ast.parse("def writer():\n" + textwrap.indent(body, "    "))
+        assert self._violations(tree, {"writer"})
+
+    def test_guard_accepts_complete_scope_outside_the_install_loop(self):
+        import ast
+
+        tree = ast.parse(
+            "def writer():\n"
+            "    lock_module_write(observe_module_write(device_ids=targets))\n"
+            "    for target in targets:\n"
+            "        Module().save()\n"
+        )
+        assert not self._violations(tree, {"writer"})
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "lock_module_write(observe_module_write(device_ids=targets))\nModule().save()",
+            "lock_module_write(observe_module_write(device_ids=targets))\nfor target in targets:\n    scope.lock_module_types([target])\n    Module().save()",
+            "scope.lock_module_types(types)\nlock_module_write(observe_module_write(device_ids=targets))",
+            "lock_module_write(observe_module_write(device_ids=targets)).lock_module_types([Module().save()])",
+            "lock_module_write(observe_module_write(device_ids=targets))\nscope.lock_module_types(types) if types else None\nModule().save()",
+            "lock_module_write(observe_module_write(device_ids=targets))\ntypes or scope.lock_module_types(types)\nModule().save()",
+        ],
+        ids=[
+            "missing-type",
+            "incremental-types",
+            "types-before-devices",
+            "write-in-type-argument",
+            "types-in-conditional-expression",
+            "types-in-short-circuit",
+        ],
+    )
+    def test_guard_rejects_known_type_claim_omissions(self, body):
+        import ast
+        import textwrap
+
+        tree = ast.parse("class InstallSelectedView:\n    def post(self):\n" + textwrap.indent(body, "        "))
+        assert self._violations(tree, {"InstallSelectedView.post"})
+
+    def test_guard_accepts_complete_types_before_the_install_loop(self):
+        import ast
+
+        tree = ast.parse(
+            "class InstallSelectedView:\n"
+            "    def post(self):\n"
+            "        lock_module_write(observe_module_write(device_ids=targets))\n"
+            "        scope.lock_module_types(types)\n"
+            "        for target in targets:\n"
+            "            Module().save()\n"
+        )
+        assert not self._violations(tree, {"InstallSelectedView.post"})
+
+    def test_guard_accepts_a_type_lock_on_the_owner_lock_result(self):
+        """The receiver takes the owner lock before the type lock runs."""
+        import ast
+
+        tree = ast.parse(
+            "class InstallSelectedView:\n"
+            "    def post(self):\n"
+            "        lock_module_write(observe_module_write(device_ids=targets)).lock_module_types(types)\n"
+            "        Module().save()\n"
+        )
+        assert not self._violations(tree, {"InstallSelectedView.post"})

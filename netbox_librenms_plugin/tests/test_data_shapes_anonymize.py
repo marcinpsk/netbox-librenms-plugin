@@ -100,6 +100,21 @@ def test_serials_pseudonymized_and_deterministic():
     assert len(set(serials1)) == 3  # distinct originals stay distinct
 
 
+@pytest.mark.parametrize("serial", ["12", 12, "A-1"])
+def test_offline_anonymization_does_not_give_identity_to_an_unadmitted_serial(serial):
+    from netbox_librenms_plugin.serial_identity import display, is_identity, plain_context
+
+    recording = _ports({"entPhysicalSerialNum": serial})
+
+    anonymized = anonymize_recording(recording)
+
+    stored = _response(anonymized, "GET /api/v0/devices/1/ports")["ports"][0]["entPhysicalSerialNum"]
+    assert not is_identity(serial, plain_context())
+    # The serial stays reported, so a reader still tells it apart from a blank one.
+    assert display(stored) and stored != str(serial)
+    assert not is_identity(stored, plain_context())
+
+
 def test_cross_reference_serial_preserved():
     """A device serial that equals a stack-member serial must map to the SAME pseudonym."""
     rec = load_recording("cisco-stackwise-3member")
@@ -117,6 +132,8 @@ def test_cross_reference_serial_preserved():
 
 
 def test_numeric_serials_are_masked_and_share_string_identity():
+    from netbox_librenms_plugin.serial_identity import display, is_identity, plain_context
+
     recording = {
         "schema_version": 1,
         "name": "numeric-serials",
@@ -137,7 +154,8 @@ def test_numeric_serials_are_masked_and_share_string_identity():
     expected_serials = anon["expected"]["virtual_chassis"]["member_serials"]
     assert device_serial == inventory_serial == expected_serials[0] == expected_serials[1]
     assert transceiver_serial == expected_serials[2] == expected_serials[3]
-    assert device_serial.startswith("SN-") and transceiver_serial.startswith("SN-")
+    assert device_serial.startswith("SN-")
+    assert display(transceiver_serial) and not is_identity(transceiver_serial, plain_context())
     assert device_serial != transceiver_serial
     assert expected_serials[4:] == [None, "-"]
     assert find_pii(anon) == []
@@ -1031,7 +1049,8 @@ def test_entity_descr_keeps_a_leading_front_panel_as_typed_and_hashes_the_rest()
 
 def test_a_junos_vc_marker_before_a_locator_keeps_its_member_attribution(db):
     """The locator is parsed first and the VC marker rule then reads the prefix, so "FPC 1 " survives."""
-    from netbox_librenms_plugin.import_utils.virtual_chassis import attribute_inventory, chassis_serial_key
+    from netbox_librenms_plugin.import_utils.virtual_chassis import attribute_inventory
+    from netbox_librenms_plugin.serial_identity import SerialRules
     from netbox_librenms_plugin.tests.conftest import junos_vc_inventory, make_junos_vc_members
 
     inventory = junos_vc_inventory()
@@ -1043,8 +1062,8 @@ def test_a_junos_vc_marker_before_a_locator_keeps_its_member_attribution(db):
         anonymized["entPhysicalSerialNum"] = raw["entPhysicalSerialNum"]
     master, member = make_junos_vc_members("vc-locator")
 
-    raw_owners = attribute_inventory(inventory, [master, member], chassis_serial_key(master))
-    anonymized_owners = attribute_inventory(rows, [master, member], chassis_serial_key(master))
+    raw_owners = attribute_inventory(inventory, [master, member], SerialRules.load().for_device(master))
+    anonymized_owners = attribute_inventory(rows, [master, member], SerialRules.load().for_device(master))
 
     assert re.fullmatch(r"FPC 1 entity-[0-9a-f]{6} @ 1/0/0", rows[-1]["entPhysicalDescr"])
     assert anonymized_owners == raw_owners
@@ -1320,9 +1339,10 @@ def test_numeric_model_fields_share_the_string_token(field, value):
 
 
 @pytest.mark.parametrize("field", ["entPhysicalModelName", "entPhysicalSerialNum"])
-@pytest.mark.parametrize("value", [0, 123456, 123456.25])
+@pytest.mark.parametrize("value", [100, 123456, 123456.25])
 @pytest.mark.parametrize("numeric_parent", [True, False])
 def test_anonymization_preserves_mixed_numeric_inventory_identity(recording_server, field, value, numeric_parent):
+    from netbox_librenms_plugin.serial_identity import SerialRules, plain_context
     from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
     parent = {
@@ -1353,8 +1373,9 @@ def test_anonymization_preserves_mixed_numeric_inventory_identity(recording_serv
         assert ok
         replay_parent, replay_child = inventory
         index_map = {item["entPhysicalIndex"]: item for item in inventory}
-        assert BaseModuleTableView._find_integrating_ancestor(replay_child, index_map) is replay_parent
+        assert BaseModuleTableView._find_integrating_ancestor(replay_child, index_map, plain_context()) is replay_parent
         view = object.__new__(BaseModuleTableView)
+        view._serial_rules = SerialRules(())
         row = view._build_row(replay_child, index_map, {}, {})
         assert row["status"] == "Integrated"
         assert row["integrated_in_index"] == 100

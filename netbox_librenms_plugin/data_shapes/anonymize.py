@@ -17,7 +17,6 @@ Use find_pii to check the result for residual identifying data.
 import hashlib
 import ipaddress
 import re
-from collections.abc import Callable
 from typing import NamedTuple
 
 from netbox_librenms_plugin.constants import (
@@ -40,6 +39,7 @@ from netbox_librenms_plugin.data_shapes.ports import (
     name_matches_lag_pattern,
 )
 from netbox_librenms_plugin.data_shapes.recordings_store import recording_meta
+from netbox_librenms_plugin.serial_identity import SerialContext, anonymize_input, plain_context
 
 # Preserve structural fields. Model SKUs use shared tokens.
 PRESERVE_KEYS = frozenset(
@@ -770,6 +770,31 @@ class _DatabaseIDs:
         return _DEVICE_ROUTE_RE.sub(lambda match: match[1] + self.remap("device", match[2]), route)
 
 
+def _serial_text(value):
+    """Return the text of a serial field value that a serial rule reads, or "" when the value holds no serial."""
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        return ""
+    serial = str(value).strip()
+    return "" if is_librenms_placeholder(serial) else serial
+
+
+def _holds_serial(obj):
+    """Return whether the walk of *obj* reaches a serial field value that a serial rule reads."""
+    if isinstance(obj, dict):
+        return any(
+            _holds_serial(value)
+            if isinstance(value, (dict, list))
+            else key in SERIAL_KEYS and bool(_serial_text(value))
+            for key, value in obj.items()
+        )
+    return isinstance(obj, list) and any(_holds_serial(item) for item in obj)
+
+
+def has_serial_input(recording) -> bool:
+    """Return whether a response of *recording* holds a serial, so its anonymization reads a serial context."""
+    return any(_holds_serial(body) for body in recording.get("responses", {}).values())
+
+
 def _anon_value(key, value, rules, container=None):  # noqa: C901
     """Apply the field rule for a single scalar (non-container) value keyed by *key*."""
     salt = rules.salt
@@ -790,16 +815,13 @@ def _anon_value(key, value, rules, container=None):  # noqa: C901
         # Same reason: LibreNMS reports the OUI as an integer.
         return _anon_oui(value, salt)
     if key in SERIAL_KEYS:
-        if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        if not _serial_text(value):
             return value
-        serial = str(value).strip()
-        if not serial or is_librenms_placeholder(serial):
-            return value
-        if rules.serial_key is not None:
-            serial = rules.serial_key(value)
-            if not serial:
-                # The key removed the identity of a real serial: never publish the raw value.
-                return ""
+        serial = anonymize_input(value, rules.serial_context or plain_context())
+        if not serial:
+            # A reported serial without an identity stays reported: no run of three letters or digits gives it one.
+            digest = _hash(_serial_text(value), salt)
+            return f"{digest[:2]}-{digest[2:4]}-{digest[4:]}"
         return f"SN-{_hash(serial, salt)}"
     if key in MODEL_KEYS:
         if isinstance(value, bool) or not isinstance(value, (str, int, float)):
@@ -865,7 +887,7 @@ class _Rules(NamedTuple):
     """The per-recording anonymization context threaded through the walk."""
 
     salt: str = ""
-    serial_key: Callable | None = None
+    serial_context: SerialContext | None = None
     database_ids: _DatabaseIDs | None = None
     model_tokens: dict | None = None
     # Compiled LAG name patterns captured WITH the recording (see _anon_interface_name).
@@ -931,7 +953,7 @@ def _walk(obj, rules, container=None):
     return obj
 
 
-def anonymize_recording(recording, *, salt="", serial_key=None):
+def anonymize_recording(recording, *, salt="", serial_context=None):
     """
     Return a copy of *recording* with every response body anonymized field-by-field.
 
@@ -946,7 +968,7 @@ def anonymize_recording(recording, *, salt="", serial_key=None):
     Args:
         recording (dict): A recording as produced by :func:`.capture.capture_device_recording`.
         salt (str): Optional salt mixed into the deterministic pseudonym hashes.
-        serial_key: The production serial key for a live capture. Offline recordings use their stored serials.
+        serial_context: The production serial context for a live capture. Offline recordings use their stored serials.
 
     Returns:
         dict: A new recording with anonymized ``responses`` and a neutral name/description.
@@ -959,7 +981,7 @@ def anonymize_recording(recording, *, salt="", serial_key=None):
     # are compiled once here and threaded through the walk.
     rules = _Rules(
         salt=salt,
-        serial_key=serial_key,
+        serial_context=serial_context,
         database_ids=database_ids,
         model_tokens={},
         lag_patterns=tuple(compile_lag_patterns(recording)),

@@ -301,10 +301,7 @@ def test_unresolved_warning_does_not_claim_an_existing_row_imported(monkeypatch)
     assert "continue through normal import checks" in html
 
 
-CHASSIS_CONFLICT = (
-    "Imported device {}, but another operation was changing the same NetBox objects, "
-    "so its virtual chassis was not created."
-)
+CHASSIS_CONFLICT = f"Cannot import stack device {{}}: {TRY_AGAIN_MESSAGE}"
 
 
 def _importable_row(live_librenms, device_id, tag, *, members=None):
@@ -360,8 +357,8 @@ def test_a_lock_conflict_in_a_device_create_fails_only_that_row_with_the_try_aga
 
 
 @pytest.mark.django_db
-def test_a_lock_conflict_in_the_chassis_create_reports_the_imported_device(live_librenms, caplog):
-    """The device committed in its own transaction, so the warning says it was imported and the chassis was not."""
+def test_a_lock_conflict_in_the_chassis_create_fails_the_stack_row_and_a_retry_imports_both(live_librenms):
+    """The device and its chassis are one rollback unit, so the failed row leaves nothing and a retry creates both."""
     from dcim.models import Device, VirtualChassis
 
     from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
@@ -370,11 +367,8 @@ def test_a_lock_conflict_in_the_chassis_create_reports_the_imported_device(live_
     members = [_chassis(100, "SN-CONFLICT-A", position=1), _chassis(200, "SN-CONFLICT-B", position=2)]
     prerequisites, row = _importable_row(live_librenms, 96311, "stack-conflict", members=members)
 
-    with (
-        caplog.at_level("WARNING", logger="netbox_librenms_plugin.import_utils.bulk_import"),
-        failing_statement(lambda sql, params: sql.startswith('INSERT INTO "dcim_virtualchassis"'), "40P01"),
-    ):
-        result = bulk_import_devices_shared(
+    def run():
+        return bulk_import_devices_shared(
             [96311],
             server_key="default",
             manual_mappings_per_device={96311: prerequisites},
@@ -382,17 +376,167 @@ def test_a_lock_conflict_in_the_chassis_create_reports_the_imported_device(live_
             user=make_superuser("stack-conflict-user"),
         )
 
-    assert [entry["device_id"] for entry in result["success"]] == [96311]
-    assert result["virtual_chassis_created"] == 0
-    assert Device.objects.filter(name=row["hostname"], virtual_chassis__isnull=True).exists()
+    with failing_statement(lambda sql, params: sql.startswith('INSERT INTO "dcim_virtualchassis"'), "40P01") as failed:
+        result = run()
+
+    assert failed
+    assert result["success"] == []
+    assert result["warnings"] == []
+    assert result["failed"] == [{"device_id": 96311, "error": CHASSIS_CONFLICT.format(96311)}]
+    assert not Device.objects.filter(serial__in=["SN-CONFLICT-A", "SN-CONFLICT-B"]).exists()
     assert not VirtualChassis.objects.filter(domain="librenms-default-96311").exists()
-    assert CHASSIS_CONFLICT.format(96311) in caplog.messages
+
+    retry = run()
+
+    assert [entry["device_id"] for entry in retry["success"]] == [96311]
+    assert retry["virtual_chassis_created"] == 1
+    chassis = VirtualChassis.objects.get(domain="librenms-default-96311")
+    assert set(chassis.members.values_list("serial", flat=True)) == {"SN-CONFLICT-A", "SN-CONFLICT-B"}
+
+
+@pytest.mark.django_db
+def test_a_failed_last_member_insert_rolls_back_the_saved_members_and_a_retry_imports_the_stack(live_librenms):
+    """The master, the chassis and the first member are saved before the last member fails, so all of them roll back."""
+    from dcim.models import Device, Interface, VirtualChassis
+    from ipam.models import IPAddress
+
+    from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
+    from netbox_librenms_plugin.tests.test_bulk_import_job_control import _chassis
+
+    serials = ["SN-ROLLBACK-A", "SN-ROLLBACK-B", "SN-ROLLBACK-C"]
+    members = [_chassis(100 * position, serial, position=position) for position, serial in enumerate(serials, start=1)]
+    prerequisites, row = _importable_row(live_librenms, 96312, "stack-member-rollback", members=members)
+    written = (Device, VirtualChassis, Interface, IPAddress)
+    before = {model: model.objects.count() for model in written}
+
+    def run():
+        return bulk_import_devices_shared(
+            [96312],
+            server_key="default",
+            manual_mappings_per_device={96312: prerequisites},
+            libre_devices_cache={96312: row},
+            user=make_superuser("stack-member-rollback-user"),
+        )
+
+    device_insert = 'INSERT INTO "dcim_device"'
+    chassis_insert = 'INSERT INTO "dcim_virtualchassis"'
+    inserts = []
+
+    def record_insert(execute, sql, params, many, context):
+        result = execute(sql, params, many, context)
+        if sql.startswith((device_insert, chassis_insert)):
+            inserts.append((sql, params))
+        return result
+
+    def last_member_insert(sql, params):
+        return sql.startswith(device_insert) and serials[-1] in params
+
+    with connection.execute_wrapper(record_insert), failing_statement(last_member_insert, "40P01") as failed:
+        result = run()
+
+    assert failed, "the last member INSERT never ran"
+    master, chassis, member = inserts
+    assert master[0].startswith(device_insert) and serials[0] in master[1]
+    assert chassis[0].startswith(chassis_insert)
+    assert member[0].startswith(device_insert) and serials[1] in member[1]
+    assert result["success"] == []
+    assert [entry["device_id"] for entry in result["failed"]] == [96312]
+    assert {model: model.objects.count() for model in written} == before
+    assert not Device.objects.filter(serial__in=serials).exists()
+    assert not Device.objects.filter(name=row["hostname"]).exists()
+    assert not VirtualChassis.objects.filter(domain="librenms-default-96312").exists()
+
+    retry = run()
+
+    assert [entry["device_id"] for entry in retry["success"]] == [96312]
+    assert retry["virtual_chassis_created"] == 1
+    chassis = VirtualChassis.objects.get(domain="librenms-default-96312")
+    assert set(chassis.members.values_list("serial", flat=True)) == set(serials)
+
+
+@pytest.mark.django_db
+def test_an_unavailable_member_serial_rolls_back_the_stack_until_the_master_link_is_repaired(live_librenms):
+    from dcim.models import Device, VirtualChassis
+
+    from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.tests.mapping_fixtures import stored_mapping_for_test
+    from netbox_librenms_plugin.tests.test_bulk_import_job_control import _chassis
+    from netbox_librenms_plugin.tests.test_coverage_device_operations import _stray_chassis_member
+
+    serials = ["BROKEN-LINK-AAA", "BROKEN-LINK-BBB", "BROKEN-LINK-CCC"]
+    members = [_chassis(100 * position, serial, position=position) for position, serial in enumerate(serials, start=1)]
+    prerequisites, row = _importable_row(live_librenms, 96313, "stack-broken-member-link", members=members)
+    stray = _stray_chassis_member("stack-stray", f"OLD-{serials[-1]}")
+    NormalizationRule.objects.create(scope="serial", match_pattern=r"^OLD-(.+)$", replacement=r"\1")
+    before = {model: set(model.objects.values_list("pk", flat=True)) for model in (Device, VirtualChassis)}
+    user = make_superuser("stack-broken-member-link-user")
+
+    def run():
+        return bulk_import_devices_shared(
+            [96313],
+            server_key="default",
+            manual_mappings_per_device={96313: prerequisites},
+            libre_devices_cache={96313: row},
+            user=user,
+        )
+
+    result = run()
+
+    assert result["success"] == []
+    assert [entry["device_id"] for entry in result["failed"]] == [96313]
+    assert result["virtual_chassis_created"] == 0
+    assert {model: set(model.objects.values_list("pk", flat=True)) for model in before} == before
+
+    VirtualChassis.objects.filter(pk=stray.virtual_chassis_id).update(master=stray)
+    Device.objects.filter(pk=stray.pk).update(serial="REPAIRED-HOLDER")
+    retry = run()
+
+    assert [entry["device_id"] for entry in retry["success"]] == [96313]
+    assert retry["virtual_chassis_created"] == 1
+    chassis = VirtualChassis.objects.get(domain="librenms-default-96313")
+    assert stored_mapping_for_test(chassis.master) == {"default": 96313}
+    assert set(chassis.members.values_list("serial", flat=True)) == set(serials)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("stray_first", [False, True], ids=["holders-first", "stray-first"])
+def test_an_unavailable_member_serial_rolls_back_the_stack_even_with_two_holders(client, live_librenms, stray_first):
+    from dcim.models import Device, VirtualChassis
+
+    from netbox_librenms_plugin.tests.test_bulk_import_job_control import _chassis
+    from netbox_librenms_plugin.tests.test_coverage_device_operations import _stray_chassis_member
+
+    device_id = 96315
+    serial = "STACK-MEMBER-BBB"
+    members = [_chassis(100, "STACK-MASTER-AAA", position=1), _chassis(200, serial, position=2)]
+    prerequisites, _ = _importable_row(live_librenms, device_id, "stack-ambiguous-member-link", members=members)
+    if stray_first:
+        stray = _stray_chassis_member("stack-stray", serial)
+    holders = [make_device(f"stack-holder-{index}", serial=serial) for index in range(2)]
+    if not stray_first:
+        stray = _stray_chassis_member("stack-stray", serial)
+    assert (stray.pk < holders[0].pk) if stray_first else (stray.pk > holders[-1].pk)
+    before = {model: set(model.objects.values_list("pk", flat=True)) for model in (Device, VirtualChassis)}
+    client.force_login(make_superuser("stack-ambiguous-member-link-user"))
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:bulk_import_devices"),
+        {
+            "server_key": "default",
+            "select": [str(device_id)],
+            f"role_{device_id}": str(prerequisites["device_role_id"]),
+        },
+    )
+
+    assert response.status_code == 302
+    assert {model: set(model.objects.values_list("pk", flat=True)) for model in before} == before
 
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("htmx", [False, True], ids=["plain", "htmx"])
-def test_the_import_answer_names_a_chassis_that_a_lock_conflict_left_uncreated(client, live_librenms, htmx):
-    """The device is imported, so the answer says so; it must also say that the chassis is missing."""
+def test_the_import_answer_fails_a_stack_row_whose_chassis_create_failed(client, live_librenms, htmx):
+    """The failed chassis rolls the device back, so the answer reports a failed row and no import."""
     from dcim.models import Device
 
     from netbox_librenms_plugin.tests.test_bulk_import_job_control import _chassis
@@ -403,7 +547,7 @@ def test_the_import_answer_names_a_chassis_that_a_lock_conflict_left_uncreated(c
     client.force_login(make_superuser(f"stack-answer-{int(htmx)}-user"))
     headers = {"HTTP_HX_REQUEST": "true"} if htmx else {}
 
-    with failing_statement(lambda sql, params: sql.startswith('INSERT INTO "dcim_virtualchassis"'), "40P01"):
+    with failing_statement(lambda sql, params: sql.startswith('INSERT INTO "dcim_virtualchassis"'), "40P01") as failed:
         response = client.post(
             reverse("plugins:netbox_librenms_plugin:bulk_import_devices"),
             {
@@ -414,18 +558,53 @@ def test_the_import_answer_names_a_chassis_that_a_lock_conflict_left_uncreated(c
             **headers,
         )
 
-    assert Device.objects.filter(name=row["hostname"], virtual_chassis__isnull=True).exists()
-    warning = CHASSIS_CONFLICT.format(device_id)
+    assert failed
+    assert not Device.objects.filter(serial__in=[f"SN-ANSWER-A-{htmx}", f"SN-ANSWER-B-{htmx}"]).exists()
     if htmx:
         assert response.status_code == 200
-        assert "Successfully imported 1 LibreNMS device" in response.content.decode()
-        assert warning in response.content.decode()
+        assert "Successfully imported" not in response.content.decode()
+        assert "Failed to import 1 device" in response.content.decode()
     else:
         assert response.status_code == 302
-        assert messages_on(response.wsgi_request) == [
-            ("success", "Successfully imported 1 LibreNMS device"),
-            ("warning", warning),
-        ]
+        assert messages_on(response.wsgi_request) == [("error", "Failed to import 1 device")]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("holder_count", [1, 2])
+def test_a_confirmed_member_serial_conflict_skips_only_that_member(live_librenms, caplog, holder_count):
+    from dcim.models import Device, VirtualChassis
+
+    from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
+    from netbox_librenms_plugin.tests.mapping_fixtures import stored_mapping_for_test
+    from netbox_librenms_plugin.tests.test_bulk_import_job_control import _chassis
+
+    serials = ["TAKEN-STACK-AAA", "TAKEN-STACK-BBB", "TAKEN-STACK-CCC"]
+    members = [_chassis(100 * position, serial, position=position) for position, serial in enumerate(serials, start=1)]
+    device_id = 96314
+    prerequisites, row = _importable_row(live_librenms, device_id, "stack-taken-member", members=members)
+    holders = {make_device(f"stack-taken-holder-{index}", serial=serials[-1]).pk for index in range(holder_count)}
+
+    result = bulk_import_devices_shared(
+        [device_id],
+        server_key="default",
+        manual_mappings_per_device={device_id: prerequisites},
+        libre_devices_cache={device_id: row},
+        user=make_superuser("stack-taken-member-user"),
+    )
+
+    assert result["failed"] == []
+    assert [entry["device_id"] for entry in result["success"]] == [device_id]
+    assert result["virtual_chassis_created"] == 1
+    chassis = VirtualChassis.objects.get(domain=f"librenms-default-{device_id}")
+    assert stored_mapping_for_test(chassis.master) == {"default": device_id}
+    assert set(chassis.members.values_list("serial", flat=True)) == set(serials[:-1])
+    assert set(Device.objects.filter(serial=serials[-1]).values_list("pk", flat=True)) == holders
+    assert any(
+        record.name == "netbox_librenms_plugin.import_utils.virtual_chassis"
+        and record.levelname == "WARNING"
+        and serials[-1] in record.getMessage()
+        for record in caplog.records
+    )
 
 
 MASTER_UNKNOWN = "Imported device {} without a virtual chassis: the stack master could not be identified by serial."
@@ -617,6 +796,101 @@ def test_a_failed_module_bay_count_write_fails_the_chassis_create():
 
 
 @pytest.mark.django_db
+def test_the_collision_scan_leaves_a_row_with_an_unavailable_serial_unresolved(live_librenms):
+    """The scan cannot check a serial whose lookup is Unavailable, so the precheck must skip that row."""
+    from netbox_librenms_plugin.import_utils.bulk_import import classify_bulk_precheck, detect_collisions_for_device_ids
+    from netbox_librenms_plugin.tests.test_coverage_device_operations import _stray_chassis_member
+
+    _stray_chassis_member("scan-stray", "STRAY-SCAN-1")
+    rows = {
+        96401: {
+            "device_id": 96401,
+            "hostname": "scan-stray-row",
+            "sysName": "scan-stray-row",
+            "serial": "STRAY-SCAN-1",
+            "hardware": "Review hardware",
+            "location": "Review location",
+            "os": "review-os",
+        }
+    }
+
+    collisions, unresolved = detect_collisions_for_device_ids([96401], live_librenms.api, libre_devices_cache=rows)
+
+    assert (collisions, unresolved) == ([], [96401])
+    assert classify_bulk_precheck(collisions, unresolved, [96401], {}).importable_device_ids == []
+    assert not live_librenms.server.requests
+
+
+@pytest.mark.django_db
+def test_collision_precheck_reads_the_serial_rules_once_for_the_batch(live_librenms):
+    """Each Device row with a real serial needs the serial rules, so the batch must share one read of them."""
+    from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+    from netbox_librenms_plugin.models import NormalizationRule
+
+    make_device("serial-rules-once-a", serial="SERIAL-RULES-ONCE-A")
+    make_device("serial-rules-once-b", serial="SERIAL-RULES-ONCE-B")
+    rows = _collision_rows(96211, 96212, "serial-rules-once-a")
+    rows[96212].update(hostname="serial-rules-once-b", sysName="serial-rules-once-b")
+    rows[96211]["serial"] = "SERIAL-RULES-ONCE-A"
+    rows[96212]["serial"] = "SERIAL-RULES-ONCE-B"
+    for device_id, row in rows.items():
+        live_librenms.server.register(f"/api/v0/devices/{device_id}", {"status": "ok", "devices": [row]})
+        live_librenms.server.vc_inventory_callable(device_id, [], {})
+
+    with CaptureQueriesContext(connection) as reference:
+        list(NormalizationRule.objects.filter(scope=NormalizationRule.SCOPE_SERIAL))
+    (serial_only_query,) = (query["sql"] for query in reference.captured_queries)
+    with CaptureQueriesContext(connection) as captured:
+        collisions, unresolved = detect_collisions_for_device_ids(
+            [96211, 96212], live_librenms.api, libre_devices_cache=rows, sync_options={"use_sysname": True}
+        )
+
+    assert (collisions, unresolved) == ([], [])
+    assert [query["sql"] for query in captured.captured_queries].count(serial_only_query) == 1
+    assert [
+        (request["path"], request["query"])
+        for request in live_librenms.server.requests
+        if request["path"].startswith("/api/v0/inventory/")
+    ] == [
+        (f"/api/v0/inventory/{device_id}{suffix}", query)
+        for device_id in rows
+        for suffix, query in [("", {"entPhysicalContainedIn": ["0"]}), ("/all", {})]
+    ]
+
+
+@pytest.mark.django_db
+def test_collision_precheck_continues_when_the_vc_cache_stamp_cannot_read_rules(live_librenms):
+    from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+    from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import aborting_statement
+    from netbox_librenms_plugin.tests.test_bulk_import_job_control import _chassis
+
+    first_id, second_id = 96213, 96214
+    members = [_chassis(100, "STAMP-AAA", position=1), _chassis(200, "STAMP-BBB", position=2)]
+    _, first = _importable_row(live_librenms, first_id, "vc-stamp-first", members=members)
+    _, second = _importable_row(live_librenms, second_id, "vc-stamp-second")
+    first["serial"] = ""
+    live_librenms.api.cache_timeout = 300
+    assert get_virtual_chassis_data(live_librenms.api, first_id, force_refresh=True)["is_stack"]
+    live_librenms.server.requests.clear()
+
+    with aborting_statement(
+        lambda sql, params: sql.startswith("SELECT") and '"netbox_librenms_plugin_normalizationrule"' in sql
+    ) as failed:
+        collisions, unresolved = detect_collisions_for_device_ids(
+            [first_id, second_id], live_librenms.api, libre_devices_cache={first_id: first, second_id: second}
+        )
+
+    assert failed
+    assert (collisions, unresolved) == ([], [first_id])
+    assert {request["path"] for request in live_librenms.server.requests} == {
+        f"/api/v0/devices/{second_id}",
+        f"/api/v0/inventory/{second_id}",
+        f"/api/v0/inventory/{second_id}/all",
+    }
+
+
+@pytest.mark.django_db
 def test_collision_precheck_skips_import_prerequisite_queries():
     """Collision matching must not query site, type, role, or platform import prerequisites."""
     from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
@@ -661,9 +935,18 @@ def test_collision_precheck_skips_import_prerequisite_queries():
         "netbox_librenms_plugin_platformmapping",
         "virtualization_cluster",
     }
+    # The serial rules are identity input, not a prerequisite: the batch reads them once, in the serial-only query.
+    from netbox_librenms_plugin.models import NormalizationRule
+
+    with CaptureQueriesContext(connection) as reference:
+        list(NormalizationRule.objects.filter(scope=NormalizationRule.SCOPE_SERIAL))
+    (serial_only_query,) = (query["sql"] for query in reference.captured_queries)
+    serial_rule_reads = [query["sql"] for query in captured.captured_queries if query["sql"] == serial_only_query]
+    assert len(serial_rule_reads) <= 1
     unexpected = [
         query["sql"]
         for query in captured.captured_queries
         if any(table in query["sql"].lower() for table in import_prerequisite_tables)
+        and query["sql"] not in serial_rule_reads
     ]
     assert unexpected == []

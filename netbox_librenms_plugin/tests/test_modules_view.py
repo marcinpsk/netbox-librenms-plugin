@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from netbox_librenms_plugin.serial_identity import plain_context
 from netbox_librenms_plugin.tests.conftest import junos_vc_inventory, make_junos_vc_members
 
 # ---------------------------------------------------------------------------
@@ -43,7 +44,7 @@ def _real_api_view(settings, server, *, librenms_id):
             }
         },
     )
-    view = object.__new__(BaseModuleTableView)
+    view = _bare_view(BaseModuleTableView)
     view._device_manufacturer = None
     view.librenms_id = librenms_id
     view._librenms_api = LibreNMSAPI(server_key="test-server")
@@ -62,11 +63,20 @@ def _count_port_requests(server, librenms_id):
     return hits
 
 
+def _bare_view(view_class):
+    """Instantiate *view_class* without __init__; its rows read no serial rules."""
+    from netbox_librenms_plugin.serial_identity import SerialRules
+
+    view = object.__new__(view_class)
+    view._serial_rules = SerialRules(())
+    return view
+
+
 def _make_view():
     """Instantiate BaseModuleTableView bypassing __init__."""
     from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
-    view = object.__new__(BaseModuleTableView)
+    view = _bare_view(BaseModuleTableView)
     view._device_manufacturer = None
     view._librenms_api = SimpleNamespace(server_key="test-server")
     view._exact_bay_mappings = []
@@ -148,7 +158,7 @@ class TestInventoryClassIncludeRule:
             DeviceIdentity,
             _check_ignore_rules,
         )
-        from netbox_librenms_plugin.utils import normalize_stack_serial
+        from netbox_librenms_plugin.serial_identity import plain_context
 
         index_map = {item["entPhysicalIndex"]: item for item in items}
         # _collect_top_items reads this cache for any item carrying an index, so a test that
@@ -159,13 +169,18 @@ class TestInventoryClassIncludeRule:
                 index_map.get(item.get("entPhysicalContainedIn")),
                 rules,
                 index_map,
-                DeviceIdentity(serial_key=normalize_stack_serial),
+                DeviceIdentity(serial_context=plain_context(), module_serial_context=plain_context()),
             )
             for item in items
         }
         transparent = BaseModuleTableView._find_transparent_indices(items, ignore_cache)
         return BaseModuleTableView._collect_top_items(
-            items, index_map, rules, DeviceIdentity(serial_key=normalize_stack_serial), transparent, ignore_cache
+            items,
+            index_map,
+            rules,
+            DeviceIdentity(serial_context=plain_context(), module_serial_context=plain_context()),
+            transparent,
+            ignore_cache,
         )
 
     def _include_rule(self, pattern="other"):
@@ -342,9 +357,12 @@ class TestSerialRulesFollowTheTargetDevice:
         }
 
     def _serial_for(self, target_manufacturer, page_manufacturer=None):
+        from netbox_librenms_plugin.serial_identity import SerialRules, naming_token
+
         view = _make_view()
+        view._serial_rules = SerialRules.load()
         view._current_manufacturer = target_manufacturer
-        return view._normalized_item_serial(self._item(), page_manufacturer)
+        return naming_token(self._item()["entPhysicalSerialNum"], view._row_serial_context(page_manufacturer))
 
     def test_the_targets_own_rule_normalizes_the_serial(self):
         from dcim.models import Manufacturer
@@ -404,40 +422,43 @@ class TestSerialRulesFollowTheTargetDevice:
         # The control: the page vendor declares no mapping, so nothing should resolve for it.
         assert row_for(page)["module_type_id"] is None
 
-    def test_a_member_rule_applies_even_though_the_preload_used_the_page_manufacturer(self):
-        """
-        _build_context preloads for the page device, and rows resolve per target member.
-
-        apply_normalization_rules loads a manufacturer it was not preloaded for and caches it
-        into the same dict, so the member's rule still applies and costs one query per vendor.
-        """
+    def test_a_member_rule_applies_without_another_rule_query(self, django_assert_num_queries):
+        """The page reads every serial rule once, so a member row's own rule needs no query of its own."""
         from dcim.models import Manufacturer
 
-        from netbox_librenms_plugin.utils import preload_normalization_rules
+        from netbox_librenms_plugin.serial_identity import SerialRules, naming_token
 
         page = Manufacturer.objects.create(name="Preload Page Vendor", slug="preload-page-vendor")
         member = Manufacturer.objects.create(name="Preload Member Vendor", slug="preload-member-vendor")
         self._rule_for(member)
-        preloaded = preload_normalization_rules("serial", manufacturer=page)
-        assert ("serial", member.pk) not in preloaded, "the member was never preloaded"
-
         view = _make_view()
+        view._serial_rules = SerialRules.load()
+        # The page reads the rules with its first serial decision.
+        view._serial_rules.candidates()
         view._current_manufacturer = member
-        view._norm_rules_serial = preloaded
 
-        serial = view._normalized_item_serial(self._item(), page)
+        with django_assert_num_queries(0):
+            assert naming_token(self._item()["entPhysicalSerialNum"], view._row_serial_context(page)) == "12345"
 
-        assert serial == "12345"
-        assert ("serial", member.pk) in preloaded, "the member's rules were not cached for reuse"
+    def test_build_row_shows_the_librenms_serial_text(self):
+        """The row shows the text that LibreNMS reports, not the identity key that the row's rule extracts."""
+        from dcim.models import Manufacturer
 
-    def test_build_row_reports_the_serial_it_is_given(self):
-        """_build_row must stay free of database access, so the caller resolves the serial."""
+        from netbox_librenms_plugin.serial_identity import SerialRules, naming_token
+
+        owner = Manufacturer.objects.create(name="Row Text Vendor", slug="row-text-vendor")
+        self._rule_for(owner)
         view = _make_view()
+        view._serial_rules = SerialRules.load()
+        view._serial_rules.candidates()
+        view._current_manufacturer = owner
         item = self._item()
+        # The control: under the row's rule the identity key is not the LibreNMS text.
+        assert naming_token(item["entPhysicalSerialNum"], view._row_serial_context()) == "12345"
 
-        row = view._build_row(item, {item["entPhysicalIndex"]: item}, {}, {}, normalized_serial="12345")
+        row = view._build_row(item, {item["entPhysicalIndex"]: item}, {}, {})
 
-        assert row["serial"] == "12345"
+        assert row["serial"] == "BBB-12345"
 
 
 class TestRowOrderIsStableAcrossAnInstall:
@@ -632,13 +653,15 @@ class TestMergeTransceiverDataPortIdentity:
         def assert_malformed(body, expected_error):
             # Deep-copy the seed so a mutation of the SHARED inner dict by _merge_transceiver_data
             # can't also mutate `seed` and make the "untouched" assertion pass vacuously.
+            from netbox_librenms_plugin.serial_identity import SerialRules
+
             candidate = deepcopy(seed)
             librenms_server.register(
                 "/api/v0/devices/100/transceivers",
                 body,
                 method="GET",
             )
-            inventory, error = view._merge_transceiver_data(candidate)
+            inventory, error = view._merge_transceiver_data(candidate, serial_context=SerialRules.load().context(None))
             assert inventory == seed
             assert error == expected_error
 
@@ -657,6 +680,8 @@ class TestMergeTransceiverDataPortIdentity:
         assert_malformed({"status": "ok"}, unexpected_format)
 
     def test_synthetic_item_includes_port_identity_metadata(self, settings, librenms_server):
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
         view = _real_api_view(settings, librenms_server, librenms_id=100)
         librenms_server.register(
             "/api/v0/devices/100/transceivers",
@@ -680,7 +705,7 @@ class TestMergeTransceiverDataPortIdentity:
             method="GET",
         )
 
-        inventory, error = view._merge_transceiver_data([])
+        inventory, error = view._merge_transceiver_data([], serial_context=SerialRules.load().context(None))
 
         assert error is None
         assert len(inventory) == 1
@@ -694,6 +719,8 @@ class TestMergeTransceiverDataPortIdentity:
         assert "with" not in port_requests[0]["query"]
 
     def test_existing_inventory_item_gets_port_identity_metadata(self, settings, librenms_server):
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
         view = _real_api_view(settings, librenms_server, librenms_id=101)
         librenms_server.register(
             "/api/v0/devices/101/transceivers",
@@ -727,7 +754,7 @@ class TestMergeTransceiverDataPortIdentity:
             }
         ]
 
-        inventory, error = view._merge_transceiver_data(inventory_seed)
+        inventory, error = view._merge_transceiver_data(inventory_seed, serial_context=SerialRules.load().context(None))
 
         assert error is None
         assert len(inventory) == 1
@@ -737,6 +764,8 @@ class TestMergeTransceiverDataPortIdentity:
 
     def test_numeric_transceiver_serial_is_coerced_to_a_string(self, settings, librenms_server):
         """An all-digit transceiver serial arrives as an int; the merge must coerce it before stripping instead of raising."""
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
         view = _real_api_view(settings, librenms_server, librenms_id=104)
         librenms_server.register(
             "/api/v0/devices/104/transceivers",
@@ -760,7 +789,7 @@ class TestMergeTransceiverDataPortIdentity:
             method="GET",
         )
 
-        inventory, error = view._merge_transceiver_data([])
+        inventory, error = view._merge_transceiver_data([], serial_context=SerialRules.load().context(None))
 
         assert error is None
         assert len(inventory) == 1
@@ -768,6 +797,8 @@ class TestMergeTransceiverDataPortIdentity:
 
     def test_zero_transceiver_serial_is_preserved(self, settings, librenms_server):
         """A transceiver serial of JSON number 0 is a real serial and must survive as "0", not be dropped as falsey."""
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
         view = _real_api_view(settings, librenms_server, librenms_id=104)
         librenms_server.register(
             "/api/v0/devices/104/transceivers",
@@ -791,7 +822,7 @@ class TestMergeTransceiverDataPortIdentity:
             method="GET",
         )
 
-        inventory, error = view._merge_transceiver_data([])
+        inventory, error = view._merge_transceiver_data([], serial_context=SerialRules.load().context(None))
 
         assert error is None
         assert len(inventory) == 1
@@ -799,6 +830,8 @@ class TestMergeTransceiverDataPortIdentity:
 
     def test_numeric_transceiver_model_and_type_are_coerced_to_strings(self, settings, librenms_server):
         """An all-digit model/type arrives as a JSON number too; stripping it raw would 500 the modules refresh."""
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
         view = _real_api_view(settings, librenms_server, librenms_id=105)
         librenms_server.register(
             "/api/v0/devices/105/transceivers",
@@ -822,7 +855,7 @@ class TestMergeTransceiverDataPortIdentity:
             method="GET",
         )
 
-        inventory, error = view._merge_transceiver_data([])
+        inventory, error = view._merge_transceiver_data([], serial_context=SerialRules.load().context(None))
 
         assert error is None
         assert len(inventory) == 1
@@ -831,6 +864,8 @@ class TestMergeTransceiverDataPortIdentity:
 
     def test_numeric_entity_values_on_the_existing_item_are_coerced(self, settings, librenms_server):
         """The ENTITY-MIB side of the merge can carry numeric model/serial values as well."""
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
         view = _real_api_view(settings, librenms_server, librenms_id=106)
         librenms_server.register(
             "/api/v0/devices/106/transceivers",
@@ -864,7 +899,7 @@ class TestMergeTransceiverDataPortIdentity:
             }
         ]
 
-        inventory, error = view._merge_transceiver_data(inventory_seed)
+        inventory, error = view._merge_transceiver_data(inventory_seed, serial_context=SerialRules.load().context(None))
 
         assert error is None
         assert len(inventory) == 1
@@ -874,6 +909,8 @@ class TestMergeTransceiverDataPortIdentity:
 
     def test_string_index_matches_int_transceiver_index_no_duplicate(self, settings, librenms_server):
         """LibreNMS may report the ENTITY index as a string while the transceiver API returns an int; coercing both sides matches the existing row instead of caching a duplicate."""
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
         view = _real_api_view(settings, librenms_server, librenms_id=103)
         librenms_server.register(
             "/api/v0/devices/103/transceivers",
@@ -907,7 +944,7 @@ class TestMergeTransceiverDataPortIdentity:
             }
         ]
 
-        inventory, error = view._merge_transceiver_data(inventory_seed)
+        inventory, error = view._merge_transceiver_data(inventory_seed, serial_context=SerialRules.load().context(None))
 
         assert error is None
         assert len(inventory) == 1  # supplemented in place, NOT duplicated
@@ -917,6 +954,8 @@ class TestMergeTransceiverDataPortIdentity:
 
     def test_shared_entity_ifindex_links_the_transceiver_to_neither_entity(self, settings, librenms_server):
         """Two entities with the port's ifIndex leave the transceiver as its own synthetic row."""
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
         view = _real_api_view(settings, librenms_server, librenms_id=104)
         librenms_server.register(
             "/api/v0/devices/104/transceivers",
@@ -936,7 +975,9 @@ class TestMergeTransceiverDataPortIdentity:
             for index in (10, 11)
         ]
 
-        inventory, error = view._merge_transceiver_data(deepcopy(inventory_seed))
+        inventory, error = view._merge_transceiver_data(
+            deepcopy(inventory_seed), serial_context=SerialRules.load().context(None)
+        )
 
         assert error is None
         assert inventory[:2] == inventory_seed
@@ -944,6 +985,8 @@ class TestMergeTransceiverDataPortIdentity:
 
     def test_entity_index_of_an_unrelated_entity_adds_no_row(self, settings, librenms_server):
         """A transceiver whose entity index names another port's entity adds no row with that index."""
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
         view = _real_api_view(settings, librenms_server, librenms_id=105)
         librenms_server.register(
             "/api/v0/devices/105/transceivers",
@@ -960,20 +1003,30 @@ class TestMergeTransceiverDataPortIdentity:
         )
         inventory_seed = [{"entPhysicalIndex": 640, "entPhysicalName": "Optic 0/5/0", "ifIndex": 600}]
 
-        inventory, error = view._merge_transceiver_data(deepcopy(inventory_seed))
+        inventory, error = view._merge_transceiver_data(
+            deepcopy(inventory_seed), serial_context=SerialRules.load().context(None)
+        )
 
         assert error is None
         assert inventory == inventory_seed
 
+    # "TX-50" has no identity, so only the fan's class tells that it is not the optic.
+    @pytest.mark.parametrize("transceiver_serial", ["TXR-50", "TX-50"])
     @pytest.mark.parametrize("port_ifindex", [50, None])
-    def test_entity_at_the_index_with_another_serial_is_not_the_optic(self, settings, librenms_server, port_ifindex):
+    def test_entity_at_the_index_with_another_serial_is_not_the_optic(
+        self, settings, librenms_server, port_ifindex, transceiver_serial
+    ):
         """An entity at the transceiver's index that has a different serial is another part and keeps its data."""
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
         view = _real_api_view(settings, librenms_server, librenms_id=108)
         librenms_server.register(
             "/api/v0/devices/108/transceivers",
             {
                 "status": "ok",
-                "transceivers": [{"entity_physical_index": 50, "model": "SFP-10G-SR", "serial": "TX-50", "port_id": 9}],
+                "transceivers": [
+                    {"entity_physical_index": 50, "model": "SFP-10G-SR", "serial": transceiver_serial, "port_id": 9}
+                ],
             },
             method="GET",
         )
@@ -991,7 +1044,9 @@ class TestMergeTransceiverDataPortIdentity:
             }
         ]
 
-        inventory, error = view._merge_transceiver_data(deepcopy(inventory_seed))
+        inventory, error = view._merge_transceiver_data(
+            deepcopy(inventory_seed), serial_context=SerialRules.load().context(None)
+        )
 
         assert error is None
         # The index is the fan's, so a synthetic row would duplicate it.
@@ -1000,6 +1055,8 @@ class TestMergeTransceiverDataPortIdentity:
     @pytest.mark.parametrize(("entity_index", "added"), [(77, [(77, "TX-77", 9)]), (12, [])])
     def test_port_ifindex_alone_does_not_merge_another_serial(self, settings, librenms_server, entity_index, added):
         """An entity that has the port's ifIndex but a different serial is not the optic."""
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
         view = _real_api_view(settings, librenms_server, librenms_id=107)
         librenms_server.register(
             "/api/v0/devices/107/transceivers",
@@ -1028,7 +1085,9 @@ class TestMergeTransceiverDataPortIdentity:
             {"entPhysicalIndex": 12, "entPhysicalName": "Fan 1", "entPhysicalClass": "fan", "ifIndex": 51},
         ]
 
-        inventory, error = view._merge_transceiver_data(deepcopy(inventory_seed))
+        inventory, error = view._merge_transceiver_data(
+            deepcopy(inventory_seed), serial_context=SerialRules.load().context(None)
+        )
 
         assert error is None
         assert inventory[:2] == inventory_seed
@@ -1036,6 +1095,176 @@ class TestMergeTransceiverDataPortIdentity:
             (item["entPhysicalIndex"], item["entPhysicalSerialNum"], item["_librenms_port_id"])
             for item in inventory[2:]
         ] == added
+
+    def test_port_ifindex_alone_does_not_merge_onto_a_short_reported_serial(self, settings, librenms_server):
+        """An entity that reports a serial without an identity and no model is not a blank holder of the optic."""
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
+        view = _real_api_view(settings, librenms_server, librenms_id=109)
+        librenms_server.register(
+            "/api/v0/devices/109/transceivers",
+            {
+                "status": "ok",
+                "transceivers": [
+                    {"entity_physical_index": 77, "model": "SFP-10G-SR", "serial": "OPTIC123", "port_id": 9}
+                ],
+            },
+            method="GET",
+        )
+        librenms_server.register(
+            "/api/v0/devices/109/ports",
+            {"status": "ok", "ports": [{"port_id": 9, "ifName": "Eth9", "ifIndex": 50}]},
+            method="GET",
+        )
+        inventory_seed = [
+            {
+                "entPhysicalIndex": 10,
+                "entPhysicalName": "Port 9",
+                "entPhysicalClass": "port",
+                "entPhysicalSerialNum": "AB-12",
+                "ifIndex": 50,
+            }
+        ]
+
+        inventory, error = view._merge_transceiver_data(
+            deepcopy(inventory_seed), serial_context=SerialRules.load().context(None)
+        )
+
+        assert error is None
+        assert inventory[:1] == inventory_seed
+        assert [
+            (item["entPhysicalIndex"], item["entPhysicalSerialNum"], item["_librenms_port_id"])
+            for item in inventory[1:]
+        ] == [(77, "OPTIC123", 9)]
+
+    @pytest.mark.parametrize(
+        ("port_serial", "optic_serial"),
+        [("AB-12", "OPTIC123"), ("PORT123", "AB-12")],
+        ids=["short-port", "short-optic"],
+    )
+    def test_a_coincident_entity_index_does_not_merge_a_short_serial(
+        self, settings, librenms_server, port_serial, optic_serial
+    ):
+        """Junos reports the port ifIndex as the optic index; a short serial on either side names another part."""
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
+        view = _real_api_view(settings, librenms_server, librenms_id=110)
+        librenms_server.register(
+            "/api/v0/devices/110/transceivers",
+            {
+                "status": "ok",
+                "transceivers": [
+                    {"entity_physical_index": 50, "model": "SFP-10G-SR", "serial": optic_serial, "port_id": 9}
+                ],
+            },
+            method="GET",
+        )
+        librenms_server.register(
+            "/api/v0/devices/110/ports",
+            {"status": "ok", "ports": [{"port_id": 9, "ifName": "Eth9", "ifIndex": 50}]},
+            method="GET",
+        )
+        inventory_seed = [
+            {
+                "entPhysicalIndex": 50,
+                "entPhysicalName": "Port 9",
+                "entPhysicalClass": "port",
+                "entPhysicalSerialNum": port_serial,
+                "ifIndex": 50,
+            }
+        ]
+
+        inventory, error = view._merge_transceiver_data(
+            deepcopy(inventory_seed), serial_context=SerialRules.load().context(None)
+        )
+
+        assert error is None
+        assert inventory == inventory_seed
+
+    def test_an_entity_index_match_keeps_the_optic_when_both_report_one_short_serial(self, settings, librenms_server):
+        """Both APIs report AB-12 for the optic at its own entity index, so the texts name one part."""
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
+        view = _real_api_view(settings, librenms_server, librenms_id=111)
+        librenms_server.register(
+            "/api/v0/devices/111/transceivers",
+            {
+                "status": "ok",
+                "transceivers": [
+                    {"entity_physical_index": 300, "model": "SFP-10G-SR", "serial": " AB-12 ", "port_id": 42}
+                ],
+            },
+            method="GET",
+        )
+        librenms_server.register(
+            "/api/v0/devices/111/ports",
+            {"status": "ok", "ports": [{"port_id": 42, "ifName": "Eth9", "ifIndex": 9}]},
+            method="GET",
+        )
+        inventory_seed = [
+            {"entPhysicalIndex": 300, "entPhysicalClass": "port", "entPhysicalSerialNum": "AB-12", "ifIndex": 9}
+        ]
+
+        inventory, error = view._merge_transceiver_data(
+            deepcopy(inventory_seed), serial_context=SerialRules.load().context(None)
+        )
+
+        assert error is None
+        assert [(item["entPhysicalModelName"], item["_librenms_port_id"]) for item in inventory] == [("SFP-10G-SR", 42)]
+
+    def test_a_replay_of_the_anonymized_recording_merges_the_optic_as_the_live_data_does(
+        self, settings, librenms_server
+    ):
+        """Anonymization keeps a serial without an identity reported, so the port stays apart from the optic."""
+        from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording
+        from netbox_librenms_plugin.serial_identity import display
+
+        live = {
+            "device_id": 110,
+            "responses": {
+                "GET /api/v0/inventory/110/all": {
+                    "status": "ok",
+                    "inventory": [
+                        {
+                            "entPhysicalIndex": 10,
+                            "entPhysicalName": "Port 9",
+                            "entPhysicalClass": "port",
+                            "entPhysicalSerialNum": "AB-12",
+                            "ifIndex": 50,
+                        }
+                    ],
+                },
+                "GET /api/v0/devices/110/transceivers": {
+                    "status": "ok",
+                    "transceivers": [
+                        {"entity_physical_index": 77, "model": "SFP-10G-SR", "serial": "OPTIC123", "port_id": 9}
+                    ],
+                },
+                "GET /api/v0/devices/110/ports": {
+                    "status": "ok",
+                    "ports": [{"port_id": 9, "ifName": "Eth9", "ifIndex": 50}],
+                },
+            },
+        }
+
+        def merged(recording):
+            from netbox_librenms_plugin.serial_identity import SerialRules
+
+            device_id = recording["device_id"]
+            librenms_server.load_recording(recording)
+            view = _real_api_view(settings, librenms_server, librenms_id=device_id)
+            inventory = recording["responses"][f"GET /api/v0/inventory/{device_id}/all"]["inventory"]
+            result, error = view._merge_transceiver_data(
+                deepcopy(inventory), serial_context=SerialRules.load().context(None)
+            )
+            assert error is None
+            return [
+                (item["entPhysicalIndex"], bool(display(item.get("entPhysicalSerialNum"))), "_librenms_port_id" in item)
+                for item in result
+            ]
+
+        assert merged(live) == [(10, True, False), (77, True, True)]
+        assert merged(anonymize_recording(live, salt="replay")) == merged(live)
 
     def test_enrich_inventory_port_identity_backfills_port_rows_from_ports_api(self, settings, librenms_server):
         view = _real_api_view(settings, librenms_server, librenms_id=102)
@@ -1634,6 +1863,7 @@ class TestPostInventoryRefresh:
         """post() now fails closed on malformed inventory before caching, but a stale pre-fix cache entry like {"inventory": [None]} can still be read."""
         from django.core.cache import cache
 
+        from netbox_librenms_plugin.serial_identity import SerialRules
         from netbox_librenms_plugin.sync_cache import module_inventory_cache_payload
         from netbox_librenms_plugin.tests.view_test_helpers import bind_and_call, make_request
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
@@ -1643,13 +1873,15 @@ class TestPostInventoryRefresh:
         view = DeviceModuleTableView()
         cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
         # Keep both identity fingerprints valid. This makes the malformed inventory guard the
-        # only reason the snapshot is removed.
-        cache.set(cache_key, module_inventory_cache_payload([None], 1, None))
+        # only reason the snapshot is rejected.
+        cache.set(
+            cache_key,
+            module_inventory_cache_payload([None], 1, None, serial_context=SerialRules.load().for_device(device)),
+        )
         request = make_request("get", {"server_key": server_key})
 
         result = bind_and_call(view, request, "get_context_data", obj=device)
 
-        assert cache.get(cache_key) is None
         assert result["table"] is None
         assert result["object"].pk == device.pk
         assert result["server_key"] == server_key
@@ -1893,6 +2125,7 @@ class TestPostInventoryRefresh:
         from django.core.cache import cache
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.serial_identity import SerialRules
         from netbox_librenms_plugin.sync_cache import module_inventory_cache_payload
         from netbox_librenms_plugin.tests.conftest import make_device
         from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
@@ -1905,7 +2138,9 @@ class TestPostInventoryRefresh:
         cache.set(api._get_cache_key(device, server_key=server_key), True)
         view = DeviceModuleTableView()
         cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
-        cache.set(cache_key, module_inventory_cache_payload([], 1, None))
+        cache.set(
+            cache_key, module_inventory_cache_payload([], 1, None, serial_context=SerialRules.load().for_device(device))
+        )
         inventory_requests = []
 
         def any_inventory_route(**request_data):
@@ -1927,6 +2162,7 @@ class TestPostInventoryRefresh:
         """No OOB link means get_librenms_oob returns None. This is not a failure. Show a clean success toast and cache the snapshot."""
         from django.core.cache import cache
 
+        from netbox_librenms_plugin.serial_identity import SerialRules
         from netbox_librenms_plugin.sync_cache import MODULE_INVENTORY_CACHE_VERSION
         from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
@@ -1947,6 +2183,7 @@ class TestPostInventoryRefresh:
             "inventory": [],
             "librenms_id": 777,
             "oob_librenms_id": None,
+            "serial_context": SerialRules.load().for_device(device).fingerprint,
         }
 
     def test_post_treats_non_int_main_index_as_fetch_failure(self, librenms_server, server_keys):
@@ -2904,7 +3141,7 @@ class TestCollectDescendants:
     def _view(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
-        return object.__new__(BaseModuleTableView)
+        return _bare_view(BaseModuleTableView)
 
     def test_empty_container_children_at_same_depth(self):
         """Children of a no-model container are returned at the same depth as the container."""
@@ -2979,7 +3216,7 @@ class TestDetermineStatus:
     def _view(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
-        return object.__new__(BaseModuleTableView)
+        return _bare_view(BaseModuleTableView)
 
     def test_matched_bay_and_type(self):
         import types
@@ -3011,7 +3248,7 @@ class TestBuildRowSerialMismatch:
     def _view(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
-        view = object.__new__(BaseModuleTableView)
+        view = _bare_view(BaseModuleTableView)
         view._device_manufacturer = None
         return view
 
@@ -3201,7 +3438,7 @@ class TestBuildRowSerialMismatch:
             "entPhysicalContainedIn": 0,
         }
         index_map = {1: ancestor, 100: oob_item}
-        assert view._find_integrating_ancestor(oob_item, index_map) is ancestor
+        assert view._find_integrating_ancestor(oob_item, index_map, plain_context()) is ancestor
 
         row = view._build_row(oob_item, index_map, {}, {})
 
@@ -3331,7 +3568,7 @@ class TestDetectSerialConflicts:
     def _view(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
-        return object.__new__(BaseModuleTableView)
+        return _bare_view(BaseModuleTableView)
 
     def _make_module(self, tag, serial):
         from netbox_librenms_plugin.tests.conftest import install_module, make_device_with_module_bays
@@ -3389,11 +3626,12 @@ class TestDetectSerialConflicts:
     def test_no_conflict_when_conflict_is_same_module(self):
         """When the only module with the serial IS the installed module, no conflict is set."""
         view = self._view()
-        conflict = self._make_module("same", "S1")
+        # An admitted serial, so only the own-module exclusion keeps the row free of a conflict.
+        conflict = self._make_module("same", "SAME-SERIAL")
 
         row = {
             "can_replace": True,
-            "serial": "S1",
+            "serial": "SAME-SERIAL",
             "installed_module_id": conflict.pk,  # Same as the conflicting module.
         }
 
@@ -3401,6 +3639,24 @@ class TestDetectSerialConflicts:
 
         assert "serial_conflict_module" not in row
         assert not row.get("can_move_from")
+
+    def test_numeric_serials_are_looked_up_by_their_text(self):
+        """LibreNMS sends 123 and 123.0 as JSON numbers; they are one dict key but two serials."""
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
+        conflict = self._make_module("numeric-text", "123.0")
+        view = _make_view()
+        view._serial_rules = SerialRules.load()
+        rows = [
+            view._build_row({"entPhysicalIndex": index, "entPhysicalSerialNum": serial}, {}, {}, {})
+            for index, serial in ((1, 123), (2, 123.0))
+        ]
+
+        view._detect_serial_conflicts(rows)
+
+        assert [row["serial"] for row in rows] == ["123", "123.0"]
+        assert "serial_conflict_module" not in rows[0]
+        assert rows[1].get("serial_conflict_module") == conflict
 
     def test_conflict_detected_for_can_install_row(self):
         """Serial conflicts are also detected for empty-bay (can_install) rows."""
@@ -3435,6 +3691,39 @@ class TestDetectSerialConflicts:
         assert row.get("serial_conflict_module") is None
         assert not row.get("can_move_from")
         assert row.get("serial_conflict_ambiguous") is True
+
+    def test_three_holders_stay_ambiguous_after_the_installed_one_is_left_out(self):
+        """The bay's own module is the first of three holders: two others remain, so nothing is named."""
+        view = self._view()
+        installed = self._make_module("triple-a", "TRIPLE-SN1")
+        self._make_module("triple-b", "TRIPLE-SN1")
+        self._make_module("triple-c", "TRIPLE-SN1")
+
+        row = {"can_replace": True, "serial": "TRIPLE-SN1", "installed_module_id": installed.pk}
+
+        view._detect_serial_conflicts([row])
+
+        assert row.get("serial_conflict_module") is None
+        assert not row.get("can_move_from")
+        assert row.get("serial_conflict_ambiguous") is True
+
+    def test_a_holder_on_the_page_device_blocks_the_install_behind_three_holders_elsewhere(self):
+        """The global read stops after three holders; the holder on this device still withdraws the install."""
+        from netbox_librenms_plugin.tests.conftest import install_module, make_device_with_module_bays
+
+        view = self._view()
+        for tag in "abc":
+            self._make_module(f"scope-{tag}", "SCOPE-SN1")
+        page = make_device_with_module_bays("serial-conflict-scope-page", ["Slot 1", "Slot 2"])
+        install_module(page, "Slot 1", "SERIAL-CONFLICT-scope-page", serial="SCOPE-SN1")
+        row = {"can_install": True, "serial": "SCOPE-SN1", "selected_device_id": page.pk}
+        unassigned = {"can_install": True, "serial": "SCOPE-SN2", "selected_device_id": page.pk}
+
+        view._detect_serial_conflicts([row, unassigned])
+
+        assert row.get("serial_conflict_ambiguous") is True
+        assert row["can_install"] is False
+        assert unassigned["can_install"] is True
 
     def test_can_install_no_serial_not_flagged(self, django_assert_num_queries):
         """A can_install row with no serial is not checked for conflicts."""
@@ -3577,6 +3866,48 @@ class TestModelMatchesDeviceTypeRule:
         assert response.content.decode().count('<td><span class="text-muted">\u2014</span></td>') == 5
 
 
+@pytest.mark.django_db
+def test_the_ancestor_serial_guard_compares_under_the_target_module_rules():
+    """A master rule that strips "TAG " must not make a member's card and its child one part."""
+    from dcim.models import Device, DeviceType, Manufacturer, VirtualChassis
+
+    from netbox_librenms_plugin.inventory_policy import load_inventory_policy
+    from netbox_librenms_plugin.models import InventoryIgnoreRule, NormalizationRule
+    from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+    from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView, _check_ignore_rules
+
+    chassis, (master, member) = make_virtual_chassis_members("ancestor-guard-context")
+    vendor = Manufacturer.objects.create(name="Ancestor guard vendor", slug="ancestor-guard-vendor")
+    master_type = DeviceType.objects.create(manufacturer=vendor, model="Ancestor Master", slug="ancestor-master")
+    Device.objects.filter(pk=master.pk).update(device_type=master_type)
+    VirtualChassis.objects.filter(pk=chassis.pk).update(master=master)
+    NormalizationRule.objects.create(
+        scope="serial", manufacturer=vendor, match_pattern=r"^TAG (.+)$", replacement=r"\1"
+    )
+    InventoryIgnoreRule.objects.create(
+        name="Card IDPROM", match_type="ends_with", pattern="IDPROM", action="skip", require_serial_match_parent=True
+    )
+    card = {
+        "entPhysicalIndex": 1,
+        "entPhysicalName": "Card",
+        "entPhysicalSerialNum": "ABC123",
+        "entPhysicalContainedIn": 0,
+    }
+    child = {
+        "entPhysicalIndex": 2,
+        "entPhysicalName": "Card IDPROM",
+        "entPhysicalSerialNum": "TAG ABC123",
+        "entPhysicalContainedIn": 1,
+    }
+    policy = load_inventory_policy(member.pk)
+
+    context, _ = BaseModuleTableView._build_inventory_ignore_contexts(policy.page_device, [card, child], [], policy)
+    action = _check_ignore_rules(child, card, context["ignore_rules"], {1: card, 2: child}, context["device_identity"])
+
+    assert policy.chassis_serial_context().manufacturer_id == vendor.pk
+    assert action is None
+
+
 class TestCheckIgnoreRules:
     """Tests for the _check_ignore_rules() module-level function."""
 
@@ -3589,14 +3920,19 @@ class TestCheckIgnoreRules:
 
     def _check(self, item, parent_item, rules, index_map=None, device_serial="", type_models=()):
         from netbox_librenms_plugin.views.base.modules_view import DeviceIdentity, _check_ignore_rules
-        from netbox_librenms_plugin.utils import normalize_stack_serial
+        from netbox_librenms_plugin.serial_identity import plain_context
 
         return _check_ignore_rules(
             item,
             parent_item,
             rules,
             index_map,
-            DeviceIdentity(device_serial, frozenset(type_models), serial_key=normalize_stack_serial),
+            DeviceIdentity(
+                device_serial,
+                frozenset(type_models),
+                serial_context=plain_context(),
+                module_serial_context=plain_context(),
+            ),
         )
 
     def test_match_with_serial_match_skips(self):
@@ -3687,6 +4023,46 @@ class TestCheckIgnoreRules:
         }
         index_map = {1: grandparent, 30: parent, 7: item}
         assert self._check(item, parent, [self._rule()], index_map=index_map) == "skip"
+
+    @pytest.mark.parametrize(("parent_serial", "action"), [("AB-12", None), ("", "skip"), ("BUILTIN", "skip")])
+    def test_ancestor_walk_stops_at_the_first_reported_serial(self, parent_serial, action):
+        """A parent that reports a serial without an identity stops the walk; a blank or placeholder one does not."""
+        grandparent = {"entPhysicalIndex": 1, "entPhysicalSerialNum": "ABC123", "entPhysicalContainedIn": 0}
+        parent = {"entPhysicalIndex": 30, "entPhysicalSerialNum": parent_serial, "entPhysicalContainedIn": 1}
+        item = {
+            "entPhysicalIndex": 7,
+            "entPhysicalName": "Board-IDPROM",
+            "entPhysicalSerialNum": "ABC123",
+            "entPhysicalContainedIn": 30,
+        }
+        index_map = {1: grandparent, 30: parent, 7: item}
+        assert self._check(item, parent, [self._rule()], index_map=index_map) == action
+
+    @pytest.mark.parametrize("parent_serial", ["AB-12", ""])
+    def test_the_ancestor_walk_stops_at_the_same_parent_after_anonymization(self, parent_serial):
+        from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording
+        from netbox_librenms_plugin.views.base.modules_view import _serial_matches_an_ancestor
+
+        rows = [
+            {"entPhysicalIndex": 1, "entPhysicalSerialNum": "ABC123", "entPhysicalContainedIn": 0},
+            {"entPhysicalIndex": 30, "entPhysicalSerialNum": parent_serial, "entPhysicalContainedIn": 1},
+            {
+                "entPhysicalIndex": 7,
+                "entPhysicalName": "Board-IDPROM",
+                "entPhysicalSerialNum": "ABC123",
+                "entPhysicalContainedIn": 30,
+            },
+        ]
+        live = {"device_id": 1, "responses": {"GET /api/v0/inventory/1/all": {"inventory": rows}}}
+        anonymized = anonymize_recording(live, salt="walk")
+
+        def matches(recording):
+            items = next(iter(recording["responses"].values()))["inventory"]
+            index_map = {item["entPhysicalIndex"]: item for item in items}
+            return _serial_matches_an_ancestor(index_map[7], index_map[30], index_map, plain_context())
+
+        assert matches(live) is (parent_serial == "")
+        assert matches(anonymized) is matches(live)
 
     def test_ancestor_walk_stops_at_non_matching_serial(self):
         """Ancestor walk stops at first non-empty serial; if it doesn't match → NOT skipped."""
@@ -4190,7 +4566,6 @@ class TestHolderEntitiesAreNotRows:
         stale = bind_and_call(view, make_request("get", {"server_key": server_key}), "get_context_data", obj=device)
 
         assert stale["table"] is None
-        assert cache.get(key) is None
         rows = {row["ent_physical_index"]: row for row in _refresh_module_rows(device, server_key)}
         assert rows[cage["entPhysicalIndex"]]["model"] == transceiver["model"]
 
@@ -4282,7 +4657,7 @@ class TestCollectDescendantsIgnoreRules:
     def _view(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
-        return object.__new__(BaseModuleTableView)
+        return _bare_view(BaseModuleTableView)
 
     def _rule(self, match_type="ends_with", pattern="IDPROM", require_serial=True, action="skip"):
         from netbox_librenms_plugin.models import InventoryIgnoreRule
@@ -5058,7 +5433,7 @@ class TestBuildRowModelWarning:
     def _view(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
-        v = object.__new__(BaseModuleTableView)
+        v = _bare_view(BaseModuleTableView)
         v._device_manufacturer = None
         return v
 
@@ -5537,7 +5912,7 @@ class TestMatchedInterfaceLinking:
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
-        view = object.__new__(BaseModuleTableView)
+        view = _bare_view(BaseModuleTableView)
         view._device_manufacturer = None
         view._librenms_api = object.__new__(LibreNMSAPI)
         view._librenms_api.server_key = "test-server"
@@ -5945,7 +6320,7 @@ class TestFindIntegratingAncestor:
             "entPhysicalContainedIn": 100,
         }
         idx = self._index([xiom, mda])
-        ancestor = BaseModuleTableView._find_integrating_ancestor(mda, idx)
+        ancestor = BaseModuleTableView._find_integrating_ancestor(mda, idx, plain_context())
         assert ancestor is xiom
 
     def test_numeric_serial_finds_integrating_ancestor(self):
@@ -5967,7 +6342,7 @@ class TestFindIntegratingAncestor:
             "entPhysicalContainedIn": 100,
         }
 
-        assert BaseModuleTableView._find_integrating_ancestor(mda, self._index([xiom, mda])) is xiom
+        assert BaseModuleTableView._find_integrating_ancestor(mda, self._index([xiom, mda]), plain_context()) is xiom
 
     @pytest.mark.parametrize("model", [123456, 0])
     def test_numeric_model_finds_integrating_ancestor(self, model):
@@ -5989,7 +6364,7 @@ class TestFindIntegratingAncestor:
             "entPhysicalContainedIn": 100,
         }
 
-        assert BaseModuleTableView._find_integrating_ancestor(mda, self._index([xiom, mda])) is xiom
+        assert BaseModuleTableView._find_integrating_ancestor(mda, self._index([xiom, mda]), plain_context()) is xiom
 
     def test_returns_none_when_serial_differs(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
@@ -6008,7 +6383,7 @@ class TestFindIntegratingAncestor:
             "entPhysicalModelName": "M",
             "entPhysicalContainedIn": 100,
         }
-        assert BaseModuleTableView._find_integrating_ancestor(mda, self._index([xiom, mda])) is None
+        assert BaseModuleTableView._find_integrating_ancestor(mda, self._index([xiom, mda]), plain_context()) is None
 
     def test_returns_none_when_model_differs(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
@@ -6016,18 +6391,18 @@ class TestFindIntegratingAncestor:
         xiom = {
             "entPhysicalIndex": 100,
             "entPhysicalClass": "xioModule",
-            "entPhysicalSerialNum": "S",
+            "entPhysicalSerialNum": "SN-XIOM",
             "entPhysicalModelName": "X",
             "entPhysicalContainedIn": 0,
         }
         mda = {
             "entPhysicalIndex": 200,
             "entPhysicalClass": "mdaModule",
-            "entPhysicalSerialNum": "S",
+            "entPhysicalSerialNum": "SN-XIOM",
             "entPhysicalModelName": "Y",
             "entPhysicalContainedIn": 100,
         }
-        assert BaseModuleTableView._find_integrating_ancestor(mda, self._index([xiom, mda])) is None
+        assert BaseModuleTableView._find_integrating_ancestor(mda, self._index([xiom, mda]), plain_context()) is None
 
     def test_returns_none_for_placeholder_serial(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
@@ -6047,7 +6422,9 @@ class TestFindIntegratingAncestor:
                 "entPhysicalModelName": "M",
                 "entPhysicalContainedIn": 100,
             }
-            assert BaseModuleTableView._find_integrating_ancestor(mda, self._index([xiom, mda])) is None, placeholder
+            assert (
+                BaseModuleTableView._find_integrating_ancestor(mda, self._index([xiom, mda]), plain_context()) is None
+            ), placeholder
 
     @pytest.mark.parametrize("placeholder", ["BUILTIN", "unspecified", "none", "null"])
     def test_returns_none_for_placeholder_model(self, placeholder):
@@ -6057,18 +6434,18 @@ class TestFindIntegratingAncestor:
         xiom = {
             "entPhysicalIndex": 100,
             "entPhysicalClass": "xioModule",
-            "entPhysicalSerialNum": "S",
+            "entPhysicalSerialNum": "SN-XIOM",
             "entPhysicalModelName": placeholder,
             "entPhysicalContainedIn": 0,
         }
         mda = {
             "entPhysicalIndex": 200,
             "entPhysicalClass": "mdaModule",
-            "entPhysicalSerialNum": "S",
+            "entPhysicalSerialNum": "SN-XIOM",
             "entPhysicalModelName": placeholder,
             "entPhysicalContainedIn": 100,
         }
-        assert BaseModuleTableView._find_integrating_ancestor(mda, self._index([xiom, mda])) is None
+        assert BaseModuleTableView._find_integrating_ancestor(mda, self._index([xiom, mda]), plain_context()) is None
 
     def test_skips_chassis_ancestor(self):
         """A chassis ancestor sharing serial (the device serial!) must NEVER be matched."""
@@ -6089,7 +6466,7 @@ class TestFindIntegratingAncestor:
             "entPhysicalModelName": "M",
             "entPhysicalContainedIn": 1,
         }
-        assert BaseModuleTableView._find_integrating_ancestor(mod, self._index([chassis, mod])) is None
+        assert BaseModuleTableView._find_integrating_ancestor(mod, self._index([chassis, mod]), plain_context()) is None
 
     def test_walks_through_container(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
@@ -6097,7 +6474,7 @@ class TestFindIntegratingAncestor:
         xiom = {
             "entPhysicalIndex": 100,
             "entPhysicalClass": "xioModule",
-            "entPhysicalSerialNum": "S",
+            "entPhysicalSerialNum": "SN-XIOM",
             "entPhysicalModelName": "M",
             "entPhysicalContainedIn": 0,
         }
@@ -6111,32 +6488,39 @@ class TestFindIntegratingAncestor:
         mda = {
             "entPhysicalIndex": 200,
             "entPhysicalClass": "mdaModule",
-            "entPhysicalSerialNum": "S",
+            "entPhysicalSerialNum": "SN-XIOM",
             "entPhysicalModelName": "M",
             "entPhysicalContainedIn": 150,
         }
-        ancestor = BaseModuleTableView._find_integrating_ancestor(mda, self._index([xiom, container, mda]))
+        ancestor = BaseModuleTableView._find_integrating_ancestor(
+            mda, self._index([xiom, container, mda]), plain_context()
+        )
         assert ancestor is xiom
 
     def test_skips_non_module_classes(self):
-        """Fan / PowerSupply rows sharing serial must not be deduped — surface as-is."""
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
-        chassis = {
+        parent = {
             "entPhysicalIndex": 1,
-            "entPhysicalClass": "chassis",
-            "entPhysicalSerialNum": "S",
+            "entPhysicalClass": "module",
+            "entPhysicalSerialNum": "FAN123",
             "entPhysicalModelName": "M",
             "entPhysicalContainedIn": 0,
         }
         fan = {
             "entPhysicalIndex": 10,
             "entPhysicalClass": "fan",
-            "entPhysicalSerialNum": "S",
+            "entPhysicalSerialNum": "FAN123",
             "entPhysicalModelName": "M",
             "entPhysicalContainedIn": 1,
         }
-        assert BaseModuleTableView._find_integrating_ancestor(fan, self._index([chassis, fan])) is None
+        assert BaseModuleTableView._find_integrating_ancestor(fan, self._index([parent, fan]), plain_context()) is None
+
+        module = {**fan, "entPhysicalClass": "module"}
+        assert (
+            BaseModuleTableView._find_integrating_ancestor(module, self._index([parent, module]), plain_context())
+            is parent
+        )
 
 
 class TestBuildRowIntegratedDedupe:
@@ -6228,9 +6612,9 @@ class TestScopePreservedAcrossIntegratedContainer:
         from netbox_librenms_plugin.models import ModuleBayMapping
         from netbox_librenms_plugin.tests.conftest import install_module, make_device_with_module_bays
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView, DeviceIdentity
-        from netbox_librenms_plugin.utils import normalize_stack_serial
+        from netbox_librenms_plugin.serial_identity import plain_context
 
-        view = object.__new__(BaseModuleTableView)
+        view = _bare_view(BaseModuleTableView)
         view._device_manufacturer = None
         view._current_device_bays = {}
         # Exact mapping so XIOM matches its bay → parent_module_id is set →
@@ -6319,7 +6703,7 @@ class TestScopePreservedAcrossIntegratedContainer:
             index_map=index_map,
             children_by_parent={100: [mda_item], 200: [port_item]},
             ignore_rules=[],
-            device_identity=DeviceIdentity(serial_key=normalize_stack_serial),
+            device_identity=DeviceIdentity(serial_context=plain_context(), module_serial_context=plain_context()),
             module_types=view._get_module_types(),
             manufacturer=selected_device.device_type.manufacturer,
             selected_device=selected_device,
@@ -6404,7 +6788,7 @@ class TestBuildRowAmbiguityWiring:
     def _view(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
-        view = object.__new__(BaseModuleTableView)
+        view = _bare_view(BaseModuleTableView)
         view._device_manufacturer = None
         view._norm_rules_type = None
         return view
@@ -6817,14 +7201,13 @@ class TestRenderActionsPortIdentityFields:
 
 @pytest.mark.django_db
 class TestGetContextDataOOBCacheFingerprint:
-    """get_context_data must invalidate cached inventory when the linked OOB controller changes (re-link / unlink), not only when the main id changes."""
+    """get_context_data must reject cached inventory when the linked OOB controller changes (re-link / unlink), not only when the main id changes."""
 
     @pytest.fixture
     def server_keys(self, settings, librenms_server):
         return _two_server_keys(settings, librenms_server, "fingerprint")
 
     def test_invalidates_when_oob_relinked(self, server_keys):
-        from django.core.cache import cache
 
         from netbox_librenms_plugin.tests.view_test_helpers import bind_and_call, make_request
         from netbox_librenms_plugin.server_mappings import attach_oob
@@ -6841,12 +7224,10 @@ class TestGetContextDataOOBCacheFingerprint:
 
         context = bind_and_call(view, request, "get_context_data", obj=device)
 
-        assert cache.get(cache_key) is None
         assert context["table"] is None
         assert context["server_key"] == server_key
 
     def test_invalidates_when_oob_unlinked(self, server_keys):
-        from django.core.cache import cache
 
         from netbox_librenms_plugin.tests.view_test_helpers import bind_and_call, make_request
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
@@ -6859,7 +7240,6 @@ class TestGetContextDataOOBCacheFingerprint:
 
         context = bind_and_call(view, request, "get_context_data", obj=device)
 
-        assert cache.get(cache_key) is None
         assert context["table"] is None
         assert context["server_key"] == server_key
 
@@ -6868,6 +7248,7 @@ class TestGetContextDataOOBCacheFingerprint:
         from django.core.cache import cache
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.serial_identity import SerialRules
         from netbox_librenms_plugin.sync_cache import module_inventory_cache_payload
         from netbox_librenms_plugin.tests.conftest import make_device
         from netbox_librenms_plugin.tests.view_test_helpers import bind_and_call, make_request
@@ -6880,12 +7261,13 @@ class TestGetContextDataOOBCacheFingerprint:
         cache.set(api._get_cache_key(device, server_key=server_key), True)
         view = DeviceModuleTableView()
         cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
-        cache.set(cache_key, module_inventory_cache_payload([], 1, None))
+        cache.set(
+            cache_key, module_inventory_cache_payload([], 1, None, serial_context=SerialRules.load().for_device(device))
+        )
         request = make_request("get", {"server_key": server_key})
 
         context = bind_and_call(view, request, "get_context_data", obj=device)
 
-        assert cache.get(cache_key) is None
         assert context["table"] is None
         assert context["server_key"] == server_key
 
@@ -6934,7 +7316,6 @@ class TestGetContextDataOOBCacheFingerprint:
 
         context = bind_and_call(view, request, "get_context_data", obj=device)
 
-        assert cache.get(cache_key) is None
         assert context["table"] is None
         assert context["server_key"] == server_key
 
@@ -7014,7 +7395,7 @@ class TestInterfacePortIdActiveServerScope:
         seed_mapping(iface, bound_key, own=111, save=False)
         seed_mapping(iface, "server2", own=222)
 
-        view = object.__new__(BaseModuleTableView)
+        view = _bare_view(BaseModuleTableView)
         view._librenms_api = self._real_configured_api()
         view._active_server_key = "server2"
         view.request = make_request("get", user=make_superuser())
@@ -7148,6 +7529,183 @@ def test_a_name_match_bound_to_another_port_is_not_shown(client, settings, ifnam
     assert row.get("matched_interface_name") == expected
     for name, interface in interfaces.items():
         assert (interface.get_absolute_url() in table_html) is (name == expected)
+
+
+@pytest.mark.django_db
+def test_the_stored_form_badge_does_not_show_the_stored_serial(client, settings):
+    """The bay loader is not scoped to the viewer's Module access, so the badge names no NetBox serial."""
+    from dcim.models import Device
+    from django.core.cache import cache
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.tests.conftest import install_module, make_device_with_module_bays
+    from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms, trusted_module_inventory_payload
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+    configure_servers(
+        settings, {"default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}}
+    )
+    device = make_device_with_module_bays("stored-form-hidden-module", ["Slot 1"])
+    maker = device.device_type.manufacturer
+    NormalizationRule.objects.create(
+        scope="serial", match_pattern=r"^S/N\s+(.+)$", replacement=r"\1", manufacturer=maker
+    )
+    module = install_module(device, "Slot 1", "STORED-FORM-CARD", serial="S/N STORED-123", manufacturer=maker)
+    item = {
+        "entPhysicalIndex": 83,
+        "entPhysicalClass": "module",
+        "entPhysicalName": "Slot 1",
+        "entPhysicalContainedIn": 0,
+        "entPhysicalModelName": module.module_type.model,
+        "entPhysicalSerialNum": "STORED-123",
+    }
+    payload = trusted_module_inventory_payload(device, [item], librenms_id=9304)
+    cache.set(DeviceModuleTableView().get_cache_key(device, "inventory", server_key="default"), payload, 300)
+    cache.set("librenms_device_info_default_9304", (True, {"device_id": 9304, "hostname": device.name}), 300)
+    # The viewer may see the Device but not its Modules.
+    client.force_login(make_user_with_perms("stored-form-device-viewer", [("view", Device)]))
+
+    response = client.get(
+        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk]),
+        {"tab": "modules", "server_key": "default"},
+    )
+
+    assert response.status_code == 200
+    table = response.context["module_sync"]["table"]
+    (row,) = list(table.data)
+    assert row.get("serial_stored_form_differs") is True
+    assert "S/N STORED-123" not in table.as_html(response.wsgi_request)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("master_link_broken", [True, False])
+def test_a_chassis_page_without_member_serials_offers_no_module_action(client, settings, master_link_broken):
+    """Without member serials a row has no owner, so it must not fall back to the page device's bays."""
+    from dcim.models import Device, VirtualChassis
+    from django.core.cache import cache
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.conftest import (
+        make_device,
+        make_module_bay,
+        make_module_type,
+        make_superuser,
+        make_virtual_chassis_members,
+    )
+    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+    configure_servers(
+        settings, {"default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}}
+    )
+    chassis, (owner, page) = make_virtual_chassis_members(f"chassis-unavailable-{master_link_broken}")
+    make_module_bay(page, "Slot 1")
+    module_type = make_module_type("CHASSIS-UNAVAILABLE-CARD", manufacturer=page.device_type.manufacturer)
+    if master_link_broken:
+        # The master link names a device of another chassis, so no member serial can be compared.
+        master = make_device(f"chassis-unavailable-elsewhere-{master_link_broken}")
+        other = VirtualChassis.objects.create(name=f"chassis-unavailable-other-{master_link_broken}")
+        Device.objects.filter(pk=master.pk).update(virtual_chassis=other, vc_position=1)
+        VirtualChassis.objects.filter(pk=chassis.pk).update(master=master)
+        owner.refresh_from_db()
+    item = {
+        "entPhysicalIndex": 84,
+        "entPhysicalClass": "module",
+        "entPhysicalName": "Slot 1",
+        "entPhysicalContainedIn": 0,
+        "entPhysicalModelName": module_type.model,
+        "entPhysicalSerialNum": "CHASSIS-ROW-1",
+    }
+    payload = trusted_module_inventory_payload(owner, [item], librenms_id=9305)
+    cache.set(DeviceModuleTableView().get_cache_key(owner, "inventory", server_key="default"), payload, 300)
+    cache.set("librenms_device_info_default_9305", (True, {"device_id": 9305, "hostname": owner.name}), 300)
+    client.force_login(make_superuser(f"chassis-unavailable-user-{master_link_broken}"))
+
+    response = client.get(
+        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[page.pk]),
+        {"tab": "modules", "server_key": "default"},
+    )
+
+    assert response.status_code == 200
+    table = response.context["module_sync"]["table"]
+    if master_link_broken:
+        assert table is None
+        assert 'name="inventory_binding"' not in response.content.decode()
+    else:
+        # The control: with a usable master link the same row offers its install.
+        (row,) = list(table.data)
+        assert row["can_install"] is True
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("with_holders", [False, True], ids=["missing", "unique"])
+def test_the_modules_tab_checks_complete_serials_once_across_members(client, settings, librenms_server, with_holders):
+    from django.core.cache import cache
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.conftest import (
+        bind_librenms_server,
+        install_module,
+        make_module_bay,
+        make_module_type,
+        make_superuser,
+        make_virtual_chassis_members,
+    )
+    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+    bind_librenms_server(settings, librenms_server, server_key="default")
+    _, members = make_virtual_chassis_members("module-serial-lookup", count=3)
+    owner = members[0]
+    module_type = make_module_type("SERIAL-LOOKUP-CARD", manufacturer=owner.device_type.manufacturer)
+    inventory = []
+    holders = {}
+    for member in members:
+        position = member.vc_position
+        slot = f"Slot {position}"
+        serial = f"INVENTORY-CARD-{position}"
+        make_module_bay(member, slot)
+        if with_holders:
+            holder_slot = f"Stored Slot {position}"
+            make_module_bay(owner, holder_slot)
+            holders[serial] = install_module(owner, holder_slot, module_type.model, serial=serial)
+        inventory.append(
+            {
+                "entPhysicalIndex": position,
+                "entPhysicalClass": "module",
+                "entPhysicalName": slot,
+                "entPhysicalContainedIn": 0,
+                "entPhysicalParentRelPos": position,
+                "entPhysicalModelName": module_type.model,
+                "entPhysicalSerialNum": serial,
+            }
+        )
+    librenms_id = 9358
+    librenms_server.inventory_response(librenms_id, inventory)
+    payload = trusted_module_inventory_payload(owner, inventory, librenms_id=librenms_id)
+    cache.set(DeviceModuleTableView().get_cache_key(owner, "inventory", server_key="default"), payload, 300)
+    cache.set(f"librenms_device_info_default_{librenms_id}", (True, {"device_id": librenms_id}), 300)
+    client.force_login(make_superuser("module-serial-lookup-user"))
+
+    with CaptureQueriesContext(connection) as queries:
+        response = client.get(
+            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[owner.pk]),
+            {"tab": "modules", "server_key": "default"},
+        )
+
+    assert response.status_code == 200
+    rows = list(response.context["module_sync"]["table"].data)
+    assert {row["selected_device_id"] for row in rows} == {member.pk for member in members}
+    installable_members = members[1:] if with_holders else members
+    assert {row["selected_device_id"] for row in rows if row["can_install"]} == {
+        member.pk for member in installable_members
+    }
+    assert {row["serial"]: row["serial_conflict_module"] for row in rows if row.get("can_move_from")} == holders
+    serial_reads = [query for query in queries if 'BTRIM("dcim_module"."serial"' in query["sql"]]
+    assert len(serial_reads) == 1
 
 
 @pytest.mark.django_db
@@ -7352,6 +7910,67 @@ def _make_mixed_manufacturer_chassis(tag):
         device.vc_position = position
         device.save(update_fields=["virtual_chassis", "vc_position"])
     return page, member, member_manufacturer
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("target_has_holder", [False, True])
+def test_vc_install_checks_conflicts_on_the_row_target(client, live_librenms, target_has_holder):
+    from dcim.models import Module
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.tests.cache_test_helpers import seed_inventory
+    from netbox_librenms_plugin.tests.conftest import install_module, make_module_bay, make_module_type, make_superuser
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+    from netbox_librenms_plugin.tests.view_test_helpers import module_tab_forms
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+    target, other, other_maker = _make_mixed_manufacturer_chassis("install-conflict")
+    seed_mapping(target, "default", own=9312)
+    live_librenms.server.device_info_response(device_id=9312, hostname=target.name)
+    NormalizationRule.objects.create(
+        scope="serial", match_pattern=r"^TAG (.+)$", replacement=r"\1", manufacturer=other_maker
+    )
+    off_target = install_module(other, "Carrier Bay", "OTHER-HOLDER", serial="TAG ABC123")
+    if target_has_holder:
+        for index in range(2):
+            bay = make_module_bay(other, f"Other Bay {index}")
+            install_module(other, bay.name, "OTHER-HOLDER", serial="TAG ABC123")
+        bay = make_module_bay(target, "Holder Bay")
+        install_module(target, bay.name, "TARGET-HOLDER", serial="ABC123")
+    module_type = make_module_type("TARGET-CARD", manufacturer=target.device_type.manufacturer)
+    inventory = [
+        {
+            "entPhysicalIndex": 81,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "Page Bay",
+            "entPhysicalContainedIn": 0,
+            "entPhysicalParentRelPos": 1,
+            "entPhysicalModelName": module_type.model,
+            "entPhysicalSerialNum": "ABC123",
+        }
+    ]
+    seed_inventory(DeviceModuleTableView(), target, inventory, librenms_id=9312)
+    client.force_login(make_superuser("install-conflict-user"))
+
+    response = client.get(
+        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[target.pk]),
+        {"tab": "modules", "server_key": "default"},
+    )
+
+    assert response.status_code == 200
+    (row,) = response.context["module_sync"]["table"].data
+    assert row["selected_device_id"] == target.pk
+    forms = [form for form in module_tab_forms(response.content.decode()).forms if "/install-module/" in form["action"]]
+    if target_has_holder:
+        assert row["serial_conflict_ambiguous"] is True
+        assert not forms
+    else:
+        assert row["serial_conflict_module"] == off_target
+        assert row["serial_conflict_visible"] is True
+        (form,) = forms
+        assert client.post(form["action"], form["fields"]).status_code == 302
+        assert Module.objects.filter(device=target, module_bay__name="Page Bay", serial="ABC123").exists()
 
 
 @pytest.mark.django_db
@@ -7688,7 +8307,7 @@ def test_member_contexts_batch_interface_permissions_and_keep_action_scopes():
     user = grant(user, "change", Interface, constraints={"pk__in": [interfaces[1].pk, interfaces[2].pk]})
     # Warm the real user permission cache before measuring the interface reads.
     user.get_all_permissions()
-    view = object.__new__(BaseModuleTableView)
+    view = _bare_view(BaseModuleTableView)
     view._librenms_api = LibreNMSAPI(server_key=configured_server_key())
     view.request = make_request("get", user=user)
 

@@ -14,6 +14,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_ip,
     make_virtual_chassis,
     make_vm,
+    transactional_db_with_all_apps,
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
@@ -21,61 +22,47 @@ from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_serv
 SERVER_KEY = "test-server"
 
 
+def _broken_serial_rule(tag):
+    """Store a serial rule of an unrelated manufacturer that every decision of its chain refuses."""
+    from dcim.models import Manufacturer
+
+    from netbox_librenms_plugin.models import NormalizationRule
+
+    vendor = Manufacturer.objects.create(name=f"Broken rule vendor {tag}", slug=f"broken-rule-vendor-{tag}")
+    rule = NormalizationRule.objects.create(
+        scope="serial", manufacturer=vendor, match_pattern=r"^(.+)-BROKEN$", replacement=r"\1"
+    )
+    # A QuerySet.update() skips clean(), as a rule stored before the replacement check did.
+    NormalizationRule.objects.filter(pk=rule.pk).update(replacement=r"X\1")
+    return rule
+
+
+def _stray_chassis_member(tag, serial):
+    """Return a chassis member whose chassis names a master outside it, so its serial lookup is Unavailable."""
+    from dcim.models import Device, VirtualChassis
+
+    master = make_device(f"{tag}-master", serial=f"{serial}-MASTER")
+    member = make_device(f"{tag}-member", serial=serial)
+    chassis = make_virtual_chassis(f"{tag}-chassis", member)
+    other = VirtualChassis.objects.create(name=f"{tag}-other")
+    # NetBox refuses this link in clean(), so only a write that skips it stores it.
+    Device.objects.filter(pk=master.pk).update(virtual_chassis=other, vc_position=1)
+    VirtualChassis.objects.filter(pk=chassis.pk).update(master=master)
+    return member
+
+
 @pytest.mark.django_db
 def test_a_padded_duplicate_serial_is_reported_alongside_the_exact_match():
-    """The caller blocks an import on len(matches) > 1, so a padded twin must not stay hidden."""
-    from netbox_librenms_plugin.utils import find_devices_by_serial
+    """The caller blocks an import on an Ambiguous match, so a padded twin must not stay hidden."""
+    from netbox_librenms_plugin.serial_identity import ResolutionKind, resolve_device
 
     exact = make_device("serial-exact", serial="DUP-SERIAL")
     padded = make_device("serial-padded", serial="  DUP-SERIAL  ")
 
-    matches = find_devices_by_serial("DUP-SERIAL")
+    matches = resolve_device("DUP-SERIAL")
 
-    assert {device.pk for device in matches} == {exact.pk, padded.pk}, (
-        "an exact hit returned early and hid the whitespace-only duplicate"
-    )
-
-
-@pytest.mark.django_db
-def test_trimmed_serial_lookup_uses_expression_index():
-    from netbox_librenms_plugin.utils import find_devices_by_serial
-
-    device = make_device("padded-serial", serial=" \t\n\r\v\fSERIAL-TRIM \t\n\r\v\f")
-    queries = []
-
-    def capture_query(execute, sql, params, many, context):
-        queries.append((sql, params))
-        return execute(sql, params, many, context)
-
-    with connection.execute_wrapper(capture_query):
-        assert find_devices_by_serial("SERIAL-TRIM") == [device]
-
-    fallback_queries = [(sql, params) for sql, params in queries if "BTRIM(" in sql]
-    assert len(fallback_queries) == 1
-    sql, params = fallback_queries[0]
-    # The trim characters come from the captured query, not a literal, so this compares what the
-    # ORM actually sends against what the index stores. Asserting on an EXPLAIN plan instead would
-    # be unsound: on a near-empty table the planner picks any index it likes, so the assertion
-    # passes or fails on table statistics rather than on the index being correct.
-    trim_characters = params[0]
-    index_name = "nblp_dcim_device_serial_trim_idx"
-    with connection.cursor() as cursor:
-        cursor.execute(
-            """
-            SELECT indisvalid, indrelid = to_regclass('dcim_device'),
-                   pg_get_expr(indexprs, indrelid)
-            FROM pg_index
-            WHERE indexrelid = to_regclass(%s)
-            """,
-            [index_name],
-        )
-        index = cursor.fetchone()
-    assert index is not None, f"{index_name} is missing; migration 0018 did not run"
-    valid, on_device, expression = index
-    assert valid
-    assert on_device
-    # A drifted expression leaves the index present but unusable for this predicate.
-    assert expression == f"btrim((serial)::text, '{trim_characters}'::text)", expression
+    assert matches.kind is ResolutionKind.AMBIGUOUS
+    assert {device.pk for device in matches.matches} == {exact.pk, padded.pk}
 
 
 @pytest.mark.django_db
@@ -567,14 +554,14 @@ class TestSerialRoleDecision:
             _describe_existing_librenms_link,
             _detect_serial_match_role,
         )
-        from netbox_librenms_plugin.utils import normalize_serial
+        from netbox_librenms_plugin.serial_identity import display
 
         link = _describe_existing_librenms_link(device, SERVER_KEY)
         return _detect_serial_match_role(
             device,
             link,
             payload["hostname"],
-            normalize_serial(payload.get("serial")),
+            display(payload.get("serial")),
             payload,
             SERVER_KEY,
         )
@@ -682,6 +669,9 @@ class TestValidateDeviceForImport:
             "ambiguous_librenms_id",
             "serial_action",
             "serial_confirmed",
+            "legacy_id_serial_confirmed",
+            "legacy_id_serial_unavailable",
+            "legacy_id_serial_shared",
             "serial_duplicate",
             "serial_conflict",
             "serial_role_choice_available",
@@ -930,7 +920,7 @@ class TestValidateDeviceForImport:
         [
             (" SERIAL-TRIM ", "SERIAL-TRIM"),
             (123456, "123456"),
-            (0, "0"),
+            (1000, "1000"),
         ],
     )
     def test_serial_matching_normalizes_real_payload_values(self, incoming, stored):
@@ -988,6 +978,23 @@ class TestValidateDeviceForImport:
         assert result["serial_confirmed"] is (match == "librenms_id")
         assert result["serial_action"] is None
 
+    @pytest.mark.parametrize(("stored", "incoming"), [("S/N ABC-KEYED", "ABC-KEYED"), ("ABC-KEYED", "S/N ABC-KEYED")])
+    def test_a_serial_that_matches_only_under_the_serial_rules_finds_the_device(self, stored, incoming):
+        """A stored "S/N ABC" and an incoming "ABC" name one device, so validation binds it and offers no import."""
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        NormalizationRule.objects.get_or_create(
+            scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+        )
+        device = make_device("validation-keyed-serial", serial=stored)
+
+        result = self._validate(
+            _device_payload(5430, hostname="unmatched-keyed", sysName="unmatched-keyed", serial=incoming)
+        )
+
+        assert result["existing_device"] == device
+        assert result["existing_match_type"] == "serial"
+
     @pytest.mark.parametrize("serial", ["unknown", " N/A ", "none"])
     def test_a_placeholder_serial_binds_no_device_that_stores_it(self, serial):
         make_device(f"validation-placeholder-{serial.strip()}", serial=serial.strip())
@@ -998,10 +1005,11 @@ class TestValidateDeviceForImport:
         assert result["existing_match_type"] is None
 
     def test_a_serial_that_the_rules_make_a_placeholder_binds_no_device(self):
-        """A rule that turns a vendor value into N/A makes that value no hardware identity."""
+        """A rule that leaves no identity for a vendor value makes that value no hardware identity."""
         from netbox_librenms_plugin.models import NormalizationRule
 
-        NormalizationRule.objects.create(scope="serial", match_pattern=r"^VENDOR-PLACEHOLDER$", replacement="N/A")
+        # The group takes no part in the match, so the rule ends the chain without an identity.
+        NormalizationRule.objects.create(scope="serial", match_pattern=r"^VENDOR-PLACEHOLDER(X)?$", replacement=r"\1")
         make_device("validation-rule-placeholder", serial="VENDOR-PLACEHOLDER")
 
         result = self._validate(_device_payload(5429, serial="VENDOR-PLACEHOLDER"))
@@ -1022,7 +1030,7 @@ class TestValidateDeviceForImport:
         )
         rejected.save()
         NormalizationRule.objects.create(
-            scope="serial", manufacturer=vendor, match_pattern=r"^SHARED-SERIAL$", replacement="N/A"
+            scope="serial", manufacturer=vendor, match_pattern=r"^SHARED-SERIAL(X)?$", replacement=r"\1"
         )
         make_device("validation-rule-b-accepted", serial="SHARED-SERIAL")
         make_device("validation-rule-c-accepted", serial="SHARED-SERIAL")
@@ -1031,6 +1039,67 @@ class TestValidateDeviceForImport:
 
         assert result["existing_device"] is None
         assert result["serial_duplicate"] is True
+
+    def test_a_match_that_its_rules_reject_is_not_counted_beside_one_valid_holder(self):
+        """One rejected and one valid holder: the resolver counts only the valid one, so validation binds it."""
+        from dcim.models import DeviceType, Manufacturer
+
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        rejected = make_device("validation-rule-one-rejected", serial="PAIRED-SERIAL")
+        vendor = Manufacturer.objects.create(name="Paired Placeholder Vendor", slug="paired-placeholder-vendor")
+        rejected.device_type = DeviceType.objects.create(
+            manufacturer=vendor, model="Paired Placeholder Model", slug="paired-placeholder-model"
+        )
+        rejected.save()
+        NormalizationRule.objects.create(
+            scope="serial", manufacturer=vendor, match_pattern=r"^PAIRED-SERIAL(X)?$", replacement=r"\1"
+        )
+        accepted = make_device("validation-rule-one-accepted", serial="PAIRED-SERIAL")
+
+        result = self._validate(_device_payload(5433, serial="PAIRED-SERIAL"))
+
+        assert (result["existing_device"], result["existing_match_type"]) == (accepted, "serial")
+        assert not result.get("serial_duplicate")
+
+    @pytest.mark.parametrize("serial", [None, "", "-"])
+    def test_a_missing_serial_validates_beside_a_broken_rule_of_another_manufacturer(self, serial):
+        """No serial identity is compared, so the broken rule does not block the row."""
+        from netbox_librenms_plugin.import_utils.device_operations import VALIDATION_ERROR_ISSUE_PREFIX
+
+        _broken_serial_rule("validate")
+
+        result = self._validate(_device_payload(5434, serial=serial))
+
+        assert not [issue for issue in result["issues"] if issue.startswith(VALIDATION_ERROR_ISSUE_PREFIX)]
+
+    def test_an_unavailable_serial_binds_no_device_by_its_ip(self):
+        """The chassis link hides the serial holder, so validation stops before the IP fallback binds an OOB holder."""
+        from netbox_librenms_plugin.import_utils.device_operations import serial_unavailable_issue
+
+        _stray_chassis_member("validation-stray", "STRAY-5436")
+        holder = make_device("validation-stray-oob-holder")
+        holder.oob_ip = make_ip("198.18.20.36/32")
+        holder.save()
+        payload = _device_payload(
+            5436, hostname="unmatched-stray", sysName="unmatched-stray", serial="STRAY-5436", ip="198.18.20.36"
+        )
+
+        result = self._validate(payload)
+
+        assert (result["existing_device"], result["oob_candidate"], result["serial_action"]) == (None, None, None)
+        assert (result["can_import"], result["is_ready"]) == (False, False)
+        assert serial_unavailable_issue("STRAY-5436") in result["issues"]
+
+    def test_a_real_serial_still_fails_closed_on_a_broken_rule(self):
+        from netbox_librenms_plugin.import_utils.device_operations import VALIDATION_ERROR_ISSUE_PREFIX
+
+        _broken_serial_rule("validate-real")
+
+        result = self._validate(_device_payload(5435, serial="REAL-5435"))
+
+        assert result["can_import"] is False
+        assert [issue for issue in result["issues"] if issue.startswith(VALIDATION_ERROR_ISSUE_PREFIX)]
 
     def test_linked_serial_drift_and_duplicate_are_distinguished(self):
         linked = make_device(
@@ -1411,6 +1480,37 @@ class TestValidateDeviceForImport:
         assert result["device_type_mismatch"] is True
         assert any("Device type mismatch" in warning for warning in result["warnings"])
 
+    def test_a_broken_rule_in_the_legacy_holder_lookup_keeps_the_device_type_mismatch(self):
+        """The holder lookup reads every maker's rules; its failure marks the serial Unavailable, not the type."""
+        from dcim.models import DeviceType, Manufacturer
+
+        from netbox_librenms_plugin.import_utils.device_operations import VALIDATION_ERROR_ISSUE_PREFIX
+
+        device = make_device("validation-legacy-type-drift", serial="LEGACY-TYPE-SN", librenms_cf=5438)
+        _broken_serial_rule("legacy-type-drift")
+        manufacturer = Manufacturer.objects.create(name="Legacy drift maker", slug="legacy-drift-maker")
+        reported_type = DeviceType.objects.create(
+            manufacturer=manufacturer, model="Legacy drift type", slug="legacy-drift-type"
+        )
+
+        result = self._validate(
+            _device_payload(
+                5438,
+                hostname=device.name,
+                sysName=device.name,
+                hardware=reported_type.model,
+                location=device.site.name,
+                serial="LEGACY-TYPE-SN",
+            )
+        )
+
+        assert result["librenms_id_needs_migration"] is True
+        flags = ("legacy_id_serial_confirmed", "legacy_id_serial_unavailable", "legacy_id_serial_shared")
+        assert tuple(result[flag] for flag in flags) == (False, True, False)
+        assert result["device_type_mismatch"] is True
+        # The legacy ID names the Device, so the result is complete and the bulk precheck keeps the row.
+        assert not [issue for issue in result["issues"] if issue.startswith(VALIDATION_ERROR_ISSUE_PREFIX)]
+
 
 @pytest.mark.django_db
 class TestValidationWithRealLibreNMS:
@@ -1581,6 +1681,26 @@ class TestImportSingleDevice:
         assert result["success"] is True
         result["device"].refresh_from_db()
         assert result["device"].serial == stored
+
+    @pytest.mark.parametrize("incoming", [None, "", "-"])
+    def test_a_missing_serial_imports_beside_a_broken_rule_of_another_manufacturer(self, librenms_api, incoming):
+        """The import locks and looks up no serial identity, so the broken rule does not refuse it."""
+        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+
+        _broken_serial_rule("import")
+        site, device_type, role = self._infrastructure("broken-rule")
+        validation = _validation(site=site, device_type=device_type, role=role, resolved_name="broken-rule-import")
+
+        result = import_single_device(
+            5604,
+            SERVER_KEY,
+            validation,
+            sync_options={"sync_interfaces": False, "sync_cables": False},
+            libre_device=_device_payload(5604, serial=incoming),
+        )
+
+        assert (result["success"], result["error"]) == (True, None)
+        assert result["device"].serial == ""
 
     def test_manual_mappings_use_real_objects(self, librenms_api):
         from dcim.models import Platform, Rack
@@ -2053,3 +2173,101 @@ def test_lazy_bulk_import_export_and_unknown_attributes():
     assert callable(operations.bulk_import_devices_shared)
     with pytest.raises(AttributeError):
         _ = operations.unknown_device_operation
+
+
+@transactional_db_with_all_apps()
+def test_an_import_reads_its_device_type_again_under_the_type_row_lock(librenms_api):
+    """Another session moves the type to a maker whose rule keys "XABC" to the holder's "ABC" before the import locks."""
+    from dcim.models import Device, DeviceType, Manufacturer
+
+    from netbox_librenms_plugin.import_utils.device_operations import _serial_taken_message, import_single_device
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.serial_identity import Resolution, ResolutionKind
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import commit_row_change, second_connection
+
+    holder = make_device("type-race-holder", serial="ABC-TYPE-RACE")
+    plain_maker = Manufacturer.objects.create(name="Type race plain maker", slug="type-race-plain-maker")
+    rule_maker = Manufacturer.objects.create(name="Type race rule maker", slug="type-race-rule-maker")
+    NormalizationRule.objects.create(
+        scope="serial", match_pattern=r"^X(.+)$", replacement=r"\1", manufacturer=rule_maker
+    )
+    device_type = DeviceType.objects.create(manufacturer=plain_maker, model="Type race model", slug="type-race-model")
+    validation = _validation(site=holder.site, device_type=device_type, role=holder.role, resolved_name="type-race")
+    changed = []
+
+    def change_before_the_first_lock(execute, sql, params, many, context):
+        if "pg_advisory_xact_lock" in sql and not changed:
+            with second_connection() as other:
+                commit_row_change(other, DeviceType, device_type.pk, {"manufacturer_id": rule_maker.pk})
+            # Only a committed change counts: a lock wait that timed out would also leave no device.
+            changed.append(True)
+        return execute(sql, params, many, context)
+
+    with connection.execute_wrapper(change_before_the_first_lock):
+        result = import_single_device(
+            5605,
+            SERVER_KEY,
+            validation,
+            sync_options={"sync_interfaces": False, "sync_cables": False},
+            libre_device=_device_payload(5605, serial="XABC-TYPE-RACE"),
+        )
+
+    assert changed
+    assert result["success"] is False
+    assert result["error"] == _serial_taken_message(5605, "XABC-TYPE-RACE", Resolution(ResolutionKind.UNIQUE))
+    assert not Device.objects.filter(name="type-race").exists()
+
+
+@transactional_db_with_all_apps()
+def test_an_import_holds_its_device_type_row_until_the_device_exists(librenms_api):
+    """A maker change after the import read the type must wait, or the import decides under a maker it does not save."""
+    from dcim.models import Device, DeviceType, Manufacturer
+    from django.db import OperationalError
+
+    from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import second_connection
+
+    holder = make_device("type-hold-holder", serial="ABC-TYPE-HOLD")
+    plain_maker = Manufacturer.objects.create(name="Type hold plain maker", slug="type-hold-plain-maker")
+    rule_maker = Manufacturer.objects.create(name="Type hold rule maker", slug="type-hold-rule-maker")
+    NormalizationRule.objects.create(
+        scope="serial", match_pattern=r"^X(.+)$", replacement=r"\1", manufacturer=rule_maker
+    )
+    device_type = DeviceType.objects.create(manufacturer=plain_maker, model="Type hold model", slug="type-hold-model")
+    validation = _validation(site=holder.site, device_type=device_type, role=holder.role, resolved_name="type-hold")
+    attempts = []
+
+    def change_after_the_type_read(execute, sql, params, many, context):
+        result = execute(sql, params, many, context)
+        # The serial lookup comes after the type read, so the import has read the type by now.
+        if not attempts and "BTRIM" in sql and connection.in_atomic_block:
+            with second_connection() as other, other.cursor() as cursor:
+                cursor.execute("SET lock_timeout = '200ms'")
+                try:
+                    cursor.execute(
+                        'UPDATE "dcim_devicetype" SET "manufacturer_id" = %s WHERE id = %s',
+                        [rule_maker.pk, device_type.pk],
+                    )
+                except OperationalError as exc:
+                    if getattr(exc.__cause__, "sqlstate", None) != "55P03":
+                        raise
+                    attempts.append("waited")
+                else:
+                    other.commit()
+                    attempts.append("committed")
+        return result
+
+    with connection.execute_wrapper(change_after_the_type_read):
+        result = import_single_device(
+            5606,
+            SERVER_KEY,
+            validation,
+            sync_options={"sync_interfaces": False, "sync_cables": False},
+            libre_device=_device_payload(5606, serial="XABC-TYPE-HOLD"),
+        )
+
+    assert attempts == ["waited"]
+    assert result["success"] is True
+    assert DeviceType.objects.get(pk=device_type.pk).manufacturer_id == plain_maker.pk
+    assert Device.objects.get(name="type-hold").serial == "XABC-TYPE-HOLD"
