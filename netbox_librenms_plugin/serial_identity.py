@@ -340,6 +340,13 @@ def display(value) -> str:
     return "" if is_librenms_placeholder(text) else text
 
 
+def direct_serial_sync_refusal(device) -> str:
+    """Return why a device-level serial cannot be synced directly, or an empty string."""
+    if device.virtual_chassis_id is not None:
+        return "The LibreNMS device serial cannot identify this virtual chassis member."
+    return ""
+
+
 def serial_refusal(value, model) -> str:
     """
     Return why a plugin writer refuses to store the LibreNMS *value* in ``model.serial``, or "".

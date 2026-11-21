@@ -82,6 +82,7 @@ from netbox_librenms_plugin.serial_identity import (
     compare,
     RETYPE_HELD,
     device_assignment,
+    direct_serial_sync_refusal,
     display,
     is_identity,
     is_sole_holder,
@@ -2135,6 +2136,8 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
                     compare(existing_device.serial, libre_device.get("serial"), serial_context) is Comparison.SAME
                 )
                 serial_synced = not is_identity(libre_device.get("serial"), serial_context) or serial_same
+                if not serial_synced:
+                    serial_unavailable = direct_serial_sync_refusal(existing_device)
 
         # Platform comparison
         platform_assessment = assess_platform(
@@ -2539,6 +2542,8 @@ class DeviceConflictActionView(
                     )
                 except Device.DoesNotExist:
                     return _htmx_error_response("Device no longer exists; it may have been deleted concurrently.")
+                if refusal := direct_serial_sync_refusal(locked_device):
+                    return _htmx_error_response(refusal)
                 if not is_identity(incoming_serial, serial_rules.for_device(locked_device)):
                     return _htmx_error_response("No valid serial from LibreNMS")
                 err, changed = _apply_conflict_checked_serial(
