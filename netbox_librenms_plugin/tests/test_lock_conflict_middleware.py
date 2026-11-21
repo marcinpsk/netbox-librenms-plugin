@@ -24,6 +24,7 @@ from netbox_librenms_plugin.tests.lock_conflict_helpers import (
     second_connection,
     wrapped_database_error,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import port_pair
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, messages_on
 from netbox_librenms_plugin.transactions import CommittedFollowUpError
@@ -65,7 +66,7 @@ def test_a_lock_conflict_in_a_view_without_the_runner_is_not_a_500(client, setti
 def test_a_lock_conflict_in_a_relationship_sync_is_a_json_answer(client, settings):
     """The relationship buttons post with fetch() and parse JSON, so a redirect to an HTML page would hide the answer."""
     configure_default_librenms_server(settings)
-    device = make_device("middleware-relationship-sync", librenms_cf={SERVER_KEY: {"id": 93}})
+    device = seed_mapping(make_device("middleware-relationship-sync"), SERVER_KEY, own=93)
     bound_interface(device, "eth1", 10)
     bound_interface(device, "Po1", 20, iface_type="lag")
     seed_ports(

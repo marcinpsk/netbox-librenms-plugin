@@ -2052,7 +2052,7 @@ class TestDeviceValidationDetailsView:
         from netbox_librenms_plugin.serial_identity import UNAVAILABLE_MASTER_LINK
         from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
 
-        existing = make_device("details-stray-member", serial="STRAY-NETBOX", librenms_cf={"default": {"id": 1}})
+        existing = seed_mapping(make_device("details-stray-member", serial="STRAY-NETBOX"), "default", own=1)
         chassis = make_virtual_chassis("details-stray-chassis", existing)
         master = make_device("details-stray-master")
         other = VirtualChassis.objects.create(name="details-stray-other")
@@ -2468,7 +2468,7 @@ class TestBuildIdServerInfo:
     @staticmethod
     def _object(mapping):
         # Storage shape: a legacy, malformed or text-form stored value.
-        return make_device("build-id-server-info", librenms_cf=mapping)
+        return seed_stored_mapping(make_device("build-id-server-info"), mapping, save=True)
 
     @staticmethod
     def _mapped(**seed):
@@ -3738,11 +3738,7 @@ class TestDeviceConflictActionMigrateLibreNMSId:
         from dcim.models import Device
 
         view = self._make_view()
-        device = make_device(
-            "migrate-hostname-device",
-            serial="MIGRATE-SERIAL",
-            librenms_cf="+99",
-        )
+        device = seed_stored_mapping(make_device("migrate-hostname-device", serial="MIGRATE-SERIAL"), "+99", save=True)
         self._register_device(42, "migrate-hostname-device", serial="MIGRATE-SERIAL")
         request = make_view_request(
             "post",
@@ -3768,7 +3764,9 @@ class TestDeviceConflictActionMigrateLibreNMSId:
         from dcim.models import Device
 
         view = self._make_view()
-        device = make_device("migrate-reader-only-device", serial="MIGRATE-SERIAL", librenms_cf="4_2")
+        device = seed_stored_mapping(
+            make_device("migrate-reader-only-device", serial="MIGRATE-SERIAL"), "4_2", save=True
+        )
         rival = seed_mapping(make_device("migrate-reader-only-rival", serial="RIVAL-SERIAL"), self.server_key, own=99)
         self._register_device(42, "migrate-reader-only-device", serial="MIGRATE-SERIAL")
         # Only an ID match sets serial_confirmed, and "4_2" matches no lookup, so force is required here.
@@ -3876,7 +3874,7 @@ class TestDeviceConflictActionMigrateLibreNMSId:
         from dcim.models import Device
 
         view = self._make_view()
-        device = make_device("migrate-success-device", serial="MIGRATE-SERIAL", librenms_cf=42)
+        device = seed_stored_mapping(make_device("migrate-success-device", serial="MIGRATE-SERIAL"), 42, save=True)
         self._register_device(42, "migrate-success-device", serial="MIGRATE-SERIAL")
         request = make_view_request(
             "post",
@@ -4040,7 +4038,7 @@ class TestDeviceConflictActionMigrateLibreNMSId:
             scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
         )
         view = self._make_view()
-        device = make_device("migrate-twin-target", serial="TWIN-MIGRATE", librenms_cf=42)
+        device = seed_stored_mapping(make_device("migrate-twin-target", serial="TWIN-MIGRATE"), 42, save=True)
         make_device("migrate-twin-hidden", serial="S/N TWIN-MIGRATE")
         self._register_device(42, "migrate-twin-target", serial="TWIN-MIGRATE")
         request = make_view_request(
@@ -4067,7 +4065,7 @@ class TestDeviceConflictActionMigrateLibreNMSId:
         from dcim.models import Device
 
         view = self._make_view()
-        device = make_device("migrate-deleted-device", serial="MIGRATE-SERIAL", librenms_cf=42)
+        device = seed_stored_mapping(make_device("migrate-deleted-device", serial="MIGRATE-SERIAL"), 42, save=True)
         device_pk = device.pk
         self._register_device(42, "migrate-deleted-device", serial="MIGRATE-SERIAL")
         request = make_view_request(
@@ -4098,7 +4096,9 @@ class TestDeviceConflictActionMigrateLibreNMSId:
         from dcim.models import Device
 
         view = self._make_view()
-        device = make_device("migrate-concurrent-json-device", serial="MIGRATE-SERIAL", librenms_cf=42)
+        device = seed_stored_mapping(
+            make_device("migrate-concurrent-json-device", serial="MIGRATE-SERIAL"), 42, save=True
+        )
         self._register_device(42, "migrate-concurrent-json-device", serial="MIGRATE-SERIAL")
         request = make_view_request(
             "post",
@@ -4128,7 +4128,7 @@ class TestDeviceConflictActionMigrateLibreNMSId:
         from dcim.models import Device
 
         view = self._make_view()
-        device = make_device("migrate-changed-id-device", serial="MIGRATE-SERIAL", librenms_cf=42)
+        device = seed_stored_mapping(make_device("migrate-changed-id-device", serial="MIGRATE-SERIAL"), 42, save=True)
         self._register_device(42, "migrate-changed-id-device", serial="MIGRATE-SERIAL")
         request = make_view_request(
             "post",
@@ -4158,7 +4158,7 @@ class TestDeviceConflictActionMigrateLibreNMSId:
         from dcim.models import Device
 
         view = self._make_view()
-        device = make_device("migrate-ambiguity-target", serial="MIGRATE-SERIAL", librenms_cf=42)
+        device = seed_stored_mapping(make_device("migrate-ambiguity-target", serial="MIGRATE-SERIAL"), 42, save=True)
         rival = seed_mapping(make_device("migrate-ambiguity-rival", serial="RIVAL-SERIAL"), self.server_key, own=99)
         self._register_device(42, "migrate-ambiguity-target", serial="MIGRATE-SERIAL")
         request = make_view_request(
@@ -4427,7 +4427,7 @@ class TestDeviceConflictActionBranches:
         from dcim.models import Device
 
         view = self._make_view()
-        target = make_device("branches-legacy-link-target", librenms_cf=42)
+        target = seed_stored_mapping(make_device("branches-legacy-link-target"), 42, save=True)
         self._register_device(42, target.name)
         request = self._request(
             "link",
@@ -6956,7 +6956,8 @@ class TestAddAsOOBViewGenericSentinel:
         """A device whose librenms_id is still the legacy bare int must NOT silently no-op: attach_oob promotes it to the per-server dict and attaches the OOB block."""
         from netbox_librenms_plugin.server_mappings import ContainerStatus, attach_oob
 
-        obj = make_device("legacy-oob-storage", librenms_cf=42)  # legacy single-server format (bare int)
+        # legacy single-server format (bare int)
+        obj = seed_stored_mapping(make_device("legacy-oob-storage"), 42, save=True)
 
         after = attach_oob(obj, "default", 55, oob_type="idrac").after
 
@@ -7193,7 +7194,7 @@ class TestAddAsOOBViewPost:
         """Device with legacy bare-int librenms_id is rejected with convert-first message."""
         view = self._make_view()
         # Legacy bare-int librenms_id (not the expected per-server dict structure).
-        existing_device = make_device("oob-legacy", serial="OOB-LEGACY-SERIAL", librenms_cf=42)
+        existing_device = seed_stored_mapping(make_device("oob-legacy", serial="OOB-LEGACY-SERIAL"), 42, save=True)
         self._register_oob_device(77, "oob-legacy-controller", serial=existing_device.serial)
         request = make_view_request(
             "post",
@@ -7893,7 +7894,9 @@ class TestPromoteToHostViewPost:
     def test_legacy_librenms_id_returns_htmx_error(self):
         """A device with a legacy bare-int librenms_id is rejected with a convert-first message."""
         view = self._make_view()
-        existing_device = make_device("promote-legacy", serial="PROMOTE-LEGACY-SERIAL", librenms_cf=42)
+        existing_device = seed_stored_mapping(
+            make_device("promote-legacy", serial="PROMOTE-LEGACY-SERIAL"), 42, save=True
+        )
         self._register_host_device(17, "promote-legacy-host", serial=existing_device.serial)
         request = make_view_request(
             "post",
@@ -8361,7 +8364,9 @@ def _two_member_vc(name, *, m1_cf=None):
     from dcim.models import VirtualChassis
 
     vc = VirtualChassis.objects.create(name=name)
-    m1 = make_device(f"{name}-m1", librenms_cf=m1_cf)
+    m1 = make_device(f"{name}-m1")
+    if m1_cf is not None:
+        seed_stored_mapping(m1, m1_cf)
     m1.virtual_chassis = vc
     m1.vc_position = 1
     m1.save()
@@ -8532,9 +8537,8 @@ class TestMergeNetBoxDevicesViewFailClosed(_MergeViewHarness):
         # Same host id (so the orphan guard doesn't fire) but a corrupt donor oob id. Because the
         # winner already holds an oob, the link merge skips validating the donor oob id; the
         # donor's migration marker is the one that rejects it, and that refusal must be guarded too.
-        donor = make_device(
-            "merge-f2-donor",
-            librenms_cf={self.server_key: {"id": 5, "oob": {"id": "abc"}}},
+        donor = seed_stored_mapping(
+            make_device("merge-f2-donor"), {self.server_key: {"id": 5, "oob": {"id": "abc"}}}, save=True
         )
 
         resp = self._post_merge(winner, donor)

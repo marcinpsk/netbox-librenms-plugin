@@ -13,12 +13,10 @@ def test_cable_blockers_use_the_notification_channel_of_the_response(client, liv
     from netbox_librenms_plugin import source_cache
     from netbox_librenms_plugin.acquisition.registry import Resource
     from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
     from netbox_librenms_plugin.tests.view_test_helpers import make_request
 
-    device = make_device(
-        "cable-blocker-channels",
-        librenms_cf={"default": {"id": 5501, "oob": {"id": 5502, "type": "idrac"}}},
-    )
+    device = seed_mapping(make_device("cable-blocker-channels"), "default", own=5501, oob=5502, oob_type="idrac")
     user = make_superuser("cable-blocker-channels-user")
     server = live_librenms.server
     server.register("/api/v0/devices/5501/links", {"status": "ok", "links": []})

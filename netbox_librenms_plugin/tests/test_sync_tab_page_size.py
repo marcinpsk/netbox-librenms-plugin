@@ -9,6 +9,7 @@ from django.test import RequestFactory
 from django.urls import reverse
 
 from netbox_librenms_plugin.tests.conftest import make_device
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.test_interface_sync_htmx_swap import (
     FIRST_PORT,
     _port,
@@ -44,7 +45,7 @@ def _set_netbox_page_size(user, size):
 
 def _device(name):
     """Return a device with 120 interface rows, more than any page size these tests pick plus its orphans."""
-    device = make_device(name, librenms_cf={SERVER_KEY: {"id": 42}})
+    device = seed_mapping(make_device(name), SERVER_KEY, own=42)
     _seed_ports(device, [_port(FIRST_PORT + index, f"eth{index:03d}") for index in range(120)])
     return device
 
