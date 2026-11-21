@@ -7,7 +7,7 @@ from netbox_librenms_plugin.sync_cache import SyncTab
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_superuser
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.test_ip_address_sync_safety import _refresh_ip_snapshot
-from netbox_librenms_plugin.tests.test_vlan_sync_conflicts import _seed_vlan_snapshot
+from netbox_librenms_plugin.tests.vlan_intent_helpers import seed_vlans, tab_tokens
 
 SERVER = "default"
 IP_CACHE_MISS = "Cache has expired"
@@ -73,15 +73,9 @@ def _vlan_conflicts(client, live_librenms, headers):
     device = _mapped_device(live_librenms, "messages-vlan-conflict")
     group = VLANGroup.objects.create(name="Messages group", slug="messages-group")
     VLAN.objects.create(vid=104, group=group, name="Current name", status="active")
-    _seed_vlan_snapshot(device, [{"vlan_vlan": 104, "vlan_name": "Proposed name"}], SERVER)
+    seed_vlans(device, [{"vlan_vlan": 104, "vlan_name": "Proposed name"}], SERVER)
     url = reverse("plugins:netbox_librenms_plugin:sync_selected_vlans", args=["device", device.pk])
-    data = {
-        "server_key": SERVER,
-        "action": "create_vlans",
-        "select": "104",
-        "vlan_group_104": str(group.pk),
-        "expected_vlan_name_104": "Proposed name",
-    }
+    data = {"server_key": SERVER, "action": "create_vlans", "confirmation_intent": tab_tokens(client, device)[104]}
     response = client.post(url, data, **headers)
     assert b"Confirm VLAN changes" in response.content
     return response, None
