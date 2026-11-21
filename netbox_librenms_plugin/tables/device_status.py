@@ -17,6 +17,7 @@ from netbox_librenms_plugin.import_utils.naming import import_name_variants
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 from netbox_librenms_plugin.mapping_owner import OwnerProblem
 from netbox_librenms_plugin.serial_identity import display
+from netbox_librenms_plugin.tables.link_status import render_link_status
 from netbox_librenms_plugin.utils import netbox_allows_standalone_vm_host
 
 _IMPORT_NAMING_INCLUDE = "#use-sysname-toggle, #strip-domain-toggle"
@@ -39,12 +40,8 @@ class DeviceStatusTable(DeviceTable):
         self.visible_owner_pks = frozenset()
 
     def render_librenms_status(self, value, record):
-        """Render LibreNMS sync status with link to sync page."""
-        sync_url = reverse(
-            "plugins:netbox_librenms_plugin:device_librenms_sync",
-            kwargs={"pk": record.pk},
-        )
-
+        """Render the stored link, or the proposed match, with a link to the sync page."""
+        sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": record.pk})
         ownership = self.ownerships.get(record.virtual_chassis_id)
         if ownership is not None and ownership.problem is not None:
             label = "No chassis master" if ownership.problem is OwnerProblem.NO_MASTER else "Misplaced mappings"
@@ -69,14 +66,7 @@ class DeviceStatusTable(DeviceTable):
                 reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": owner.pk}),
                 owner.name,
             )
-        if value:
-            status = '<span class="text-success"><i class="mdi mdi-check-circle"></i> Found</span>'
-        elif value is False:
-            status = '<span class="text-danger"><i class="mdi mdi-close-circle"></i> Not Found</span>'
-        else:
-            status = '<span class="text-secondary"><i class="mdi mdi-help-circle"></i> Unknown</span>'
-
-        return mark_safe(f'<a href="{sync_url}">{status}</a>')
+        return render_link_status(self, value, record, sync_url)
 
     class Meta(DeviceTable.Meta):
         """Meta options for DeviceStatusTable."""

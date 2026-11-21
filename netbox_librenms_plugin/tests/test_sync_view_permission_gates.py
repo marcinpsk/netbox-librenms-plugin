@@ -155,6 +155,7 @@ def pytest_generate_tests(metafunc):
             "EditServerMappingView",
             "ConvertLegacyLibreNMSIdView",
             "MappingLifecycleView",
+            "BulkLinkView",
         }:
             variants.append(("virtualmachine", {}))
         if name == "AddBayTemplateView":
@@ -423,7 +424,7 @@ class TestConfirmationInventory:
             for name, cls in _confirmation_views().items()
             if isinstance(getattr(cls, "confirmation_policy", None), intent.RoutePolicy)
         }
-        assert {"SyncVLANsView", "MappingLifecycleView"} <= migrated
+        assert {"SyncVLANsView", "MappingLifecycleView", "BulkLinkView"} <= migrated
         assert migrated & set(MIGRATION_INVENTORY) == set()
         legacy = {
             name for name, resource in MIGRATION_INVENTORY.items() if resource == intent.Resource.MAPPING_LIFECYCLE

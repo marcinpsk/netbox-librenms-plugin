@@ -550,6 +550,81 @@ class TestDependencyGroups:
             intent.register(Unclaimed)
 
 
+PER_TOKEN_POLICY = intent.RoutePolicy(POLICY.entries, subject_per_token=True)
+
+
+def _subject_context(pk):
+    return intent.IntentContext(7, ("dcim.device", pk), "default")
+
+
+class TestOneSubjectPerToken:
+    """A route whose tokens each name their own subject: a list that applies one row per token."""
+
+    def test_unrelated_tokens_of_permitted_subjects_verify_each_on_its_own(self):
+        first = intent.offer(_create(vid=100), _subject_context(11))
+        second = intent.offer(_create(vid=200), _subject_context(12))
+        scope = intent.IntentScope(7, "default", frozenset({("dcim.device", 11), ("dcim.device", 12)}))
+
+        verification = intent.verify(
+            [first.token, second.token], policy=PER_TOKEN_POLICY, context=scope, rebuild=_Rebuild()
+        )
+
+        assert sorted(len(result.members) for result in verification.results) == [1, 1]
+        assert all(isinstance(result, intent.Verified) for result in verification.results)
+
+    def test_a_token_of_a_subject_outside_the_scope_refuses_and_the_other_verifies(self):
+        outside = intent.offer(_create(vid=100), _subject_context(11))
+        inside = intent.offer(_create(vid=200), _subject_context(12))
+        scope = intent.IntentScope(7, "default", frozenset({("dcim.device", 12)}))
+
+        verification = intent.verify(
+            [outside.token, inside.token], policy=PER_TOKEN_POLICY, context=scope, rebuild=_Rebuild()
+        )
+
+        refused = [result for result in verification.results if isinstance(result, intent.Stale)]
+        assert refused == [intent.Stale(intent.StaleReason.CONTEXT_CHANGED, ("context.subject",), (outside.operation,))]
+        assert [result.members for result in verification.results if isinstance(result, intent.Verified)] == [
+            (intent.Offer(inside.token, inside.operation),)
+        ]
+
+    def test_tokens_that_share_a_claim_refuse_together_before_any_rebuild(self):
+        first = intent.offer(_create(vid=100, group=5, name="users"), _subject_context(11))
+        second = intent.offer(_create(vid=200, group=5, name="users"), _subject_context(12))
+        unrelated = intent.offer(_create(vid=300, group=5, name="printers"), _subject_context(13))
+        scope = intent.IntentScope(7, "default", frozenset({("dcim.device", pk) for pk in (11, 12, 13)}))
+        rebuild = _Rebuild()
+
+        verification = intent.verify(
+            [first.token, second.token, unrelated.token], policy=PER_TOKEN_POLICY, context=scope, rebuild=rebuild
+        )
+
+        refused = [result for result in verification.results if isinstance(result, intent.Stale)]
+        assert refused == [
+            intent.Stale(intent.StaleReason.INVALID, ("claims.shared",), (first.operation, second.operation))
+        ]
+        assert rebuild.calls == [(unrelated.operation,)]
+
+    def test_the_single_subject_path_keeps_a_shared_claim_in_one_group(self):
+        first = intent.offer(_create(vid=100, group=5, name="users"), CONTEXT)
+        second = intent.offer(_create(vid=200, group=5, name="users"), CONTEXT)
+
+        result = _only(intent.verify([first.token, second.token], policy=POLICY, context=CONTEXT, rebuild=_Rebuild()))
+
+        assert isinstance(result, intent.Verified)
+        assert len(result.members) == 2
+
+    def test_each_policy_takes_only_its_own_kind_of_context(self):
+        token = intent.offer(_create(), CONTEXT).token
+        scope = intent.IntentScope(7, "default", frozenset({("dcim.device", 11)}))
+
+        with pytest.raises(TypeError):
+            intent.verify([token], policy=PER_TOKEN_POLICY, context=CONTEXT, rebuild=_Rebuild())
+        with pytest.raises(TypeError):
+            intent.verify([token], policy=POLICY, context=scope, rebuild=_Rebuild())
+        with pytest.raises(TypeError):
+            intent.IntentScope(7, "default", frozenset({("dcim.device", "11")}))
+
+
 class TestRegistry:
     def test_registration_refuses_an_unsupported_schema(self):
         @dataclasses.dataclass
