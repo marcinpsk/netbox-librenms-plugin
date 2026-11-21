@@ -23,6 +23,7 @@ from django.test import RequestFactory
 from netbox_librenms_plugin.models import LibreNMSSettings
 from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
 pytestmark = pytest.mark.django_db
 
@@ -154,7 +155,7 @@ class TestAddDeviceFormsScopeToTheActiveServer:
         cache.delete("librenms_poller_group_choices_secondary")
         cache.delete("librenms_poller_group_choices_default")
 
-        device = make_device("poller-scope", librenms_cf={"secondary": 42})
+        device = seed_mapping(make_device("poller-scope"), "secondary", own=42)
         requested_servers = []
         self._render_unknown_device(device, servers, "?server_key=secondary", requested_servers)
 
@@ -165,7 +166,7 @@ class TestAddDeviceFormsScopeToTheActiveServer:
         cache.delete("librenms_poller_group_choices_default")
         cache.delete("librenms_poller_group_choices_secondary")
         cache.delete("librenms_poller_group_choices_ghost")
-        device = make_device("poller-stale", librenms_cf={"secondary": 42})
+        device = seed_mapping(make_device("poller-stale"), "secondary", own=42)
         requested_servers = []
         response = self._render_unknown_device(device, servers, "?server_key=ghost", requested_servers)
 
@@ -183,7 +184,7 @@ class TestSyncPageFormsCarryServerKey:
         # Serial/type/platform differ from LibreNMS values → the sync forms render.
         from dcim.models import DeviceType, Manufacturer, Platform
 
-        device = make_device("sync-page-forms", serial="NB-SER-1", librenms_cf={"secondary": {"id": 42}})
+        device = seed_mapping(make_device("sync-page-forms", serial="NB-SER-1"), "secondary", own=42)
         LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "default"})
         # A DeviceType matching the LibreNMS hardware string (≠ the device's own type)
         # → the Device Type sync form renders.
@@ -380,7 +381,8 @@ class TestUpdateDeviceLocationRebindsServer:
 
         from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
-        device = make_device("loc-rebind", librenms_cf={"default": 41, "secondary": 42})
+        device = seed_mapping(make_device("loc-rebind"), "default", own=41, save=False)
+        seed_mapping(device, "secondary", own=42)
         writes = []
 
         def record_write(**request):
@@ -414,7 +416,7 @@ class TestUpdateDeviceLocationRebindsServer:
 
         from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
-        device = make_device("loc-rebind-stale", librenms_cf={"default": 41})
+        device = seed_mapping(make_device("loc-rebind-stale"), "default", own=41)
         writes = []
 
         def record_write(**request):
@@ -542,10 +544,11 @@ def test_refresh_configuration_error_cannot_retry_another_server(
     from netbox_librenms_plugin.tests.conftest import make_vm
 
     factory = make_device if model == "device" else make_vm
-    from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
     obj = factory("refresh-retry-scope")
-    seed_stored_mapping(obj, {"default": {"id": 42}, "secondary": {"id": 42}}, save=True)
+    seed_mapping(obj, "default", own=42, save=False)
+    seed_mapping(obj, "secondary", own=42)
     client.force_login(make_superuser("refresh-retry-user"))
     _register_device_info(servers.default)
     _register_device_info(servers.secondary)

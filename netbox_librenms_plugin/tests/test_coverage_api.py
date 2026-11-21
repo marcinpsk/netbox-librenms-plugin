@@ -8,7 +8,14 @@ from time import sleep
 import pytest
 
 from netbox_librenms_plugin.assessment.interfaces import parse_port_vlan_data
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping_row, stored_mapping_for_test
+from netbox_librenms_plugin.server_mappings import read_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import (
+    mapping_summary,
+    seed_mapping,
+    seed_mapping_row,
+    seed_stored_mapping_row,
+    stored_mapping_for_test,
+)
 
 
 def configure_servers(settings, servers):
@@ -272,7 +279,7 @@ class TestGetLibreNMSIdDictServerKey:
         result = api_for(settings, librenms_server.url).get_librenms_id(device)
 
         assert result == 31
-        assert stored_mapping_for_test(Device.objects.get(pk=device.pk))["default"] == 31
+        assert mapping_summary(Device.objects.get(pk=device.pk))["default"] == {"own": 31}
 
     def test_store_librenms_id_via_hostname_lookup(self, settings, librenms_server):
         """A hostname lookup writes only the bound server mapping."""
@@ -280,7 +287,7 @@ class TestGetLibreNMSIdDictServerKey:
 
         from netbox_librenms_plugin.tests.conftest import make_device
 
-        device = make_device("hostname-device", librenms_cf={"default": 11, "primary": None})
+        device = seed_mapping(make_device("hostname-device"), "default", own=11)
         librenms_server.register(
             "/api/v0/devices/hostname-device",
             {"status": "ok", "devices": [{"device_id": 42}]},
@@ -290,10 +297,7 @@ class TestGetLibreNMSIdDictServerKey:
         result = api_for(settings, librenms_server.url, key="primary").get_librenms_id(device)
 
         assert result == 42
-        assert stored_mapping_for_test(Device.objects.get(pk=device.pk)) == {
-            "default": 11,
-            "primary": 42,
-        }
+        assert mapping_summary(Device.objects.get(pk=device.pk)) == {"default": {"own": 11}, "primary": {"own": 42}}
 
 
 # Each read endpoint, its route, accepted body, expected value, query, and HTTP error details.
@@ -848,12 +852,12 @@ class TestStorelibrenmsId:
 
         from netbox_librenms_plugin.tests.conftest import make_device
 
-        device = make_device("store-mapped-device", librenms_cf={"default": None})
+        device = make_device("store-mapped-device")
         api = api_for(settings, librenms_server.url)
 
         api._store_librenms_id(device, 42)
 
-        assert stored_mapping_for_test(Device.objects.get(pk=device.pk))["default"] == 42
+        assert mapping_summary(Device.objects.get(pk=device.pk))["default"] == {"own": 42}
 
     def test_storing_the_mapping_keeps_the_caller_s_other_unsaved_custom_fields(self, settings, librenms_server):
         """The claim reads a second row, so copying its whole field data would drop unsaved edits."""
@@ -866,7 +870,7 @@ class TestStorelibrenmsId:
 
         note = CustomField.objects.create(name="store_note", type="text")
         note.object_types.set([ContentType.objects.get_for_model(Device)])
-        device = make_device("store-preserves-other-cf", librenms_cf={"default": None})
+        device = make_device("store-preserves-other-cf")
         # An edit the caller has not saved yet, exactly what a view holds while it resolves an ID.
         device.custom_field_data["store_note"] = "unsaved"
         api = api_for(settings, librenms_server.url)
@@ -874,8 +878,8 @@ class TestStorelibrenmsId:
         api._store_librenms_id(device, 42)
 
         assert device.custom_field_data["store_note"] == "unsaved"
-        assert stored_mapping_for_test(device)["default"] == 42
-        assert stored_mapping_for_test(Device.objects.get(pk=device.pk))["default"] == 42
+        assert mapping_summary(device)["default"] == {"own": 42}
+        assert mapping_summary(Device.objects.get(pk=device.pk))["default"] == {"own": 42}
 
     def test_the_store_builds_on_the_locked_row_not_the_callers_older_read(self, settings, librenms_server):
         """A mapping that another operation added after the caller's read stays, and reaches the caller too."""
@@ -883,15 +887,15 @@ class TestStorelibrenmsId:
 
         from netbox_librenms_plugin.tests.conftest import make_device
 
-        device = make_device("store-after-a-concurrent-link", librenms_cf={"default": None})
-        seed_stored_mapping_row(device, {"default": None, "secondary": 77})
+        device = make_device("store-after-a-concurrent-link")
+        seed_mapping_row(device, seed_mapping(type(device)(), "secondary", own=77, save=False))
         api = api_for(settings, librenms_server.url)
 
         api._store_librenms_id(device, 42)
 
-        expected = {"default": 42, "secondary": 77}
-        assert stored_mapping_for_test(Device.objects.get(pk=device.pk)) == expected
-        assert stored_mapping_for_test(device) == expected
+        expected = {"default": {"own": 42}, "secondary": {"own": 77}}
+        assert mapping_summary(Device.objects.get(pk=device.pk)) == expected
+        assert mapping_summary(device) == expected
 
     @pytest.mark.parametrize(
         ("stored", "librenms_id"),
@@ -910,7 +914,7 @@ class TestStorelibrenmsId:
         from netbox_librenms_plugin.server_mappings import read_mapping
         from netbox_librenms_plugin.tests.conftest import make_device
 
-        device = make_device("store-repairs-a-look-alike", librenms_cf={"default": None})
+        device = make_device("store-repairs-a-look-alike")
         seed_stored_mapping_row(device, stored)
         device.refresh_from_db()
         api = api_for(settings, librenms_server.url)
@@ -925,7 +929,7 @@ class TestStorelibrenmsId:
         from netbox_librenms_plugin.server_mappings import read_mapping
         from netbox_librenms_plugin.tests.conftest import make_device
 
-        device = make_device("store-then-read", librenms_cf={"default": None})
+        device = make_device("store-then-read")
         api = api_for(settings, librenms_server.url)
         before = read_mapping(device)
 
@@ -941,7 +945,7 @@ class TestStorelibrenmsId:
 
         from netbox_librenms_plugin.tests.conftest import make_device
 
-        device = make_device("store-owner-deleted", librenms_cf={"default": None})
+        device = make_device("store-owner-deleted")
         # The row vanishes after the caller loaded the object, exactly what a concurrent delete
         # leaves behind: a live instance whose pk no longer resolves.
         Device.objects.filter(pk=device.pk).delete()
@@ -983,7 +987,7 @@ class TestStorelibrenmsId:
 
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface
 
-        device = make_device("store-interface-owner", librenms_cf={"default": 42})
+        device = seed_mapping(make_device("store-interface-owner"), "default", own=42)
         interface = make_interface(device, "Ethernet1")
         api = api_for(settings, librenms_server.url)
         cache_key = api._get_cache_key(interface)
@@ -991,7 +995,7 @@ class TestStorelibrenmsId:
         api._store_librenms_id(interface, 42)
 
         interface.refresh_from_db()
-        assert stored_mapping_for_test(interface) in (None, {})
+        assert mapping_summary(interface) == {}
         assert cache.get(cache_key) == 42
 
     def test_unsaved_device_id_is_cached_without_row_locking(self, settings, librenms_server):
@@ -1000,7 +1004,7 @@ class TestStorelibrenmsId:
 
         from netbox_librenms_plugin.tests.conftest import make_device
 
-        device = make_device("store-unsaved-device", librenms_cf={"default": None})
+        device = make_device("store-unsaved-device")
         device.pk = None
         device._state.adding = True
         api = api_for(settings, librenms_server.url)
@@ -1024,7 +1028,7 @@ def test_discovered_mapping_and_vm_import_serialize_one_librenms_id_claim(settin
     from netbox_librenms_plugin.tests.conftest import make_cluster, make_device
 
     api = api_for(settings, librenms_server.url)
-    device = make_device("discovered-claim-race-device", librenms_cf={api.server_key: None})
+    device = make_device("discovered-claim-race-device")
     cluster = make_cluster("discovered-claim-race-cluster")
     librenms_id = 61003
 
@@ -1062,13 +1066,11 @@ def test_discovered_mapping_and_vm_import_serialize_one_librenms_id_claim(settin
 
     device.refresh_from_db()
     vm = VirtualMachine.objects.filter(name="discovered-claim-race-vm").first()
-    mappings = [stored_mapping_for_test(device) or {}]
-    if vm is not None:
-        mappings.append(stored_mapping_for_test(vm) or {})
+    owners = [device] if vm is None else [device, vm]
     assert len(claim_keys) == 2
     assert len(set(claim_keys)) == 1
     assert sorted(outcomes) == [False, True]
-    assert sum(mapping.get(api.server_key) == librenms_id for mapping in mappings) == 1
+    assert sum(read_mapping(owner).own_id(api.server_key) == librenms_id for owner in owners) == 1
     # The claim does not wait: the loser is busy while the winner holds it, else it finds the owner.
     assert len(refusals) == 1
     assert refusals[0] == IDENTITY_BUSY_MESSAGE or "already assigned" in refusals[0]

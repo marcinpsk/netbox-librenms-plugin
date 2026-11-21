@@ -17,7 +17,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
     transactional_db_with_all_apps,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, stored_mapping_for_test
+from netbox_librenms_plugin.tests.mapping_fixtures import mapping_summary, seed_mapping
 from netbox_librenms_plugin.tests.lock_conflict_helpers import lock_row, lock_timeout, second_connection
 from netbox_librenms_plugin.tests.view_test_helpers import messages_on
 from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE
@@ -56,7 +56,7 @@ def test_a_lock_conflict_in_the_discovery_write_leaves_the_status_unknown(client
     assert UNKNOWN in content
     assert NOT_FOUND not in content
     obj.refresh_from_db()
-    assert stored_mapping_for_test(obj) in (None, {})
+    assert mapping_summary(obj) == {}
 
 
 @pytest.mark.django_db
@@ -66,7 +66,7 @@ def test_an_id_claimed_by_another_object_leaves_the_status_unknown(client, setti
     bind_librenms_server(settings, librenms_server, server_key="default")
     if kind == "device":
         obj = make_device("status-claimed.example.net")
-        make_device("status-claimed-owner.example.net", librenms_cf={"default": 4402})
+        seed_mapping(make_device("status-claimed-owner.example.net"), "default", own=4402)
         url, filters = "device_status_list", {"site": obj.site_id}
     else:
         cluster = make_cluster("status-claimed-cluster")
@@ -87,4 +87,4 @@ def test_an_id_claimed_by_another_object_leaves_the_status_unknown(client, setti
     assert messages_on(response.wsgi_request) == [("error", DISCOVERY_CONFLICT_MESSAGE)]
     assert statuses[obj.pk] is None
     obj.refresh_from_db()
-    assert stored_mapping_for_test(obj) in (None, {})
+    assert mapping_summary(obj) == {}

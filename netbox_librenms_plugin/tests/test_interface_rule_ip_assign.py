@@ -30,7 +30,7 @@ DEVICE_ID = 4310
 
 
 def _device(name, platform):
-    device = make_device(name, librenms_cf={SERVER_KEY: {"id": DEVICE_ID}})
+    device = seed_mapping(make_device(name), SERVER_KEY, own=DEVICE_ID)
     device.platform = platform
     device.save()
     return device
@@ -230,7 +230,7 @@ def test_a_refresh_keeps_the_record_of_the_port_bound_to_the_target_interface(cl
     from netbox_librenms_plugin.views.base.ip_addresses_view import read_ip_assessment
 
     InterfaceTypeMapping.objects.create(action=IGNORE, name_pattern="^Vlan")
-    device = make_device("ip-assign-refresh", librenms_cf={SERVER_KEY: {"id": DEVICE_ID}})
+    device = seed_mapping(make_device("ip-assign-refresh"), SERVER_KEY, own=DEVICE_ID)
     eth0 = _bound(device, "eth0", 7100)
     _serve_device(
         live_librenms,
@@ -395,7 +395,7 @@ def _ip_render_queries(client, tag, count, first_port, *, blocked=True):
     from django.db import connection
     from django.test.utils import CaptureQueriesContext
 
-    device = make_device(tag, librenms_cf={SERVER_KEY: {"id": first_port}})
+    device = seed_mapping(make_device(tag), SERVER_KEY, own=first_port)
     rows, ports = [], []
     for index in range(count):
         port_id = first_port + index

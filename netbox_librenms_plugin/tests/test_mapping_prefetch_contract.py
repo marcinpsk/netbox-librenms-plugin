@@ -29,7 +29,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_virtual_chassis_members,
     make_vm,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_quarantined
 from netbox_librenms_plugin.tests.mapping_prefetch_spy import spy_mapping_reads
 from netbox_librenms_plugin.tests.source_snapshot_helpers import (
     link_row,
@@ -70,7 +70,7 @@ def _seed_port_mapping(interface, index, port_id):
         seed_mapping(interface, SERVER_KEY, own=port_id)
         seed_mapping(interface, OTHER_SERVER, own=port_id + 50_000)
     elif state == 3:
-        seed_stored_mapping(interface, "not-an-id", save=True)
+        seed_quarantined(interface)
     return interface
 
 
@@ -78,7 +78,7 @@ def _seed_device_mapping(device, index, librenms_id):
     """
     Give *device* one of the mixed device mapping states, chosen by *index*.
 
-    The states are: own ID only, own plus OOB, own on two servers, absent and an invalid stored value.
+    The states are: own ID only, own plus OOB, own on two servers, absent and quarantined.
     Returns the LibreNMS IDs that *device* holds on the default server.
     """
     state = index % 5
@@ -91,7 +91,7 @@ def _seed_device_mapping(device, index, librenms_id):
         seed_mapping(device, SERVER_KEY, own=librenms_id)
         seed_mapping(device, OTHER_SERVER, own=librenms_id + 50_000)
     elif state == 4:
-        seed_stored_mapping(device, "not-an-id", save=True)
+        seed_quarantined(device)
     return (librenms_id,) if state < 3 else ()
 
 
@@ -111,7 +111,7 @@ def _port(port_id, name, if_type="ethernetCsmacd"):
 
 def _interfaces_device(name, count):
     """Return a device whose *count* interfaces are LAG members in mixed mapping states, with their snapshot."""
-    device = make_device(name, librenms_cf={SERVER_KEY: {"id": 61}})
+    device = seed_mapping(make_device(name), SERVER_KEY, own=61)
     lag = make_interface(device, "ae0", iface_type="lag")
     seed_mapping(lag, SERVER_KEY, own=999)
     ports = [_port(999, "ae0", "ieee8023adLag")]
@@ -204,7 +204,7 @@ class TestInterfacesTab:
 
 def _cables_device(name, count):
     """Return a device whose *count* LLDP neighbours and both ends are in mixed mapping states, with its snapshot."""
-    device = make_device(name, librenms_cf={SERVER_KEY: {"id": HOST_ID}})
+    device = seed_mapping(make_device(name), SERVER_KEY, own=HOST_ID)
     links, ports, neighbour_ports = [], [], {}
     for index in range(count):
         local_port_id, neighbour_id, remote_port_id = 1000 + index, NEIGHBOUR_BASE + index, REMOTE_PORT_BASE + index
@@ -265,7 +265,7 @@ class TestCablesTab:
 
 def _ip_device(name, count):
     """Return a device whose *count* interfaces in mixed mapping states each carry one IP row, with its snapshot."""
-    device = make_device(name, librenms_cf={SERVER_KEY: {"id": HOST_ID}})
+    device = seed_mapping(make_device(name), SERVER_KEY, own=HOST_ID)
     ports = []
     for index in range(count):
         port_id = 1000 + index
@@ -527,7 +527,7 @@ class TestCableWrites:
         from netbox_librenms_plugin import cable_scope, source_cache
         from netbox_librenms_plugin.acquisition import resources
 
-        subject = make_device("prefetch-refresh", librenms_cf={SERVER_KEY: {"id": HOST_ID}})
+        subject = seed_mapping(make_device("prefetch-refresh"), SERVER_KEY, own=HOST_ID)
         _chassis, chassis_members = make_virtual_chassis_members("prefetch-refresh-vc", count=2)
         neighbours = [make_device(f"prefetch-refresh-peer{index}") for index in range(6)] + chassis_members
         links, ports = [], []
@@ -657,7 +657,7 @@ def test_an_ip_sync_that_creates_interfaces_prefetches_the_existing_ones(client,
     from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
 
     _configure_test_server(settings)
-    device = make_device("prefetch-ip-create", librenms_cf={SERVER_KEY: {"id": 42}})
+    device = seed_mapping(make_device("prefetch-ip-create"), SERVER_KEY, own=42)
     for index in range(8):
         _seed_port_mapping(make_interface(device, f"eth{index}", iface_type="1000base-t"), index, 1000 + index)
     _seed_ip_rows(device, [_ip_row("198.18.12.10", 7001, "Ethernet1", ifType="ethernetCsmacd")])
@@ -691,8 +691,8 @@ class TestMergeView(_merge_harness()):
 
         from netbox_librenms_plugin.views.imports import actions
 
-        winner = make_device("prefetch-merge-winner", librenms_cf={self.server_key: {"id": 20}})
-        donor = make_device("prefetch-merge-donor", librenms_cf={self.server_key: {"id": 10}})
+        winner = seed_mapping(make_device("prefetch-merge-winner"), self.server_key, own=20)
+        donor = seed_mapping(make_device("prefetch-merge-donor"), self.server_key, own=10)
 
         with spy_mapping_reads((actions, "_legacy_link_label")) as spy:
             response = self._post_merge(winner, donor)

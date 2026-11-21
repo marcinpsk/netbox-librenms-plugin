@@ -7,10 +7,10 @@ platform matching, and conversion helper functions.
 
 import pytest
 
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping, stored_mapping_for_test
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping, stored_mapping_for_test
 
 
-def _two_member_vc(name, cf_first, cf_second):
+def _two_member_vc(name, cf_first=None, cf_second=None):
     """Create a real VirtualChassis with two members (vc_position 1 then 2), seeding each member's ``librenms_id`` custom field with *cf_first* / *cf_second* (use ``_UNSET`` / skip by passing None to leave it empty)."""
     from dcim.models import VirtualChassis
 
@@ -506,7 +506,8 @@ class TestVirtualChassisHelpers:
         """VC member with librenms_id is returned (real VC; the member without one iterated first)."""
         from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
-        without_id, with_id = _two_member_vc("sync-withid", None, {"default": 123})
+        without_id, with_id = _two_member_vc("sync-withid")
+        seed_mapping(with_id, own=123)
         assert get_librenms_sync_device(without_id) == with_id
 
     @pytest.mark.django_db
@@ -523,11 +524,9 @@ class TestVirtualChassisHelpers:
         """A member holding the real host id wins over an OOB-only member, even iterated first."""
         from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
-        member_a, member_b = _two_member_vc(
-            "sync-hostpref",
-            {"default": {"oob": {"id": 7, "type": "drac"}}},  # OOB-only, first
-            {"default": {"id": 42}},  # real host id
-        )
+        member_a, member_b = _two_member_vc("sync-hostpref")
+        seed_mapping(member_a, oob=7, oob_type="drac")  # OOB-only, first
+        seed_mapping(member_b, own=42)  # real host id
         assert get_librenms_sync_device(member_a, server_key="default") == member_b
 
     @pytest.mark.django_db
@@ -535,7 +534,8 @@ class TestVirtualChassisHelpers:
         """When no member has a host id, an OOB-only mapping still resolves the sync device."""
         from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
-        member_a, member_b = _two_member_vc("sync-oobonly", None, {"default": {"oob": {"id": 7, "type": "drac"}}})
+        member_a, member_b = _two_member_vc("sync-oobonly")
+        seed_mapping(member_b, oob=7, oob_type="drac")
         assert get_librenms_sync_device(member_a, server_key="default") == member_b
 
     @pytest.mark.django_db
@@ -561,7 +561,7 @@ class TestVirtualChassisHelpers:
         from netbox_librenms_plugin.tests.conftest import ip_on
         from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
-        master, member_with_ip = _two_member_vc("sync-primary-ip", None, None)
+        master, member_with_ip = _two_member_vc("sync-primary-ip")
         address = ip_on(member_with_ip, "198.18.20.1/24", "management")
         member_with_ip.primary_ip4 = address
         member_with_ip.save(update_fields=["primary_ip4"])

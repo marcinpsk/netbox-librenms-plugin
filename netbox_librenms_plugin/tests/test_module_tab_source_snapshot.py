@@ -14,9 +14,10 @@ from netbox_librenms_plugin.constants import MAIN_INVENTORY_SOURCE, OOB_INVENTOR
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency
 from netbox_librenms_plugin.tests.view_test_helpers import make_request
 from netbox_librenms_plugin.tests.conftest import make_superuser
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping_row
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping_row
 from netbox_librenms_plugin.tests.source_snapshot_helpers import module_serial_context
 from netbox_librenms_plugin.tests.test_acquisition_modules import HOST_ID, OOB_ID, device, serve
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
 INVENTORY = [
     {"entPhysicalIndex": 1, "entPhysicalContainedIn": 0, "entPhysicalClass": "chassis"},
@@ -130,7 +131,9 @@ def test_oob_binding_changes_refuse_every_reader_without_deleting_the_snapshot(c
     original = cache.get(key)
     assert original is not None
     assert source_cache.read(subject, Resource.MODULES, "default") is not None
-    seed_stored_mapping_row(subject, {"default": {"id": HOST_ID, "oob": {"id": OOB_ID, "type": "idrac"}}})
+    seed_mapping_row(
+        subject, seed_mapping(type(subject)(), "default", own=HOST_ID, oob=OOB_ID, oob_type="idrac", save=False)
+    )
     assert source_cache.read(subject, Resource.MODULES, "default") is None
     assert fragment(client, subject).status_code == 404
     assert cache.get(key) == original

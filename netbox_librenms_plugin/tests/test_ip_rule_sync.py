@@ -98,7 +98,7 @@ def _verify(client, device, address, vrf):
 @pytest.fixture
 def device(client, live_librenms):
     """A device whose eth0 is bound to the LibreNMS port that carries both addresses."""
-    device = make_device("ip-rule-sync", librenms_cf={SERVER_KEY: {"id": LIBRENMS_ID}})
+    device = seed_mapping(make_device("ip-rule-sync"), SERVER_KEY, own=LIBRENMS_ID)
     eth0 = make_interface(device, "eth0", iface_type="virtual")
     seed_mapping(eth0, SERVER_KEY, own=PORT_ID)
     client.force_login(make_superuser("ip-rule-sync-user"))
@@ -245,7 +245,7 @@ class TestTheWriterRefusesAnIgnoredAddress:
         )
 
         _configure_test_server(settings)
-        device = make_device("ip-rule-create-missing", librenms_cf={SERVER_KEY: {"id": 42}})
+        device = seed_mapping(make_device("ip-rule-create-missing"), SERVER_KEY, own=42)
         client.force_login(make_superuser("ip-rule-create-missing-user"))
         rows = [{"address": "fe80::1", "prefix_length": 64, "port_id": 7502, "interface": "Ethernet7"}]
         _serve_librenms_ip_rows(live_librenms.server, rows, device_name=device.name)
@@ -507,7 +507,7 @@ class TestTheImportOobAttachReadsTheMappings:
     def test_an_ignored_oob_ip_is_not_set_and_the_link_still_commits(self, client, live_librenms, prefix, ignored):
         from dcim.models import Device
 
-        from netbox_librenms_plugin.tests.mapping_fixtures import stored_mapping_for_test
+        from netbox_librenms_plugin.server_mappings import read_mapping
 
         IPAddressMapping.objects.create(prefix=prefix)
         target = make_device(f"ip-rule-oob-{ignored}", serial=f"IP-RULE-OOB-{ignored}")
@@ -516,7 +516,7 @@ class TestTheImportOobAttachReadsTheMappings:
         response = self._add_as_oob(client, live_librenms, target)
 
         device = Device.objects.get(pk=target.pk)
-        assert stored_mapping_for_test(device)[SERVER_KEY]["oob"]["id"] == self.OOB_DEVICE_ID
+        assert read_mapping(device).oob_id(SERVER_KEY) == self.OOB_DEVICE_ID
         # The other prefix is the positive control: the same request sets the OOB IP.
         assert (device.oob_ip is None) is ignored
         assert IPAddress.objects.filter(address__net_host=self.OOB_IP).exists() is (not ignored)

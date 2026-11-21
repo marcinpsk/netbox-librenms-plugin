@@ -47,9 +47,10 @@ from netbox_librenms_plugin.tests.conftest import (
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import (
     apply_mapping_change,
+    mapping_summary,
     seed_mapping,
+    seed_mapping_row,
     seed_stored_mapping,
-    seed_stored_mapping_row,
     stored_mapping_for_test,
 )
 
@@ -113,7 +114,7 @@ class TestOwnIdentityRead:
         assert read_mapping(_dev({"production": 7, "secondary": 12})).own_id("production") == 7
 
     def test_returns_none_for_missing_server_key_in_dict(self):
-        assert read_mapping(_dev({"production": 7})).own_id("secondary") is None
+        assert read_mapping(seed_mapping(_dev(), "production", own=7)).own_id("secondary") is None
 
     def test_returns_none_for_unexpected_type(self):
         assert read_mapping(_dev("not-an-int-or-dict")).own_id("default") is None
@@ -138,7 +139,7 @@ class TestOwnIdentityRead:
 
     def test_an_invalid_server_key_is_refused(self):
         with pytest.raises(ValueError, match="'__'"):
-            read_mapping(_dev({"default": 5})).own_id("a__b")
+            read_mapping(seed_mapping(_dev(), "default", own=5)).own_id("a__b")
 
 
 @pytest.mark.django_db
@@ -171,17 +172,17 @@ class TestReadPurity:
         assert ObjectChange.objects.count() == change_count
 
     def test_a_new_snapshot_sees_an_unsaved_change_and_an_earlier_one_does_not(self):
-        dev = _dev({"default": {"id": 42, "oob": {"id": 7, "type": "idrac"}}})
+        dev = seed_mapping(_dev(), "default", own=42, oob=7, oob_type="idrac")
         earlier = read_mapping(dev)
 
-        seed_stored_mapping(dev, {"default": {"id": 43, "oob": {"id": 7, "type": "ilo"}}})
+        seed_mapping(dev, own=43, oob=7, oob_type="ilo", save=False)
         later = read_mapping(dev)
 
         assert (earlier.own_id("default"), earlier.server("default").oob_type) == (42, "idrac")
         assert (later.own_id("default"), later.server("default").oob_type) == (43, "ilo")
 
     def test_a_snapshot_is_immutable(self):
-        mapping = read_mapping(_dev({"default": 42}))
+        mapping = read_mapping(seed_mapping(_dev(), "default", own=42))
 
         with pytest.raises(FrozenInstanceError):
             mapping.container = ContainerStatus.ABSENT
@@ -241,9 +242,9 @@ class TestPrefetchMappings:
             prefetch_mappings([Device(), Site()])
 
     def test_a_read_after_the_prefetch_still_sees_an_unsaved_change(self):
-        (dev,) = prefetch_mappings([_dev({"default": 42})])
+        (dev,) = prefetch_mappings([seed_mapping(_dev(), own=42)])
 
-        seed_stored_mapping(dev, {"default": 43})
+        seed_mapping(dev, own=43, save=False)
 
         assert read_mapping(dev).own_id("default") == 43
 
@@ -442,41 +443,41 @@ class TestFindMapping:
         assert _find(42, server_key) == device
 
     def test_returns_none_when_not_found(self):
-        _dev({"production": 7})  # a row exists, but not for id 999
+        seed_mapping(_dev(), "production", own=7)  # a row exists, but not for id 999
         assert _find(999, "production") is None
 
     def test_single_match_uses_one_query(self, django_assert_num_queries):
         """The common case (0 or 1 match) uses one combined query, because it runs per port during sync."""
-        dev = _dev({"default": {"id": 42}})
+        dev = seed_mapping(_dev(), "default", own=42)
         with django_assert_num_queries(1):
             result = _find(42)
         assert result == dev
 
     def test_fail_closed_when_host_and_oob_match_different_rows(self):
-        _dev({"default": 42})
-        _dev({"default": {"id": 99, "oob": {"id": 42}}})
+        seed_mapping(_dev(), "default", own=42)
+        seed_mapping(_dev(), "default", own=99, oob=42)
         with pytest.raises(AmbiguousLibreNMSIdError, match="host pk=.* but a different OOB pk="):
             _find(42)
 
     def test_same_row_for_host_and_oob_is_returned(self):
-        dev = _dev({"default": {"id": 42, "oob": {"id": 42}}})
+        dev = seed_mapping(_dev(), "default", own=42, oob=42)
         assert _find(42) == dev
 
     def test_fail_closed_on_duplicate_host_matches(self):
-        _dev({"default": 42})
-        _dev({"default": 42})
+        seed_mapping(_dev(), "default", own=42)
+        seed_mapping(_dev(), "default", own=42)
         with pytest.raises(AmbiguousLibreNMSIdError, match="multiple Device host records"):
             _find(42)
 
     def test_fail_closed_on_duplicate_oob_matches(self):
-        _dev({"default": {"id": 1, "oob": {"id": 42}}})
-        _dev({"default": {"id": 2, "oob": {"id": 42}}})
+        seed_mapping(_dev(), "default", own=1, oob=42)
+        seed_mapping(_dev(), "default", own=2, oob=42)
         with pytest.raises(AmbiguousLibreNMSIdError, match="multiple Device OOB records"):
             _find(42)
 
     def test_the_own_role_ignores_an_oob_reference(self):
-        owner = _dev({"default": {"id": 42}})
-        referrer = _dev({"default": {"id": 1, "oob": {"id": 42}}})
+        owner = seed_mapping(_dev(), "default", own=42)
+        referrer = seed_mapping(_dev(), "default", own=1, oob=42)
 
         assert _find(42, roles=(MappingRole.OWN,)) == owner
         assert _find(42, roles=(MappingRole.OOB,)) == referrer
@@ -486,8 +487,8 @@ class TestFindMapping:
     def test_the_callers_queryset_scopes_the_lookup(self):
         from dcim.models import Device
 
-        owner = _dev({"default": 42})
-        other = _dev({"default": 43})
+        owner = seed_mapping(_dev(), "default", own=42)
+        other = seed_mapping(_dev(), "default", own=43)
 
         assert _find(42, queryset=Device.objects.filter(pk=other.pk)) is None
         assert _find(42, queryset=Device.objects.filter(pk=owner.pk)) == owner
@@ -495,7 +496,7 @@ class TestFindMapping:
     def test_a_locking_queryset_locks_the_matched_row(self):
         from dcim.models import Device
 
-        owner = _dev({"default": 42})
+        owner = seed_mapping(_dev(), "default", own=42)
         with transaction.atomic(), CaptureQueriesContext(connection) as queries:
             assert _find(42, queryset=Device.objects.select_for_update()) == owner
 
@@ -525,10 +526,10 @@ class TestFindMapping:
     )
     def test_the_lookup_accepts_only_the_ascii_id_rule(self, identity, found, django_assert_num_queries):
         """find_mapping and find_port_owner accept exactly the identities coerce_librenms_id accepts."""
-        device = _dev({"default": 42})
-        _dev({"default": 12})
-        interface = _bind(make_interface(device, "eth0"), {"default": 42})
-        _bind(make_interface(device, "eth1"), {"default": 12})
+        device = seed_mapping(_dev(), "default", own=42)
+        seed_mapping(_dev(), "default", own=12)
+        interface = seed_mapping(make_interface(device, "eth0"), "default", own=42)
+        seed_mapping(make_interface(device, "eth1"), "default", own=12)
 
         with django_assert_num_queries(3 if found else 0):
             assert _find(identity) == (device if found else None)
@@ -565,9 +566,9 @@ class TestIdentityPredicate:
     def test_several_identities_and_the_roles_compose(self):
         from dcim.models import Device
 
-        first = _dev({"default": 41})
-        second = _dev({"default": {"id": 1, "oob": {"id": 42}}})
-        _dev({"default": 43})
+        first = seed_mapping(_dev(), "default", own=41)
+        second = seed_mapping(_dev(), "default", own=1, oob=42)
+        seed_mapping(_dev(), "default", own=43)
 
         own = Device.objects.filter(identity_q(Device, server="default", identities=(41, 42), roles=(MappingRole.OWN,)))
         both = Device.objects.filter(identity_q(Device, server="default", identities=(41, 42), roles=BOTH_ROLES))
@@ -584,8 +585,8 @@ class TestPortLookups:
     def test_a_port_owner_is_found_on_either_interface_model(self):
         from virtualization.models import VMInterface
 
-        vm_interface = _bind(
-            VMInterface.objects.create(virtual_machine=make_vm("port-owner-vm"), name="eth0"), {"p": 5}
+        vm_interface = seed_mapping(
+            VMInterface.objects.create(virtual_machine=make_vm("port-owner-vm"), name="eth0"), "p", own=5
         )
 
         assert find_port_owner(5, server="p") == vm_interface
@@ -594,14 +595,14 @@ class TestPortLookups:
     def test_port_holders_agree_with_find_port_owner(self):
         from virtualization.models import VMInterface
 
-        single = _bind(make_interface(_dev(), "eth0"), {"p": 5})
+        single = seed_mapping(make_interface(_dev(), "eth0"), "p", own=5)
         oob_holder = _bind(
             VMInterface.objects.create(virtual_machine=make_vm("held-port-vm"), name="eth0"),
             {"p": {"id": 1, "oob": {"id": "6"}}},
         )
-        _bind(make_interface(_dev(), "eth1"), {"p": 7})
-        _bind(make_interface(_dev(), "eth2"), {"p": 7})
-        _bind(make_interface(_dev(), "eth3"), {"q": 8})
+        seed_mapping(make_interface(_dev(), "eth1"), "p", own=7)
+        seed_mapping(make_interface(_dev(), "eth2"), "p", own=7)
+        seed_mapping(make_interface(_dev(), "eth3"), "q", own=8)
 
         assert port_holders([5, "6", 7, 8, 9, "abc"], server="p") == {
             5: ("dcim.interface", single.pk),
@@ -616,17 +617,17 @@ class TestPortLookups:
     def test_a_port_held_on_both_models_is_ambiguous(self):
         from virtualization.models import VMInterface
 
-        _bind(make_interface(_dev(), "eth0"), {"p": 5})
-        _bind(VMInterface.objects.create(virtual_machine=make_vm("port-both-vm"), name="eth0"), {"p": 5})
+        seed_mapping(make_interface(_dev(), "eth0"), "p", own=5)
+        seed_mapping(VMInterface.objects.create(virtual_machine=make_vm("port-both-vm"), name="eth0"), "p", own=5)
 
         with pytest.raises(AmbiguousLibreNMSIdError, match="both an Interface and a VMInterface"):
             find_port_owner(5, server="p")
 
     def test_a_device_port_resolves_by_id_first_then_by_name(self):
         device = _dev()
-        bound = _bind(make_interface(device, "xe-0/0/1"), {"p": 5})
+        bound = seed_mapping(make_interface(device, "xe-0/0/1"), "p", own=5)
         named = make_interface(device, "eth0")
-        _bind(make_interface(_dev(), "eth0"), {"p": 6})  # another device's binding stays out of scope
+        seed_mapping(make_interface(_dev(), "eth0"), "p", own=6)  # another device's binding stays out of scope
 
         assert resolve_device_port(device, server="p", port_id=5, name_candidates=["eth0"]) == bound
         assert resolve_device_port(device, server="p", port_id=6, name_candidates=["eth0"]) == named
@@ -634,8 +635,8 @@ class TestPortLookups:
 
     def test_a_name_never_wins_over_a_binding_to_another_port(self):
         device = _dev()
-        stale = _bind(make_interface(device, "eth0"), {"p": 7})
-        elsewhere = _bind(make_interface(device, "eth1"), {"q": 7})
+        stale = seed_mapping(make_interface(device, "eth0"), "p", own=7)
+        elsewhere = seed_mapping(make_interface(device, "eth1"), "q", own=7)
         _bind(make_interface(device, "eth2"), 7)
 
         assert resolve_device_port(device, server="p", port_id=6, name_candidates=["eth0"]) is None
@@ -645,15 +646,15 @@ class TestPortLookups:
 
     def test_an_ambiguous_port_id_does_not_fall_through_to_a_name(self):
         device = _dev()
-        _bind(make_interface(device, "a"), {"p": 5})
-        _bind(make_interface(device, "b"), {"p": 5})
+        seed_mapping(make_interface(device, "a"), "p", own=5)
+        seed_mapping(make_interface(device, "b"), "p", own=5)
         make_interface(device, "eth0")
 
         assert resolve_device_port(device, server="p", port_id=5, name_candidates=["eth0"]) is None
 
     def test_an_oob_reference_is_not_a_device_port_binding(self):
         device = _dev()
-        _bind(make_interface(device, "a"), {"p": {"oob": {"id": 5}}})
+        seed_mapping(make_interface(device, "a"), "p", oob=5)
         named = make_interface(device, "eth0")
 
         assert resolve_device_port(device, server="p", port_id=5, name_candidates=["eth0"]) == named
@@ -702,7 +703,7 @@ class TestBulkRead:
 
         device = _dev()
         for index, name in enumerate(("c", "a", "b"), start=1):
-            _bind(make_interface(device, name), {"p": index})
+            seed_mapping(make_interface(device, name), "p", own=index)
         make_interface(_dev(), "z")  # outside the caller's scope
         built = []
 
@@ -743,6 +744,17 @@ class TestSeedMappingHelper:
         seed_mapping(device, own=42)
 
         assert read_mapping(type(device).objects.get(pk=device.pk)).own_id("default") == 42
+
+
+@pytest.mark.django_db
+class TestMappingSummaryHelper:
+    """The test helper ``mapping_summary`` gives ``{}`` only when the object records no server entry."""
+
+    @pytest.mark.parametrize("entry", [None, {}, {"id": "bad"}], ids=["null", "empty", "malformed-id"])
+    def test_a_server_entry_without_fields_still_shows(self, entry):
+        device = seed_stored_mapping(_dev(), {"orphaned-server": entry})
+
+        assert mapping_summary(device) == {"orphaned-server": {}}
 
 
 def _locked(obj):
@@ -795,7 +807,7 @@ class TestPersistMapping:
     def test_the_save_runs_once_with_the_mapping_and_the_writers_fields(self):
         from netbox_librenms_plugin.server_mappings import assign_own, persist_mapping
 
-        device = _dev({"other": 7103})
+        device = seed_mapping(_dev(), "other", own=7103)
         writes = []
         with transaction.atomic():
             row = _locked(device)
@@ -813,9 +825,9 @@ class TestPersistMapping:
     def test_a_mapping_that_changed_after_the_build_is_refused(self):
         from netbox_librenms_plugin.server_mappings import MappingChanged, assign_own, persist_mapping
 
-        device = _dev({"other": 7105})
+        device = seed_mapping(_dev(), "other", own=7105)
         stale = assign_own(device, "default", 7106)
-        seed_stored_mapping_row(device, {"other": 7107})
+        seed_mapping_row(device, seed_mapping(type(device)(), "other", own=7107, save=False))
         writes = []
         with transaction.atomic(), pytest.raises(MappingChanged):
             persist_mapping(_locked(device), stale, write=_record_writes(writes))
@@ -825,7 +837,7 @@ class TestPersistMapping:
     def test_another_custom_field_is_not_a_mapping_change(self):
         from netbox_librenms_plugin.server_mappings import assign_own, persist_mapping
 
-        device = _dev({"other": 7108})
+        device = seed_mapping(_dev(), "other", own=7108)
         change = assign_own(device, "default", 7109)
         row = type(device).objects.get(pk=device.pk)
         row.custom_field_data["unrelated_field"] = "edited"
@@ -849,8 +861,6 @@ class TestPersistMapping:
 @pytest.mark.parametrize("competitor", ["committed", "holding"])
 def test_a_change_kept_across_a_savepoint_rollback_is_claimed_and_checked_again(competitor):
     """The rollback releases the first claim, so persistence claims again and reads the owners again."""
-    import json
-
     from netbox_librenms_plugin.server_mappings import (
         IdentityBusy,
         IdentityOwned,
@@ -865,7 +875,7 @@ def test_a_change_kept_across_a_savepoint_rollback_is_claimed_and_checked_again(
     vm = make_vm(f"retained-change-competitor-{competitor}")
     from virtualization.models import VirtualMachine
 
-    bound = json.dumps(seed_stored_mapping(VirtualMachine(), {"default": 7201}).custom_field_data)
+    competing = seed_mapping(VirtualMachine(), own=7201, save=False)
 
     class _RolledBack(Exception):
         pass
@@ -881,9 +891,7 @@ def test_a_change_kept_across_a_savepoint_rollback_is_claimed_and_checked_again(
         with other.cursor() as cursor:
             cursor.execute("SELECT pg_try_advisory_xact_lock(%s)", [device_claim_key("default", 7201)])
             assert cursor.fetchone()[0] is True
-            cursor.execute(
-                "UPDATE virtualization_virtualmachine SET custom_field_data = %s WHERE id = %s", [bound, vm.pk]
-            )
+        seed_mapping_row(vm, competing, connection=other)
         if competitor == "committed":
             other.commit()
         expected = IdentityOwned if competitor == "committed" else IdentityBusy

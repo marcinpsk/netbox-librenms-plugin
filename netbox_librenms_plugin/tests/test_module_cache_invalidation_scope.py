@@ -14,6 +14,7 @@ from netbox_librenms_plugin.tests.cache_test_helpers import (
 )
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view, rendered_modal_form
 from netbox_librenms_plugin.tests.view_test_helpers import post as _post
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
 
 def _rendered_replace(page_device, inventory, user):
@@ -39,8 +40,8 @@ class TestModuleActionsInvalidateEveryChangedDevice:
         from netbox_librenms_plugin.tests.conftest import install_module, make_device, make_module_bay
         from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
-        page_device = make_device("replace-page-device", librenms_cf={"default": 7})
-        other_device = make_device("replace-conflict-device", librenms_cf={"default": 8})
+        page_device = seed_mapping(make_device("replace-page-device"), "default", own=7)
+        other_device = seed_mapping(make_device("replace-conflict-device"), "default", own=8)
         make_module_bay(page_device, "Bay 1")
         make_module_bay(other_device, "Bay 1")
         install_module(page_device, "Bay 1", "Installed Model", serial="OLD")
@@ -98,8 +99,8 @@ class TestModuleActionsInvalidateEveryChangedDevice:
         from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
         from netbox_librenms_plugin.views.sync.modules import MoveModuleView
 
-        page_device = make_device("move-page-device", librenms_cf={"default": 7})
-        source_device = make_device("move-source-device", librenms_cf={"default": 8})
+        page_device = seed_mapping(make_device("move-page-device"), "default", own=7)
+        source_device = seed_mapping(make_device("move-source-device"), "default", own=8)
         make_module_bay(source_device, "Bay 1")
         moving = install_module(source_device, "Bay 1", "Moving Model", serial="MOVED")
         target_bay = make_module_bay(page_device, "Target Bay")
@@ -152,9 +153,9 @@ class TestModuleActionsInvalidateEveryChangedDevice:
         from netbox_librenms_plugin.tests.conftest import install_module, make_device, make_module_bay
         from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
-        page_device = make_device("replace-bystander-page", librenms_cf={"default": 7})
-        other_device = make_device("replace-conflict-owner", librenms_cf={"default": 8})
-        bystander = make_device("replace-bystander", librenms_cf={"default": 9})
+        page_device = seed_mapping(make_device("replace-bystander-page"), "default", own=7)
+        other_device = seed_mapping(make_device("replace-conflict-owner"), "default", own=8)
+        bystander = seed_mapping(make_device("replace-bystander"), "default", own=9)
         make_module_bay(page_device, "Bay 1")
         make_module_bay(other_device, "Bay 1")
         install_module(page_device, "Bay 1", "Installed Model", serial="OLD")
