@@ -183,8 +183,9 @@ class TestUpdateDeviceNameView:
         from netbox_librenms_plugin.models import LibreNMSSettings, NormalizationRule
         from netbox_librenms_plugin.views.sync.device_fields import _MEMBER_NAME_RULES_UNAVAILABLE, _NO_LIBRENMS_NAME
 
-        member = _linked_device("name-before-unavailable-rules", 6507, serial="MEMBER-SN1")
-        make_virtual_chassis("name-unavailable-chassis", make_device("name-master"), member)
+        member = make_device("name-before-unavailable-rules", serial="MEMBER-SN1")
+        master = _linked_device("name-master", 6507)
+        make_virtual_chassis("name-unavailable-chassis", master, member)
         plugin_settings, _ = LibreNMSSettings.objects.get_or_create(pk=1)
         plugin_settings.vc_member_name_pattern = "-{serial}"
         plugin_settings.save(update_fields=["vc_member_name_pattern"])

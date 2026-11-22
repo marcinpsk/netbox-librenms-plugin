@@ -5314,14 +5314,25 @@ class TestDeviceConflictActionBranches:
         assert reloaded.device_type_id == reported_type.pk
         assert mapping_summary(reloaded) == {self.server_key: {"own": 42}}
 
+    @pytest.mark.parametrize("valid_master", [True, False], ids=["valid-master", "invalid-master"])
     @pytest.mark.parametrize("serial", ["", "-"])
-    def test_update_by_primary_ip_without_a_serial_preserves_the_stored_serial(self, serial):
+    def test_update_by_primary_ip_without_a_serial_preserves_the_stored_serial(self, client, serial, valid_master):
         from dcim.models import Device
 
-        from netbox_librenms_plugin.tests.conftest import ip_on
-        from netbox_librenms_plugin.tests.test_coverage_device_operations import _stray_chassis_member
+        from netbox_librenms_plugin.mapping_owner import NO_MASTER_MESSAGE
+        from netbox_librenms_plugin.tests.conftest import ip_on, make_virtual_chassis
+        from netbox_librenms_plugin.tests.test_coverage_device_operations import (
+            _broken_serial_rule,
+            _stray_chassis_member,
+        )
 
-        target = _stray_chassis_member("update-primary-ip", "STORED-SERIAL")
+        if valid_master:
+            target = make_device("update-primary-ip-master", serial="STORED-SERIAL")
+            make_virtual_chassis("update-primary-ip-chassis", target)
+            _broken_serial_rule("update-primary-ip", manufacturer=target.device_type.manufacturer)
+        else:
+            target = _stray_chassis_member("update-primary-ip", "STORED-SERIAL")
+        original_name = target.name
         ip = ip_on(target, "198.18.20.15/24", "management")
         Device.objects.filter(pk=target.pk).update(primary_ip4=ip)
         hostname = "primary-ip-reported-name"
@@ -5329,14 +5340,24 @@ class TestDeviceConflictActionBranches:
             device_id=42, hostname=hostname, hardware=target.device_type.model, serial=serial, ip=str(ip.address.ip)
         )
         self.librenms_server.vc_inventory_callable(42, [], {})
-        request = self._request("update", target, "update-primary-ip-user")
 
-        post_view(self._make_view(), request, device_id=42)
+        client.force_login(make_view_user("update-primary-ip-user", [("change", Device)]))
+        response = client.post(
+            url_for("plugins:netbox_librenms_plugin:device_conflict_action", kwargs={"device_id": 42}),
+            {"server_key": self.server_key, "action": "update", "existing_device_id": target.pk},
+            HTTP_HX_REQUEST="true",
+        )
 
         target.refresh_from_db()
-        assert target.name == hostname
         assert target.serial == "STORED-SERIAL"
-        assert mapping_summary(target) == {self.server_key: {"own": 42}}
+        if valid_master:
+            self._assert_success(response)
+            assert target.name == hostname
+            assert mapping_summary(target) == {self.server_key: {"own": 42}}
+        else:
+            self._assert_htmx_error(response, NO_MASTER_MESSAGE)
+            assert target.name == original_name
+            assert mapping_summary(target) == {}
 
     def test_update_by_primary_ip_stores_no_json_boolean_serial(self):
         """LibreNMS sends `serial: true`; the value names no hardware, so Update & Link keeps the stored serial."""
