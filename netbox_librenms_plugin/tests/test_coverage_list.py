@@ -240,11 +240,12 @@ class TestCompletedJobResults:
                 status="completed",
                 data={"device_ids": ids, "server_key": SERVER_KEY},
             )
-            for ids in (device_ids[:2], device_ids)
+            for ids in (device_ids[:3], device_ids)
         ]
         mapped = seed_mapping(make_device("completed-job-late-link"), SERVER_KEY, own=device_ids[0])
         host = seed_mapping(make_device("completed-job-host-link"), SERVER_KEY, own=device_ids[1])
         oob = seed_mapping(make_device("completed-job-oob-link"), SERVER_KEY, oob=device_ids[1])
+        serial_match = make_device("completed-job-serial-match", serial=devices[2]["serial"])
 
         identity_tables = tuple(f'FROM "{model._meta.db_table}"' for model in (Device, VirtualMachine))
         counts = []
@@ -259,6 +260,14 @@ class TestCompletedJobResults:
             assert rows[device_ids[0]]["existing_match_type"] == "librenms_id"
             assert rows[device_ids[1]]["existing_device"] is None
             assert rows[device_ids[1]]["ambiguous_librenms_id"] is True
+            assert rows[device_ids[2]]["existing_device"] == serial_match
+            assert rows[device_ids[2]]["existing_match_type"] == "serial"
+            serial_queries = [
+                query["sql"]
+                for query in queries.captured_queries
+                if 'BTRIM("dcim_device"."serial"' in query["sql"] and "LIKE ANY" in query["sql"]
+            ]
+            assert len(serial_queries) == 1
             counts.append(
                 sum(
                     "librenms_id" in query["sql"] and any(table in query["sql"] for table in identity_tables)

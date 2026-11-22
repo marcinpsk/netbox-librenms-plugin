@@ -131,7 +131,7 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
             return []
 
         from netbox_librenms_plugin.import_utils import get_import_device_cache_key
-        from netbox_librenms_plugin.import_utils.bulk_import import search_serial_discoveries, validate_search_row
+        from netbox_librenms_plugin.import_utils.bulk_import import validate_search_row
         from netbox_librenms_plugin.import_utils.device_operations import preload_import_objects
         from netbox_librenms_plugin.import_utils.virtual_chassis import load_numbering_rules
         from netbox_librenms_plugin.serial_identity import SerialRules
@@ -185,7 +185,6 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
         serial_rules = SerialRules.load()
         numbering_rules = load_numbering_rules()
         known_objects = preload_import_objects(libre_devices, server_key, serial_rules=serial_rules)
-        serial_discoveries = search_serial_discoveries(libre_devices, serial_rules)
         validated_devices = []
         for device in libre_devices:
             validation = validate_search_row(
@@ -196,7 +195,6 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
                 strip_domain=strip_domain,
                 serial_rules=serial_rules,
                 numbering_rules=numbering_rules,
-                serial_discoveries=serial_discoveries,
                 known_objects=known_objects,
             )
             if exclude_existing and validation["existing_device"]:

@@ -1054,6 +1054,7 @@ class _ImportObjects(NamedTuple):
     server_key: str
     by_pk: dict[tuple[type, int], Device | VirtualMachine]
     by_identity: dict[tuple[type, int, MappingRole], list[Device | VirtualMachine]]
+    serial_resolutions: dict[str, Resolution]
 
     def find_identity(self, model, identity):
         normalized_id = coerce_librenms_id(identity)
@@ -1066,7 +1067,7 @@ class _ImportObjects(NamedTuple):
         )
 
 
-def _index_import_objects(objects, server_key) -> _ImportObjects:
+def _index_import_objects(objects, server_key, serial_resolutions) -> _ImportObjects:
     objects = prefetch_mappings(objects)
     by_pk = {(type(obj), obj.pk): obj for obj in objects}
     matches = {}
@@ -1083,7 +1084,7 @@ def _index_import_objects(objects, server_key) -> _ImportObjects:
                 matches.setdefault((type(obj), own_id, MappingRole.OWN), []).append(obj)
             if oob_id is not None:
                 matches.setdefault((type(obj), oob_id, MappingRole.OOB), []).append(obj)
-    return _ImportObjects(server_key, by_pk, matches)
+    return _ImportObjects(server_key, by_pk, matches, serial_resolutions)
 
 
 def preload_import_objects(
@@ -1105,7 +1106,7 @@ def preload_import_objects(
             serials with; None reads them when a row has a serial.
 
     Returns:
-        _ImportObjects: The loaded objects by primary key and the mapping matches by identity.
+        _ImportObjects: The loaded objects, mapping matches by identity, and serial resolutions.
 
     """
     from django.contrib.contenttypes.models import ContentType
@@ -1162,7 +1163,7 @@ def preload_import_objects(
                 roles=(MappingRole.OWN, MappingRole.OOB),
             )
         objects.extend(queryset.filter(match))
-    return _index_import_objects(objects, server_key)
+    return _index_import_objects(objects, server_key, serial_resolutions)
 
 
 def validate_device_for_import(
@@ -1716,7 +1717,13 @@ def _match_and_validate(  # noqa: C901
                     # merge-peer [:2] guard (issue #101). The owner counts equivalent rows under
                     # the serial rules, also rows that the user cannot see.
                     # The batch keys text, and the text of a boolean or a list can equal a stored serial.
-                    if serial and is_serial_value(incoming_serial) and serial_discoveries is not None:
+                    if (
+                        known_objects is not None
+                        and is_serial_value(incoming_serial)
+                        and (preloaded := known_objects.serial_resolutions.get(serial)) is not None
+                    ):
+                        discovery = preloaded
+                    elif serial and is_serial_value(incoming_serial) and serial_discoveries is not None:
                         discovery = serial_discoveries()[serial]
                     else:
                         discovery = resolve_device(incoming_serial, rules=serial_rules)
