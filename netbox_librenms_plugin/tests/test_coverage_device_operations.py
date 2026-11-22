@@ -17,7 +17,12 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
     transactional_db_with_all_apps,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping, seed_unmapped
+from netbox_librenms_plugin.tests.mapping_fixtures import (
+    mapping_summary,
+    seed_mapping,
+    seed_stored_mapping,
+    seed_unmapped,
+)
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 
 SERVER_KEY = "test-server"
@@ -2301,8 +2306,6 @@ class TestImportSingleDevice:
         """The import locks and looks up no serial identity, so the broken rule does not refuse it."""
         from netbox_librenms_plugin.import_utils.device_operations import import_single_device
 
-        from netbox_librenms_plugin.tests.mapping_fixtures import stored_mapping_for_test
-
         site, device_type, role = self._infrastructure("broken-rule")
         _broken_serial_rule("import", manufacturer=device_type.manufacturer)
         validation = _validation(site=site, device_type=device_type, role=role, resolved_name="broken-rule-import")
@@ -2321,7 +2324,7 @@ class TestImportSingleDevice:
         assert device.device_type_id == device_type.pk
         assert device.serial == ""
         assert device.virtual_chassis_id is None
-        assert stored_mapping_for_test(device) == {SERVER_KEY: 5604}
+        assert mapping_summary(device) == {SERVER_KEY: {"own": 5604}}
 
     def test_manual_mappings_use_real_objects(self, librenms_api):
         from dcim.models import Platform, Rack

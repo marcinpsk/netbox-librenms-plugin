@@ -5336,7 +5336,7 @@ class TestDeviceConflictActionBranches:
         target.refresh_from_db()
         assert target.name == hostname
         assert target.serial == "STORED-SERIAL"
-        assert stored_mapping_for_test(target) == {self.server_key: 42}
+        assert mapping_summary(target) == {self.server_key: {"own": 42}}
 
     def test_update_by_primary_ip_stores_no_json_boolean_serial(self):
         """LibreNMS sends `serial: true`; the value names no hardware, so Update & Link keeps the stored serial."""

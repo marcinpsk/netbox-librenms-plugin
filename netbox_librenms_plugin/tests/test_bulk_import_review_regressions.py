@@ -621,7 +621,7 @@ def test_an_unavailable_member_serial_rolls_back_the_stack_until_the_master_link
 def test_a_standalone_bulk_import_without_a_serial_skips_the_broken_rule(client, live_librenms):
     from dcim.models import Device, DeviceType
 
-    from netbox_librenms_plugin.tests.mapping_fixtures import stored_mapping_for_test
+    from netbox_librenms_plugin.tests.mapping_fixtures import mapping_summary
     from netbox_librenms_plugin.tests.test_coverage_device_operations import _broken_serial_rule
 
     device_id = 96316
@@ -646,7 +646,7 @@ def test_a_standalone_bulk_import_without_a_serial_skips_the_broken_rule(client,
     assert device.device_type_id == device_type.pk
     assert device.serial == ""
     assert device.virtual_chassis_id is None
-    assert stored_mapping_for_test(device) == {"default": device_id}
+    assert mapping_summary(device) == {"default": {"own": device_id}}
 
 
 @pytest.mark.django_db
@@ -1028,7 +1028,7 @@ def test_bulk_import_reports_the_unverified_serial_without_netbox_details(client
 
     from netbox_librenms_plugin.import_utils.bulk_import import NETBOX_SERIAL_UNVERIFIED
     from netbox_librenms_plugin.jobs import ImportDevicesJob
-    from netbox_librenms_plugin.tests.mapping_fixtures import stored_mapping_for_test
+    from netbox_librenms_plugin.tests.mapping_fixtures import mapping_summary
     from netbox_librenms_plugin.tests.test_coverage_device_operations import _stray_chassis_member
 
     blocked_id, ready_id = 96402, 96403
@@ -1085,7 +1085,7 @@ def test_bulk_import_reports_the_unverified_serial_without_netbox_details(client
         warnings = [message for level, message in messages_on(response.wsgi_request) if level == "warning"]
 
     assert not Device.objects.filter(name=blocked_row["hostname"]).exists()
-    assert stored_mapping_for_test(Device.objects.get(name=ready_row["hostname"])) == {"default": ready_id}
+    assert mapping_summary(Device.objects.get(name=ready_row["hostname"])) == {"default": {"own": ready_id}}
     (warning,) = (message for message in warnings if str(blocked_id) in message)
     assert NETBOX_SERIAL_UNVERIFIED in warning
     chassis = member.virtual_chassis
