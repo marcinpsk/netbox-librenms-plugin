@@ -7164,9 +7164,10 @@ def test_a_refresh_keeps_an_optic_whose_serial_only_a_non_optic_entity_shares(
     from django.urls import reverse
 
     from netbox_librenms_plugin.tests.conftest import bind_librenms_server, make_device, make_superuser
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
     bind_librenms_server(settings, librenms_server, server_key="default")
-    device = make_device(f"optic-serial-{entity_class.lower()}", librenms_cf={"default": 9359})
+    device = seed_mapping(make_device(f"optic-serial-{entity_class.lower()}"), "default", own=9359)
     librenms_server.inventory_response(
         9359,
         [

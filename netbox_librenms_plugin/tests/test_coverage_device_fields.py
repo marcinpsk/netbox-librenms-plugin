@@ -1980,7 +1980,7 @@ class TestConvertLegacyLibreNMSIdView:
     @pytest.mark.parametrize("serial", ["['MALFORMED-LEGACY']", "{'serial': 'MALFORMED-LEGACY'}", "True"])
     def test_the_coerced_text_as_a_serial_confirms_the_conversion(self, logged_in_client, librenms_server, serial):
         """The control of the malformed case: the same text, sent as a string, is a serial."""
-        device = make_device("legacy-coerced-serial", serial=serial, librenms_cf=6570)
+        device = seed_stored_mapping(make_device("legacy-coerced-serial", serial=serial), 6570, save=True)
         librenms_server.device_info_response(device_id=6570, hostname=device.name, serial=serial)
 
         response = _post(logged_in_client, "convert_legacy_librenms_id", device, {"object_type": "device"})

@@ -5,7 +5,7 @@ from uuid import uuid4
 
 import pytest
 
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 from django.core.cache import cache
 from django.http import QueryDict
 from django.test import RequestFactory
@@ -658,7 +658,7 @@ class TestImportListRequest:
         from django.template.loader import render_to_string
 
         payload = _device(4121)
-        make_device(payload["sysName"], serial=payload["serial"], librenms_cf=payload["device_id"])
+        seed_stored_mapping(make_device(payload["sysName"], serial=payload["serial"]), payload["device_id"], save=True)
         _register_devices(librenms_server, [payload])
         client.force_login(_create_user(django_user_model, "warm-legacy-serial"))
 
@@ -697,7 +697,9 @@ class TestImportListRequest:
         from dcim.models import Device
 
         payload = _device(4122)
-        device = make_device(payload["sysName"], serial=payload["serial"], librenms_cf=payload["device_id"])
+        device = seed_stored_mapping(
+            make_device(payload["sysName"], serial=payload["serial"]), payload["device_id"], save=True
+        )
         _register_devices(librenms_server, [payload])
         client.force_login(_create_user(django_user_model, "warm-legacy-changed-serial"))
 

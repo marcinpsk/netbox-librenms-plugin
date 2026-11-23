@@ -1667,8 +1667,8 @@ class TestDeviceValidationDetailsView:
     def test_only_the_own_id_row_offers_the_stored_form_serial_sync(self, role):
         """The row reports the host serial in another stored form; an OOB-ID row is the controller and offers no sync."""
         _seed_decorated_serial_rule()
-        mapping = {"id": 1} if role == "own" else {"id": 5, "oob": {"id": 1, "type": "idrac9"}}
-        host = make_device(f"details-stored-form-{role}", serial="STORED-FORM-SN", librenms_cf={"default": mapping})
+        ids = {"own": 1} if role == "own" else {"own": 5, "oob": 1, "oob_type": "idrac9"}
+        host = seed_mapping(make_device(f"details-stored-form-{role}", serial="STORED-FORM-SN"), "default", **ids)
         self.primary_server.device_info_response(
             device_id=1, hostname=host.name, hardware="Unmatched hardware", os="linux", serial="S/N STORED-FORM-SN"
         )
@@ -5612,10 +5612,11 @@ class TestDeviceConflictActionBranches:
         from netbox_librenms_plugin.views.imports.actions import _OOB_ROW_REFUSED
 
         _seed_decorated_serial_rule()
-        mapping = {"id": 42} if role == "own" else {"id": 7, "oob": {"id": 42, "type": "idrac9"}}
-        host = make_device(
-            f"branches-stored-form-{role}", serial="STORED-FORM-SN", librenms_cf={self.server_key: mapping}
+        ids = {"own": 42} if role == "own" else {"own": 7, "oob": 42, "oob_type": "idrac9"}
+        host = seed_mapping(
+            make_device(f"branches-stored-form-{role}", serial="STORED-FORM-SN"), self.server_key, **ids
         )
+        seeded = mapping_summary(host)
         self._register_device(42, host.name, serial="S/N STORED-FORM-SN", os="linux")
 
         response = post_view(self._make_view(), self._request("sync_serial", host, f"{host.name}-user"), device_id=42)
@@ -5626,7 +5627,7 @@ class TestDeviceConflictActionBranches:
         else:
             self._assert_htmx_error(response, _OOB_ROW_REFUSED)
             assert Device.objects.get(pk=host.pk).serial == "STORED-FORM-SN"
-        assert stored_mapping_for_test(Device.objects.get(pk=host.pk)) == {self.server_key: mapping}
+        assert mapping_summary(Device.objects.get(pk=host.pk)) == seeded
 
     @pytest.mark.parametrize("action", ["sync_serial", "sync_name", "sync_platform", "update"])
     def test_a_detected_oob_controller_copies_no_field_onto_the_host(self, action):
