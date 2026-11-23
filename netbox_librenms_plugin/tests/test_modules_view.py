@@ -1174,8 +1174,6 @@ class TestMergeTransceiverDataPortIdentity:
     @pytest.mark.parametrize("port_serial", ["AB-12", "CD-34"], ids=["same-short-serial", "other-short-serial"])
     def test_a_port_ifindex_match_takes_no_optic_by_a_short_serial(self, settings, librenms_server, port_serial):
         """The optic index names a PSU; the port at the optic's ifIndex reports short serial text, which names no part."""
-        from netbox_librenms_plugin.serial_identity import SerialRules
-
         view = _real_api_view(settings, librenms_server, librenms_id=112)
         librenms_server.register(
             "/api/v0/devices/112/transceivers",
@@ -1197,12 +1195,10 @@ class TestMergeTransceiverDataPortIdentity:
             {"entPhysicalIndex": 10, "entPhysicalClass": "port", "entPhysicalSerialNum": port_serial, "ifIndex": 9},
         ]
 
-        inventory, error = view._merge_transceiver_data(
-            deepcopy(inventory_seed), serial_context=SerialRules.load().context(None)
-        )
+        inventory, error = _assess_inventory(view, deepcopy(inventory_seed))
 
         assert error is None
-        assert inventory[0] == inventory_seed[0]
+        assert inventory[0] == {**inventory_seed[0], "_source": "main"}
         assert len(inventory) == 2
         assert (inventory[1].get("entPhysicalModelName"), inventory[1].get("_librenms_port_id")) == (None, None)
 

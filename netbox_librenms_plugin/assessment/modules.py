@@ -106,8 +106,10 @@ def _ifindex_entity_is_the_optic(item: dict, transceiver: dict, context: SerialC
     serial = item.get("entPhysicalSerialNum")
     if is_identity(serial, context):
         return compare(serial, transceiver.get("serial"), context) is Comparison.SAME
-    # Only a blank entity is the holder of the optic: a reported serial without an identity names a part.
-    return not display(serial) and not clean_librenms_value(item.get("entPhysicalModelName"))
+    # _names_another_part refused another text, so a reported optic text here is the same text and corroborates.
+    if display(serial):
+        return bool(display(transceiver.get("serial")))
+    return not clean_librenms_value(item.get("entPhysicalModelName"))
 
 
 def _merge_transceiver_data(inventory_data, transceivers, ports, *, serial_context: SerialContext):  # noqa: C901
@@ -116,7 +118,12 @@ def _merge_transceiver_data(inventory_data, transceivers, ports, *, serial_conte
         return inventory_data
 
     inv_by_index = {idx: item for item in inventory_data if (idx := item.get("entPhysicalIndex")) is not None}
-    inv_serials = group(inventory_data, serial_context, serial=lambda item: item.get("entPhysicalSerialNum"))
+    # A fan, power supply or chassis that shares an optic's serial must not hide the optic.
+    inv_serials = group(
+        (item for item in inventory_data if not _never_an_optic(item)),
+        serial_context,
+        serial=lambda item: item.get("entPhysicalSerialNum"),
+    )
     inv_by_ifindex = {}
     for item in inventory_data:
         if (if_index := int(item["ifIndex"]) if item.get("ifIndex") is not None else None) is not None:
