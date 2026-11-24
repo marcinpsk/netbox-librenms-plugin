@@ -2558,6 +2558,7 @@ class TestDeviceValidationDetailsView:
         """The member's chassis names a master outside it, so the hostname match and its link cannot compare serials."""
         from django.utils.html import escape
 
+        from netbox_librenms_plugin.mapping_owner import MappingOwnerError
         from netbox_librenms_plugin.tests.test_coverage_device_operations import _stray_chassis_member
         from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
 
@@ -2576,10 +2577,10 @@ class TestDeviceValidationDetailsView:
             user=make_superuser(),
             HTTP_HX_REQUEST="true",
         )
-        response = post_view(DeviceConflictActionView(), request, device_id=1)
+        # The master of the chassis holds its mappings, and this chassis has none among its members.
+        with pytest.raises(MappingOwnerError):
+            post_view(DeviceConflictActionView(), request, device_id=1)
 
-        assert response.status_code == 200
-        assert escape("Serial 'ABC\ufffdDEF' cannot be matched.") in response.content.decode()
         assert mapping_summary(member) == {}
 
     @staticmethod
@@ -5167,6 +5168,7 @@ class TestDeviceConflictActionBranches:
 
         from django.urls import reverse
 
+        from netbox_librenms_plugin.mapping_owner import NO_MASTER_MESSAGE
         from netbox_librenms_plugin.serial_identity import UNAVAILABLE_MASTER_LINK
         from netbox_librenms_plugin.tests.test_coverage_device_operations import _stray_chassis_member
 
@@ -5195,7 +5197,8 @@ class TestDeviceConflictActionBranches:
             HTTP_HX_REQUEST="true",
         )
 
-        self._assert_htmx_error(response, f"Serial 'UNAVAILABLE-SN-1' cannot be matched. {UNAVAILABLE_MASTER_LINK}")
+        # The master of the chassis holds its mappings, and this chassis has none among its members.
+        self._assert_htmx_error(response, NO_MASTER_MESSAGE)
         target.refresh_from_db()
         assert mapping_summary(target) == {}
 
