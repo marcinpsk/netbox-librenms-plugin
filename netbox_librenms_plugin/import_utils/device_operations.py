@@ -13,6 +13,10 @@ from virtualization.models import Cluster, VirtualMachine
 
 from ..constants import is_librenms_placeholder, normalize_oob_type
 from ..import_validation_helpers import (
+    DEVICE_TYPE_ISSUES,
+    ROLE_ISSUE,
+    SITE_ISSUE_PREFIX,
+    VM_PLACEMENT_ISSUE,
     apply_merge_candidates,
     apply_oob_detection_result,
     clear_match_derived_action_fields,
@@ -1616,9 +1620,7 @@ def validate_device_for_import(  # noqa: C901
             if not result.get("existing_device"):
                 result["vm_placement"].update(method="site", found=site_match["found"])
                 if not site_match["found"]:
-                    result["issues"].append(
-                        "VM placement requires a matching site, selected cluster, or selected host device"
-                    )
+                    result["issues"].append(VM_PLACEMENT_ISSUE)
 
             # Skip device-specific validations for all VMs (new and existing)
             result["device_type"]["found"] = True  # Not required for VMs
@@ -1628,7 +1630,7 @@ def validate_device_for_import(  # noqa: C901
             # 2. For Devices: Validate Site (required)
             if not site_match["found"]:
                 if not result.get("existing_device"):
-                    result["issues"].append(f"No matching site found for location: '{location}'")
+                    result["issues"].append(f"{SITE_ISSUE_PREFIX} '{location}'")
                 # Get alternative suggestions
                 if location:
                     all_sites = Site.objects.all()[:10]  # Limit for performance
@@ -1645,9 +1647,7 @@ def validate_device_for_import(  # noqa: C901
                 result["device_type"]["device_type"] = None
                 result["device_type"]["match_type"] = "ambiguous"
                 if not result.get("existing_device"):
-                    result["issues"].append(
-                        f"Multiple device types match hardware '{hardware}' — resolve the ambiguity in NetBox."
-                    )
+                    result["issues"].append(f"{DEVICE_TYPE_ISSUES[1]} '{hardware}' — resolve the ambiguity in NetBox.")
             else:
                 # Update result keys individually to preserve the existing schema (especially "found")
                 result["device_type"]["found"] = dt_match["matched"]
@@ -1657,7 +1657,7 @@ def validate_device_for_import(  # noqa: C901
             if not result["device_type"]["found"] and result["device_type"].get("match_type") != "ambiguous":
                 result["device_type"]["found"] = False
                 if not result.get("existing_device"):
-                    result["issues"].append(f"No matching device type found for hardware: '{hardware}'")
+                    result["issues"].append(f"{DEVICE_TYPE_ISSUES[0]} '{hardware}'")
                 # Get some device types for user to choose from
                 all_device_types = DeviceType.objects.all()[:10]
                 result["device_type"]["suggestions"] = [
@@ -1673,7 +1673,7 @@ def validate_device_for_import(  # noqa: C901
                 # 4. DeviceRole (required for new devices) - Must be manually selected
                 logger.debug(f"[{hostname}] Issues BEFORE adding role issue: {result['issues']}")
                 result["device_role"]["found"] = False
-                result["issues"].append("Device role must be manually selected before import")
+                result["issues"].append(ROLE_ISSUE)
                 logger.debug(f"[{hostname}] Issues AFTER adding role issue: {result['issues']}")
             # Provide list of available roles for user selection (cached)
             cache_key = "librenms_import_all_roles"
