@@ -22,7 +22,7 @@ from netbox_librenms_plugin.tests.conftest import (
     run_in_threads,
     transactional_db_with_all_apps,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, stored_mapping_for_test
+from netbox_librenms_plugin.tests.mapping_fixtures import mapping_summary, seed_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_mapped_modules
 from netbox_librenms_plugin.tests.view_test_helpers import (
     messages_on,
@@ -542,11 +542,11 @@ def test_a_forced_link_checks_member_serials_under_the_locked_new_type(librenms_
     if concurrent:
         assert RETYPE_HELD in response.content.decode()
         assert stored == (old_type_id, "ABC123")
-        assert stored_mapping_for_test(Device.objects.get(pk=master.pk)) is None
+        assert mapping_summary(Device.objects.get(pk=master.pk)) == {}
     else:
         # Without the concurrent edit the same request links the master and stores the new type.
         assert stored == (new_type.pk, "ABC123")
-        assert stored_mapping_for_test(Device.objects.get(pk=master.pk)) == {SERVER_KEY: 9816}
+        assert mapping_summary(Device.objects.get(pk=master.pk)) == {SERVER_KEY: {"own": 9816}}
 
 
 @transactional_db_with_all_apps()

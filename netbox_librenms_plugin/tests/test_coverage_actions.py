@@ -2203,7 +2203,7 @@ class TestDeviceValidationDetailsView:
         NormalizationRule.objects.get_or_create(
             scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
         )
-        existing = make_device(f"details-fit-{len(stored)}", serial=stored, librenms_cf={"default": {"id": 1}})
+        existing = seed_mapping(make_device(f"details-fit-{len(stored)}", serial=stored), "default", own=1)
         self.primary_server.device_info_response(
             device_id=1,
             hostname=existing.name,
@@ -2580,7 +2580,7 @@ class TestDeviceValidationDetailsView:
 
         assert response.status_code == 200
         assert escape("Serial 'ABC\ufffdDEF' cannot be matched.") in response.content.decode()
-        assert stored_mapping_for_test(member) is None
+        assert mapping_summary(member) == {}
 
     @staticmethod
     def _link_forms(response):
@@ -4957,10 +4957,10 @@ class TestDeviceConflictActionBranches:
         assert reloaded.serial == "SAME-SERIAL-1"
         if shared:
             self._assert_htmx_error(response, "Serial conflict: 'SAME-SERIAL-1' is already assigned to device")
-            assert stored_mapping_for_test(reloaded) is None
+            assert mapping_summary(reloaded) == {}
         else:
             self._assert_success(response)
-            assert stored_mapping_for_test(reloaded) == {self.server_key: 42}
+            assert mapping_summary(reloaded) == {self.server_key: {"own": 42}}
 
     @pytest.mark.parametrize("state", ["other-holder", "other-holder-other-form", "sole-holder", "serial-differs"])
     def test_a_hostname_link_refuses_only_when_another_device_holds_the_same_serial(self, client, state):
@@ -4996,10 +4996,10 @@ class TestDeviceConflictActionBranches:
         assert target.serial == stored
         if state.startswith("other-holder"):
             self._assert_htmx_error(response, "Serial conflict: 'LINK-SN-1' is already assigned to device")
-            assert stored_mapping_for_test(target) is None
+            assert mapping_summary(target) == {}
         else:
             self._assert_success(response)
-            assert stored_mapping_for_test(target) == {self.server_key: 42}
+            assert mapping_summary(target) == {self.server_key: {"own": 42}}
 
     @pytest.mark.parametrize("action", ["link", "update", "update_serial"])
     def test_a_hostname_action_refuses_a_peer_that_holds_the_incoming_serial_under_its_own_rule(self, action):
@@ -5030,7 +5030,7 @@ class TestDeviceConflictActionBranches:
 
         self._assert_htmx_error(response, f"Serial conflict: 'XABC123' is already assigned to device '{peer.name}'")
         reloaded = Device.objects.get(pk=target.pk)
-        assert (reloaded.serial, stored_mapping_for_test(reloaded)) == ("ABC123", None)
+        assert (reloaded.serial, mapping_summary(reloaded)) == ("ABC123", {})
 
     @pytest.mark.parametrize("action", ["link", "update"])
     def test_a_serial_match_action_ignores_a_row_whose_own_rules_give_it_no_identity(self, client, action):
@@ -5068,7 +5068,7 @@ class TestDeviceConflictActionBranches:
 
         assert response.headers.get("HX-Trigger") == "closeModal"
         target.refresh_from_db()
-        assert stored_mapping_for_test(target) == {self.server_key: 42}
+        assert mapping_summary(target) == {self.server_key: {"own": 42}}
 
     @pytest.mark.parametrize("with_peer", [True, False], ids=["peer", "no-peer"])
     def test_a_serial_match_offers_update_and_link_only_when_the_serial_write_has_no_peer(self, client, with_peer):
@@ -5112,7 +5112,7 @@ class TestDeviceConflictActionBranches:
             )
             assert response.headers.get("HX-Trigger") == "closeModal"
             target.refresh_from_db()
-            assert (target.serial, stored_mapping_for_test(target)) == ("ABC123", {self.server_key: 42})
+            assert (target.serial, mapping_summary(target)) == ("ABC123", {self.server_key: {"own": 42}})
 
     @pytest.mark.parametrize("shape", ["write-peer", "duplicate"])
     def test_a_refused_serial_match_binds_no_vm_by_management_ip(self, client, shape):
@@ -5197,7 +5197,7 @@ class TestDeviceConflictActionBranches:
 
         self._assert_htmx_error(response, f"Serial 'UNAVAILABLE-SN-1' cannot be matched. {UNAVAILABLE_MASTER_LINK}")
         target.refresh_from_db()
-        assert stored_mapping_for_test(target) is None
+        assert mapping_summary(target) == {}
 
     def test_a_hostname_link_without_an_incoming_serial_reads_no_serial_rule(self, client):
         from django.urls import reverse
@@ -5240,7 +5240,7 @@ class TestDeviceConflictActionBranches:
 
         assert response.headers.get("HX-Trigger") == "closeModal"
         target.refresh_from_db()
-        assert (target.serial, stored_mapping_for_test(target)) == ("STORED-SN-1", {self.server_key: 42})
+        assert (target.serial, mapping_summary(target)) == ("STORED-SN-1", {self.server_key: {"own": 42}})
         # Each validation reads what the control read, and the action branch adds no read.
         assert (once, reads) == (1, validations * validation_reads)
 
@@ -5275,7 +5275,7 @@ class TestDeviceConflictActionBranches:
 
         self._assert_htmx_error(response, "No valid serial from LibreNMS")
         reloaded = Device.objects.get(pk=target.pk)
-        assert (reloaded.serial, stored_mapping_for_test(reloaded)) == ("STORED-SN-2", None)
+        assert (reloaded.serial, mapping_summary(reloaded)) == ("STORED-SN-2", {})
         # Each validation reads what the control read, and the action branch adds no read.
         assert (once, reads) == (1, validations * validation_reads)
 
@@ -5359,7 +5359,7 @@ class TestDeviceConflictActionBranches:
         target.refresh_from_db()
         assert target.name == hostname
         assert target.serial == "STORED-SERIAL"
-        assert stored_mapping_for_test(target) == {self.server_key: 42}
+        assert mapping_summary(target) == {self.server_key: {"own": 42}}
 
     @pytest.mark.parametrize("action", ["update", "update_serial"])
     @pytest.mark.parametrize("outcome", ["absent", "exact", "new"])
@@ -5492,11 +5492,11 @@ class TestDeviceConflictActionBranches:
         if keeps_match:
             self._assert_success(response)
             assert reloaded.device_type_id == new_type.pk
-            assert stored_mapping_for_test(reloaded) == {self.server_key: 42}
+            assert mapping_summary(reloaded) == {self.server_key: {"own": 42}}
         else:
             self._assert_htmx_error(response, _SERIAL_MATCH_LOST)
             assert reloaded.device_type_id == old_type_id
-            assert stored_mapping_for_test(reloaded) is None
+            assert mapping_summary(reloaded) == {}
 
     def test_a_serial_match_reads_a_replaced_serial_live_and_links_no_device(self):
         """LibreNMS reports new hardware under the same ID after the search; the cached serial must not link the old Device."""
@@ -8908,7 +8908,7 @@ class TestPromoteToHostViewPost:
 
         tag = f"promote-retype-{'same' if keeps_match else 'other'}"
         view = self._make_view()
-        existing_device = make_device(tag, serial="X-ABC123", librenms_cf={self.server_key: {"id": 10}})
+        existing_device = seed_mapping(make_device(tag, serial="X-ABC123"), self.server_key, own=10)
         maker = existing_device.device_type.manufacturer
         NormalizationRule.objects.create(
             scope="serial", match_pattern=r"^X-(.+)$", replacement=r"\1", manufacturer=maker
@@ -8935,12 +8935,12 @@ class TestPromoteToHostViewPost:
         if keeps_match:
             assert "validationRefresh" in response.get("HX-Trigger", "")
             assert reloaded.device_type_id == new_type.pk
-            assert stored_mapping_for_test(reloaded)[self.server_key] == {"id": 17, "oob": {"id": 10, "type": "oob"}}
+            assert mapping_summary(reloaded)[self.server_key] == {"own": 17, "oob": 10, "oob_type": "oob"}
         else:
             assert response["HX-Reswap"] == "none"
             assert _SERIAL_MATCH_LOST.encode() in response.content
             assert reloaded.device_type_id == old_type_id
-            assert stored_mapping_for_test(reloaded) == {self.server_key: {"id": 10}}
+            assert mapping_summary(reloaded) == {self.server_key: {"own": 10}}
 
     def test_override_platform_manufacturer_mismatch_rejected(self):
         """An override platform whose manufacturer differs from the device type's is rejected (update_fields skips full_clean, so the cross-field invariant is enforced explicitly), and nothing is committed."""

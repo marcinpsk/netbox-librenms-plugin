@@ -369,7 +369,9 @@ class TestSyncPageRouting:
         )
         _configure_servers(settings, librenms_server, SERVER_KEY)
         device_id = 6661 if fits else 6662
-        device = make_device(f"sync-stored-form-fit-{device_id}", serial=stored, librenms_cf=device_id)
+        device = seed_mapping(
+            make_device(f"sync-stored-form-fit-{device_id}", serial=stored), SERVER_KEY, own=device_id
+        )
         _register_device(librenms_server, device_id, device.name, serial=f"S/N {stored}")
 
         response = logged_in_client.get(_sync_url(device))
@@ -386,7 +388,7 @@ class TestSyncPageRouting:
     def test_a_serial_with_an_unpaired_surrogate_renders(self, logged_in_client, settings, librenms_server):
         """UTF-8 cannot encode an unpaired surrogate from a JSON escape, so the page shows a replacement character."""
         _configure_servers(settings, librenms_server, SERVER_KEY)
-        device = make_device("sync-surrogate-serial", serial="KEPT-SERIAL", librenms_cf=6663)
+        device = seed_mapping(make_device("sync-surrogate-serial", serial="KEPT-SERIAL"), SERVER_KEY, own=6663)
         _register_device(librenms_server, 6663, device.name, serial="ABC\ud800DEF")
 
         response = logged_in_client.get(_sync_url(device))

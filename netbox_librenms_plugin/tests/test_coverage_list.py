@@ -1083,7 +1083,7 @@ class TestImportListRequest:
         site_issue = f"{SITE_ISSUE_PREFIX} '{location}'"
         assert site_issue in searched["_validation"]["issues"]
         if linked:
-            holder = make_device("results-quoted-location-linked", librenms_cf={SERVER_KEY: {"id": device_id}})
+            holder = seed_mapping(make_device("results-quoted-location-linked"), SERVER_KEY, own=device_id)
         job = Job.objects.create(
             name="Completed import search",
             user=user,
