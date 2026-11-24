@@ -576,7 +576,7 @@ def test_an_empty_bay_offers_no_install_beside_a_legacy_row_that_stores_the_rule
         _item(10, module_type.model, "Slot 1", entPhysicalSerialNum="S/N S/N ABC123"),
         _item(11, child_type.model, "Child Bay", parent=10),
     ]
-    seed_inventory(_view_for_seed(), device, rows, librenms_id=77)
+    seed_inventory(device, rows, librenms_id=77)
 
     html = render_module_tab(device)
 
@@ -610,7 +610,7 @@ def test_an_empty_bay_offers_no_install_for_a_serial_that_does_not_fit(live_libr
         _item(10, module_type.model, "Slot 1", entPhysicalSerialNum=serial),
         _item(11, child_type.model, "Child Bay", parent=10),
     ]
-    seed_inventory(_view_for_seed(), device, rows, librenms_id=76)
+    seed_inventory(device, rows, librenms_id=76)
 
     html = render_module_tab(device)
 
@@ -621,12 +621,6 @@ def test_an_empty_bay_offers_no_install_for_a_serial_that_does_not_fit(live_libr
     assert ("disabled" not in checkbox) is fits
     reason = "The LibreNMS serial has 51 characters; the field holds at most 50."
     assert (escape(reason) in html) is (not fits)
-
-
-def _view_for_seed():
-    from netbox_librenms_plugin.views.sync.modules import InstallModuleView
-
-    return InstallModuleView()
 
 
 class TestUpdateModuleSerialView:
@@ -725,7 +719,7 @@ class TestUpdateModuleSerialView:
         view = UpdateModuleSerialView()
         view._librenms_api = live_librenms.api
         rows = [_item(11, module.module_type.model, "Slot 1", entPhysicalSerialNum="S/N S/N LEGACY-SN1")]
-        seed_inventory(view, device, rows, librenms_id=69)
+        seed_inventory(device, rows, librenms_id=69)
         _action, data = rendered_module_form(render_module_tab(device), "update-module-serial", 11)
         # The table offers no update beside the legacy row, so its serial lands after the render.
         Module.objects.filter(pk=other.pk).update(serial=other_serial)
@@ -828,7 +822,7 @@ def test_an_occupied_bay_offers_no_serial_update_beside_a_legacy_row(live_libren
     module = install_module(device, "Slot 1", f"UPDATE-LEGACY-CARD-{offered}", serial="OLD-SN1")
     install_module(device, "Slot 2", f"UPDATE-LEGACY-HOLDER-{offered}", serial=held)
     rows = [_item(10, module.module_type.model, "Slot 1", entPhysicalSerialNum="S/N S/N ABC123")]
-    seed_inventory(_view_for_seed(), device, rows, librenms_id=78)
+    seed_inventory(device, rows, librenms_id=78)
 
     html = render_module_tab(device)
 
@@ -857,7 +851,7 @@ def test_a_lone_legacy_module_keeps_its_own_serial_update(live_librenms):
     view = UpdateModuleSerialView()
     view._librenms_api = live_librenms.api
     rows = [_item(10, module.module_type.model, "Slot 1", entPhysicalSerialNum="S/N S/N ABC123")]
-    seed_inventory(view, device, rows, librenms_id=79)
+    seed_inventory(device, rows, librenms_id=79)
 
     _action, data = rendered_module_form(render_module_tab(device), "update-module-serial", 10)
     request = make_request("post", data, user=make_superuser(), path="/modules/")
@@ -877,7 +871,7 @@ def test_an_occupied_bay_offers_no_serial_update_beside_a_confirmed_holder(live_
     module = install_module(device, "Slot 1", f"UPDATE-HOLDER-CARD-{offered}", serial="OLD123")
     install_module(device, "Slot 2", f"UPDATE-HOLDER-OTHER-{offered}", serial=held)
     rows = [_item(10, module.module_type.model, "Slot 1", entPhysicalSerialNum="NEW123")]
-    seed_inventory(_view_for_seed(), device, rows, librenms_id=80)
+    seed_inventory(device, rows, librenms_id=80)
 
     html = render_module_tab(device)
 
@@ -902,7 +896,7 @@ def test_a_bayless_parent_with_a_long_serial_keeps_the_branch_of_its_children(li
         _item(10, parent_type.model, "Chassis Carrier", entPhysicalSerialNum="N" * (50 if fits else 51)),
         _item(11, child_type.model, "Slot 1", parent=10, entPhysicalSerialNum="CHILD-SN1"),
     ]
-    seed_inventory(_view_for_seed(), device, rows, librenms_id=81)
+    seed_inventory(device, rows, librenms_id=81)
 
     html = render_module_tab(device)
 
@@ -932,7 +926,7 @@ def test_the_serial_update_reads_its_device_again_when_the_lookup_stops_early(li
     module = install_module(device, "Slot 1", f"UPDATE-EARLY-CARD-{held_here}", serial="OLD123")
     install_module(device, "Slot 2", f"UPDATE-EARLY-HOLDER-{held_here}", serial="NEW123" if held_here else "OTHER123")
     rows = [_item(10, module.module_type.model, "Slot 1", entPhysicalSerialNum="NEW123")]
-    seed_inventory(_view_for_seed(), device, rows, librenms_id=82)
+    seed_inventory(device, rows, librenms_id=82)
 
     html = render_module_tab(device)
 
