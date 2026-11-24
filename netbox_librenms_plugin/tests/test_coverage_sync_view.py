@@ -1201,9 +1201,10 @@ class TestVirtualChassisInventory:
         _vc, (holder, page) = make_virtual_chassis_members("inventory-change-scope", count=2)
         holder.serial = "SCOPE-A"
         holder.save()
-        seed_mapping(page, SERVER_KEY, own=6653)
+        # The chassis master owns the mapping of the chassis.
+        seed_mapping(holder, SERVER_KEY, own=6653)
         inventory = _stack_inventory({"entPhysicalSerialNum": "SCOPE-A"}, {"entPhysicalSerialNum": "SCOPE-B"})
-        _register_device(librenms_server, 6653, page.name, inventory=inventory)
+        _register_device(librenms_server, 6653, holder.name, inventory=inventory)
         user = make_user_with_perms("vc-serial-change-b", [("view", Device)])
         client.force_login(grant(user, "change", Device, constraints={"pk": page.pk}))
 
