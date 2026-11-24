@@ -2264,7 +2264,7 @@ class TestDeviceValidationDetailsView:
         from netbox_librenms_plugin.serial_identity import UNAVAILABLE_MASTER_LINK
         from netbox_librenms_plugin.tests.test_coverage_device_operations import _stray_chassis_member
 
-        existing = make_device("details-linked-held", serial="LINKED-NETBOX", librenms_cf={"default": {"id": 1}})
+        existing = seed_mapping(make_device("details-linked-held", serial="LINKED-NETBOX"), "default", own=1)
         _stray_chassis_member("details-linked-held", "LINKED-LIBRENMS")
         self.primary_server.device_info_response(
             device_id=1,
