@@ -633,6 +633,9 @@ def test_masterless_chassis_members_read_the_module_source_that_one_refresh_stor
 
     # The table has no numbering rule without a master, so the refresh and each cached page render the refusal.
     client.force_login(make_superuser("module-tab-masterless-user"))
+    # The refresh starts from a cold cache, so the snapshot that the pages read below is the one it stores.
+    source_cache.delete(page, Resource.MODULES, "default")
+    assert source_cache.read(page, Resource.MODULES, "default") is None
     refreshed = refresh(client, page)
     assert refreshed.context["module_sync"]["vc_numbering_error"] == VC_NUMBERING_NO_MASTER
     for member, response in ((page, refreshed), (page, fragment(client, page)), (owner, fragment(client, owner))):
