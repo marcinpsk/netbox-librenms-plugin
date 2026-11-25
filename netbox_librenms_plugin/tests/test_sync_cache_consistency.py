@@ -366,7 +366,7 @@ def test_module_cache_status_reports_tab_states_when_an_applicable_serial_rule_i
         module_inventory_cache_payload([], 6409, None, serial_context=SerialRules.load().for_device(device)),
         timeout=300,
     )
-    _seed_snapshot("ports", device, "primary")
+    seed_interfaces_snapshot(device, [], server_key="primary")
     rule = NormalizationRule.objects.create(
         scope="serial",
         manufacturer=device.device_type.manufacturer,
