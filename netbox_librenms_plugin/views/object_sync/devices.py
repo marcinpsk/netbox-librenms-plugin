@@ -534,6 +534,9 @@ class SingleModuleVerifyView(
         }
         if not any(index != ent_physical_index for index, _target in row["branch_rows"]):
             row["has_installable_children"] = False
+        # A Fix Model suggestion from a child that the page rows do not sign is not offered.
+        if row.get("model_incomplete") and row.get("model_incomplete_source") not in page_rows:
+            row = {key: value for key, value in row.items() if not key.startswith("model_incomplete")}
         if row.get("selectable") and table.selection_allowed:
             row["selection_grant"] = table.selection_override(row)
         formatted_row = table.format_module_data(row)

@@ -2135,6 +2135,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 table_data[parent_row_idx]["model_incomplete_name"] = str(mt)
                 table_data[parent_row_idx]["model_incomplete_target_pk"] = mt.pk
                 child_row = table_data[first_no_bay_child_idx]
+                table_data[parent_row_idx]["model_incomplete_source"] = coerce_positive_int(
+                    child_row.get("ent_physical_index")
+                )
                 # Reconstruct a minimal item dict from the row so the helper
                 # can extract a sensible bay name suggestion.
                 child_item = {

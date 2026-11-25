@@ -380,6 +380,63 @@ class TestSingleModuleVerifyRow:
         )
         assert re.findall(r'<option value=""([^>]*)>', select) == placeholders
 
+    @pytest.mark.parametrize(
+        ("serial", "fix_model"), [("12", False), ("DAUGHTER-SN-0001", True)], ids=["short-serial", "identity-serial"]
+    )
+    def test_a_carrier_verify_offers_no_fix_model_from_an_unattributed_daughter(
+        self, client, librenms_server, serial, fix_model
+    ):
+        """The verify of a carrier does not sign its unattributed daughter, so that daughter gives no Fix Model."""
+        from netbox_librenms_plugin.tests.conftest import (
+            install_module,
+            make_device_with_module_bays,
+            make_module_type,
+            make_superuser,
+            make_virtual_chassis,
+        )
+
+        page = make_device_with_module_bays("module-verify-fix-model", ["Slot 1"], serial="CHASSIS-8")
+        member = make_device_with_module_bays("module-verify-fix-model-member", ["Slot 1"])
+        make_virtual_chassis("module-verify-fix-model-vc", page, member)
+        page.refresh_from_db()
+        seed_mapping(page, SERVER_KEY, own=LIBRENMS_ID, save=False)
+        page.save()
+        # The carrier's module type has no bay templates, so its daughter has no bay on the member.
+        install_module(member, "Slot 1", "VERIFY-BAYLESS-CARRIER", serial="CARRIER-SN-0001")
+        make_module_type("VERIFY-DAUGHTER")
+        inventory = [
+            {
+                "entPhysicalIndex": 1,
+                "entPhysicalName": "Slot 1",
+                "entPhysicalModelName": "VERIFY-BAYLESS-CARRIER",
+                "entPhysicalClass": "module",
+                "entPhysicalContainedIn": 0,
+                "entPhysicalSerialNum": "CARRIER-SN-0001",
+            },
+            {
+                "entPhysicalIndex": 2,
+                "entPhysicalName": "Daughter Bay 1",
+                "entPhysicalModelName": "VERIFY-DAUGHTER",
+                "entPhysicalClass": "module",
+                "entPhysicalContainedIn": 1,
+                "entPhysicalSerialNum": serial,
+            },
+        ]
+        _register_inventory(librenms_server, inventory)
+        client.force_login(make_superuser("module-verify-fix-model-user"))
+        refreshed = _refresh_modules(client, page)
+        assert refreshed.status_code == 200
+
+        response = _verify_module(
+            client,
+            refreshed,
+            page,
+            {"device_id": member.pk, "ent_physical_index": 1, "server_key": SERVER_KEY},
+        )
+
+        assert response.status_code == 200
+        assert ('data-action="fix-model"' in response.json()["formatted_row"]["status"]) is fix_model
+
 
 @pytest.mark.django_db
 class TestSingleInterfaceVerifyChassisGuard:
