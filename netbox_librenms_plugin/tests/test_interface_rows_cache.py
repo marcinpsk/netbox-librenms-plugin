@@ -13,6 +13,7 @@ from uuid import uuid4
 import pytest
 from dcim.models import Device, Interface, MACAddress
 from django.contrib.auth import get_user_model
+from django.core import signing
 from django.urls import reverse
 from ipam.models import VLAN
 from users.models import ObjectPermission
@@ -37,6 +38,12 @@ from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with
 from netbox_librenms_plugin.views.base.interfaces_view import BaseInterfaceTableView
 
 pytestmark = pytest.mark.django_db
+
+
+@pytest.fixture(autouse=True)
+def _one_signing_second(monkeypatch):
+    """Sign every row evidence token in one second, so two renders of the same rows are equal."""
+    monkeypatch.setattr(signing.TimestampSigner, "timestamp", lambda self: signing.b62_encode(1_700_000_000))
 
 
 @pytest.fixture
