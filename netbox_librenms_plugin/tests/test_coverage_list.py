@@ -595,15 +595,16 @@ class TestImportListRequest:
         librenms_server,
     ):
         """A Device stores "True" and LibreNMS sends `serial: true`; the batch serial lookup reads the value."""
-        make_device("search-boolean-text-holder", serial="True")
-        _register_devices(librenms_server, [{**_device(4116), "serial": True}])
+        holder = make_device("search-boolean-text-holder", serial="True")
+        # The text row puts "True" in the batch, so the boolean row finds a populated key.
+        _register_devices(librenms_server, [{**_device(4116), "serial": True}, {**_device(4117), "serial": "True"}])
         client.force_login(_create_user(django_user_model, "search-boolean-serial"))
 
         response = client.get(_import_url(), _search_params())
 
-        (row,) = response.context["table"].data
-        assert row["_validation"]["existing_device"] is None
-        assert row["_validation"]["existing_match_type"] is None
+        rows = {row["device_id"]: row["_validation"] for row in response.context["table"].data}
+        assert (rows[4116]["existing_device"], rows[4116]["existing_match_type"]) == (None, None)
+        assert (rows[4117]["existing_device"].pk, rows[4117]["existing_match_type"]) == (holder.pk, "serial")
 
     @pytest.mark.django_db
     def test_a_warm_search_validates_a_row_again_that_stopped_at_an_unavailable_serial(
