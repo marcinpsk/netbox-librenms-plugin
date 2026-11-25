@@ -118,6 +118,7 @@ def test_failed_refresh_removes_old_modules_and_names_the_failed_part(client, li
     assert not status["snapshot_available"]
     assert status["state"] == "refresh_failed"
     assert any(path in str(message) for message in response.context["messages"])
+    assert [message for message in response.context["messages"] if message.level == messages.SUCCESS] == []
 
 
 @pytest.mark.django_db
