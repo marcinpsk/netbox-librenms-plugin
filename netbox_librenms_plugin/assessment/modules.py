@@ -100,15 +100,15 @@ def _never_an_optic(item: dict) -> bool:
 
 
 def _ifindex_entity_is_the_optic(item: dict, transceiver: dict, context: SerialContext) -> bool:
-    """Return whether an entity matched only by port ifIndex has the optic's serial, or neither model nor serial."""
+    """Return whether an entity matched only by port ifIndex has the optic serial identity, or no model or serial."""
     if _never_an_optic(item) or _names_another_part(item, transceiver, context):
         return False
     serial = item.get("entPhysicalSerialNum")
     if is_identity(serial, context):
         return compare(serial, transceiver.get("serial"), context) is Comparison.SAME
-    # _names_another_part refused another text, so a reported optic text here is the same text and corroborates.
+    # Equal text of a serial without an identity names no part, so it does not link by ifIndex.
     if display(serial):
-        return bool(display(transceiver.get("serial")))
+        return False
     return not clean_librenms_value(item.get("entPhysicalModelName"))
 
 

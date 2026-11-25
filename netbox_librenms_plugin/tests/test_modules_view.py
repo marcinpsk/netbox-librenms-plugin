@@ -1211,8 +1211,6 @@ class TestMergeTransceiverDataPortIdentity:
         self, settings, librenms_server, entity_class, entity_model
     ):
         """Without an index link, the same short serial text names no part, so the merge adds the optic's own row."""
-        from netbox_librenms_plugin.serial_identity import SerialRules
-
         view = _real_api_view(settings, librenms_server, librenms_id=113)
         librenms_server.register(
             "/api/v0/devices/113/transceivers",
@@ -1232,12 +1230,10 @@ class TestMergeTransceiverDataPortIdentity:
             }
         ]
 
-        inventory, error = view._merge_transceiver_data(
-            deepcopy(inventory_seed), serial_context=SerialRules.load().context(None)
-        )
+        inventory, error = _assess_inventory(view, deepcopy(inventory_seed))
 
         assert error is None
-        assert inventory[:1] == inventory_seed
+        assert inventory[:1] == [{**inventory_seed[0], "_source": "main"}]
         assert [
             (item["entPhysicalIndex"], item["entPhysicalSerialNum"], item["_from_transceiver_api"])
             for item in inventory[1:]
@@ -1276,7 +1272,7 @@ class TestMergeTransceiverDataPortIdentity:
             }
         ]
 
-        inventory, error = view._merge_transceiver_data(deepcopy(inventory_seed), serial_context=context)
+        inventory, error = _assess_inventory(view, deepcopy(inventory_seed))
 
         assert error is None
         assert sorted(

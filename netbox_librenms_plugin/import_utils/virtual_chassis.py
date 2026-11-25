@@ -557,7 +557,7 @@ def _stack_rows(rows, contexts, numbering_mode) -> _StackRows:
             for row, slot in zip(stack.member_rows, slots, strict=True)
             if is_vc_position(slot) and slots.count(slot) == 1
         }
-    reported = [_as_int(row.get("entPhysicalParentRelPos")) for row in stack.member_rows]
+    reported = [inventory_index(row.get("entPhysicalParentRelPos")) for row in stack.member_rows]
     return _StackRows(
         stack.root.get("entPhysicalIndex"),
         {member["index"]: member["position"] for member in project_vc_members(stack.members, numbering_mode)},
