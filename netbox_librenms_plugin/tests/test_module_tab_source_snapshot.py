@@ -590,9 +590,11 @@ def test_a_member_page_merges_transceivers_under_the_serial_rules_of_the_chassis
 
 
 @pytest.mark.django_db
-def test_masterless_chassis_members_read_the_module_source_that_one_refresh_stored(live_librenms):
+def test_masterless_chassis_members_read_the_module_source_that_one_refresh_stored(client, live_librenms):
     """Without a master each member has its own serial context, and no member's read refuses the shared source."""
     from dcim.models import DeviceType, Manufacturer, VirtualChassis
+    from django.utils.html import escape
+    from netbox_librenms_plugin.import_utils.virtual_chassis import VC_NUMBERING_NO_MASTER
     from netbox_librenms_plugin.acquisition.coordinator import acquire
     from netbox_librenms_plugin.models import NormalizationRule
     from netbox_librenms_plugin.serial_identity import SerialRules
@@ -624,6 +626,18 @@ def test_masterless_chassis_members_read_the_module_source_that_one_refresh_stor
 
     for member, indices in ((page, [1, 2, 20]), (owner, [1, 2]), (page, [1, 2, 20])):
         assert _read_inventory_indices(member) == indices, member.name
+        assert SyncCacheConsistency(member).status("default")["modules"]["snapshot_available"], member.name
+        assert source_cache.read(member, Resource.MODULES, "default") is not None, member.name
+
+    # The table has no numbering rule without a master, so the refresh and each cached page render the refusal.
+    client.force_login(make_superuser("module-tab-masterless-user"))
+    refreshed = refresh(client, page)
+    assert refreshed.context["module_sync"]["vc_numbering_error"] == VC_NUMBERING_NO_MASTER
+    for member, response in ((page, refreshed), (page, fragment(client, page)), (owner, fragment(client, owner))):
+        content = response.content.decode()
+        assert response.status_code == 200, member.name
+        assert escape(VC_NUMBERING_NO_MASTER) in content, member.name
+        assert "data-ent-index" not in content, member.name
         assert SyncCacheConsistency(member).status("default")["modules"]["snapshot_available"], member.name
         assert source_cache.read(member, Resource.MODULES, "default") is not None, member.name
 
