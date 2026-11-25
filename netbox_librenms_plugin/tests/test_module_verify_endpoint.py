@@ -13,7 +13,7 @@ import json
 import pytest
 
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
-from netbox_librenms_plugin.tests.view_test_helpers import module_tab_forms
+from netbox_librenms_plugin.tests.view_test_helpers import module_tab_forms, rendered_module_form
 
 
 SERVER_KEY = "default"
@@ -295,6 +295,69 @@ class TestSingleModuleVerifyRow:
         assert response.status_code == 200
         actions = response.json()["formatted_row"]["actions"]
         assert f'name="selected_device_id" value="{selected.pk}"' in actions
+
+    @pytest.mark.parametrize(
+        ("serials", "installed"),
+        [(("12", "34"), {"Slot 3"}), (("OPTIC-SN-0001", "OPTIC-SN-0002"), {"Slot 1", "Slot 2", "Slot 3"})],
+        ids=["short-serials", "identity-serials"],
+    )
+    def test_a_carrier_verify_pins_no_unattributed_child_to_the_member(
+        self, client, librenms_server, serials, installed
+    ):
+        """A child whose serial has no identity installs only after its own member pick, not after its carrier's."""
+        from dcim.models import Module
+
+        from netbox_librenms_plugin.tests.conftest import (
+            make_device_with_module_bays,
+            make_module_type,
+            make_superuser,
+            make_virtual_chassis,
+        )
+
+        bays = ["Slot 1", "Slot 2", "Slot 3"]
+        page = make_device_with_module_bays("module-verify-unattributed", bays, serial="CHASSIS-7")
+        member = make_device_with_module_bays("module-verify-unattributed-member", bays)
+        make_virtual_chassis("module-verify-unattributed-vc", page, member)
+        page.refresh_from_db()
+        seed_mapping(page, SERVER_KEY, own=LIBRENMS_ID, save=False)
+        page.save()
+        make_module_type("VERIFY-OPTIC")
+        carrier = {
+            "entPhysicalIndex": 1,
+            "entPhysicalName": "Carrier",
+            "entPhysicalModelName": "VERIFY-CARRIER",
+            "entPhysicalClass": "module",
+            "entPhysicalContainedIn": 0,
+        }
+        children = [
+            {
+                "entPhysicalIndex": number + 1,
+                "entPhysicalName": f"Slot {number}",
+                "entPhysicalModelName": "VERIFY-OPTIC",
+                "entPhysicalClass": "module",
+                "entPhysicalContainedIn": 1,
+                "entPhysicalSerialNum": serial,
+            }
+            for number, serial in enumerate([*serials, "OPTIC-SN-0003"], start=1)
+        ]
+        _register_inventory(librenms_server, [carrier, *children])
+        client.force_login(make_superuser("module-verify-unattributed-user"))
+        refreshed = _refresh_modules(client, page)
+        assert refreshed.status_code == 200
+
+        response = _verify_module(
+            client,
+            refreshed,
+            page,
+            {"device_id": member.pk, "ent_physical_index": 1, "server_key": SERVER_KEY},
+        )
+
+        assert response.status_code == 200
+        url, fields = rendered_module_form(response.json()["formatted_row"]["actions"], "install-branch", 1)
+        assert fields["selected_device_id"] == str(member.pk)
+        assert client.post(url, fields).status_code == 302
+        assert set(Module.objects.filter(device=member).values_list("module_bay__name", flat=True)) == installed
+        assert not Module.objects.filter(device=page).exists()
 
 
 @pytest.mark.django_db

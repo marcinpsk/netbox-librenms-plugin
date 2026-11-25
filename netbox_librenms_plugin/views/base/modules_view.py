@@ -1317,7 +1317,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         Give each row of the page table the indices of itself and of the rows below it, in table order.
 
         A row on a member the user may not view is in no list: a verify of an ancestor must not sign it
-        again for another member.
+        again for another member. A row that no member reported is only in its own list, so only its
+        own member pick pins it to a member.
         """
         open_rows = []
         for row in table_data:
@@ -1328,7 +1329,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             row["verify_rows"] = []
             index = coerce_positive_int(row.get("ent_physical_index"))
             if index is not None and not row.get("member_withheld"):
-                for owner in open_rows:
+                for owner in open_rows[-1:] if row.get("member_unattributed") else open_rows:
                     owner["verify_rows"].append(index)
 
     @classmethod
