@@ -114,7 +114,9 @@ def test_failed_refresh_removes_old_modules_and_names_the_failed_part(client, li
 
     assert response.context["module_sync"]["table"] is None
     assert source_cache.read(subject, Resource.MODULES, "default") is None
-    assert not SyncCacheConsistency(subject).status("default")["modules"]["snapshot_available"]
+    status = SyncCacheConsistency(subject).status("default")["modules"]
+    assert not status["snapshot_available"]
+    assert status["state"] == "refresh_failed"
     assert any(path in str(message) for message in response.context["messages"])
 
 
