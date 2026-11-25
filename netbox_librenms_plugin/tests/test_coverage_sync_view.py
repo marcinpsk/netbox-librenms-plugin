@@ -1488,8 +1488,9 @@ def test_vc_name_sync_offers_no_name_for_a_member_serial_without_an_identity(
     from netbox_librenms_plugin.models import LibreNMSSettings
     from netbox_librenms_plugin.views.sync.device_fields import _MEMBER_NAME_RULES_UNAVAILABLE
 
-    chassis, (master, member) = make_virtual_chassis_members(f"rename-no-token-{serial}")
-    chassis.master = master
+    chassis, (_first, member) = make_virtual_chassis_members(f"rename-no-token-{serial}")
+    # The device information sync card is on the chassis master.
+    chassis.master = member
     chassis.save(update_fields=["master"])
     member.name = "member-old-name"
     member.serial = serial
