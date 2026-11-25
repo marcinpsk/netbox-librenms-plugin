@@ -106,8 +106,9 @@ def test_failed_refresh_removes_old_modules_and_names_the_failed_part(client, li
     subject = device("module-tab-failed")
     client.force_login(make_superuser("module-tab-failed-user"))
     serve(live_librenms.server, inventory=INVENTORY)
-    refresh(client, subject)
+    complete = refresh(client, subject)
     assert source_cache.read(subject, Resource.MODULES, "default") is not None
+    assert [message.level for message in complete.context["messages"]] == [messages.SUCCESS]
     live_librenms.server.register(f"/api/v0/{path}", {"status": "error"}, status=500)
 
     response = refresh(client, subject)
