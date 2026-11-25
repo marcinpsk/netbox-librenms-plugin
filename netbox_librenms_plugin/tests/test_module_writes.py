@@ -865,6 +865,7 @@ def test_a_batch_claims_each_json_number_serial_by_its_text():
 
 @transactional_db_with_all_apps()
 def test_a_page_observes_its_complete_chassis_and_external_module_owners_before_claims():
+    from django.db import connection, transaction
     from django.test.utils import CaptureQueriesContext
 
     from netbox_librenms_plugin.module_writes import lock_module_write, observe_module_write
@@ -890,6 +891,7 @@ def test_a_page_observes_its_complete_chassis_and_external_module_owners_before_
 @pytest.mark.parametrize("moved", ["page", "member"])
 def test_membership_validation_refuses_a_preobserved_member_that_left_without_expanding_locks(moved):
     from dcim.models import Device
+    from django.db import connection, transaction
     from django.test.utils import CaptureQueriesContext
 
     from netbox_librenms_plugin.module_grants import GrantRefused
