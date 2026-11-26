@@ -523,6 +523,22 @@ def test_the_preview_offers_replace_only_for_a_model_that_resolves_to_a_module_t
     assert ("data-replace-no-type" in html) is (replacement == "no-type")
 
 
+@pytest.mark.parametrize("viewer", ["all-types", "installed-type-only"])
+def test_the_preview_offers_replace_only_for_a_module_type_the_user_can_view(client, c8300, viewer):
+    """The Replace POST refuses a resolved type outside the user's view scope, so the dialog withholds Replace too."""
+    device, entities = c8300
+    installed_model = entities[SERVICE_MODULE]["entPhysicalModelName"]
+    install_module(device, _bay_name(entities, REAL_NIM), installed_model, "OLD")
+    type_scope = None if viewer == "all-types" else {"model": installed_model}
+    client.force_login(_module_writer(f"replace-type-{viewer}", type_scope=type_scope))
+
+    html = _preview_html(client, device)
+
+    hidden = viewer == "installed-type-only"
+    assert len(_replace_forms(html)) == (0 if hidden else 1)
+    assert ("data-replace-no-type" in html) is hidden
+
+
 @pytest.mark.parametrize("owns_destination", [True, False], ids=["ancestor", "sibling"])
 def test_the_table_offers_move_only_when_the_serial_holder_does_not_own_the_bay(ui, c8300, owns_destination):
     """The table offers the same Move as the preview: never into a bay of the holder's own subtree."""
@@ -688,8 +704,8 @@ def _move_forms(html):
     return [form for form in module_tab_forms(html).forms if "move-module" in form["action"]]
 
 
-def _module_writer(name, *, device_scope=None, delete_scope=None, change_scope=None, view_scope=None):
-    """Create a user with the Replace and Move permissions; a scope constrains Device views or Module grants."""
+def _module_writer(name, *, device_scope=None, delete_scope=None, change_scope=None, view_scope=None, type_scope=None):
+    """Create a user with the Replace and Move permissions; a scope constrains Device views or a model's grants."""
     from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
 
     from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
@@ -697,7 +713,8 @@ def _module_writer(name, *, device_scope=None, delete_scope=None, change_scope=N
     user = make_user_with_perms(name, [("view", Device)], constraints=device_scope)
     user = grant(user, "delete", Module, constraints=delete_scope, name=f"{name}-module-delete")
     user = grant(user, "view", Module, constraints=view_scope)
-    for action, model in [("view", ModuleBay), ("view", ModuleType), ("add", Module)]:
+    user = grant(user, "view", ModuleType, constraints=type_scope)
+    for action, model in [("view", ModuleBay), ("add", Module)]:
         user = grant(user, action, model)
     user = grant(user, "change", Module, constraints=change_scope)
     for action, model in [("add", Interface), ("change", Interface), ("delete", Interface)]:

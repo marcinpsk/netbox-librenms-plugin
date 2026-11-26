@@ -2785,6 +2785,13 @@ def _legacy_holder_beside(target_device, incoming, serial_context, *, rules, exc
     return bool(held.uncertain)
 
 
+def _replacement_type_usable(view, matched_type):
+    """Return whether Replace may install *matched_type*: a type resolved and inside the user's view scope."""
+    from dcim.models import ModuleType
+
+    return matched_type is not None and view.restricted_queryset(ModuleType).filter(pk=matched_type.pk).exists()
+
+
 def _resolve_replacement_holder(incoming, serial_context, *, rules, exclude_pk):
     if not is_identity(incoming, serial_context):
         return Resolution(ResolutionKind.ABSENT)
@@ -3005,8 +3012,8 @@ class ModuleMismatchPreviewView(
                 and module_move_serials_admitted(incoming, serial_conflict.serial, serial_context),
                 "serial_conflict_owns_bay": serial_conflict_owns_bay,
                 "replace_in_delete_scope": replace_in_delete_scope,
-                # The Replace POST refuses a LibreNMS model that resolves to no module type.
-                "replace_type_resolved": matched_type is not None,
+                # The Replace POST refuses the same types.
+                "replace_type_usable": _replacement_type_usable(self, matched_type),
                 "move_token": move_offer_token(serial_conflict, installed_module.module_bay_id, installed_tree)
                 if serial_conflict is not None
                 else "",
@@ -3201,7 +3208,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                     manufacturer=manufacturer,
                     fallback_names=module_type_lookup_candidates(librenms_item),
                 )
-                if not matched_type or not self.restricted_queryset(ModuleType).filter(pk=matched_type.pk).exists():
+                if not _replacement_type_usable(self, matched_type):
                     raise _ModuleActionRefused(f"No matching module type found for '{model_name}'.")
 
                 scope = scope.lock_module_types([matched_type.pk])
