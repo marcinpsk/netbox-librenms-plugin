@@ -886,6 +886,7 @@ def validate_device_for_import(  # noqa: C901
         "member_name_refusal": "",  # Why the member name pattern gives a linked stack member no name
         "device_type_mismatch": False,  # True when existing device's type differs from LibreNMS
         "issues": [],
+        "write_refusals": [],  # The issues that the import writer refuses; they are in "issues" too
         "warnings": [],
         "virtual_chassis": empty_virtual_chassis_data(),
         "site": {
@@ -1837,9 +1838,10 @@ def validate_device_for_import(  # noqa: C901
         else:
             # The import stores the LibreNMS serial, and the writer refuses one that does not fit the field.
             if not import_as_vm and (refusal := stored_form_refusal(incoming_serial, Device)):
-                result["issues"].append(refusal)
+                result["write_refusals"].append(refusal)
             if not import_as_vm:
-                result["issues"].extend(_stack_member_serial_refusals(result, incoming_serial, serial_rules))
+                result["write_refusals"].extend(_stack_member_serial_refusals(result, incoming_serial, serial_rules))
+            result["issues"].extend(result["write_refusals"])
             result["can_import"] = len(result["issues"]) == 0
 
             if import_as_vm:

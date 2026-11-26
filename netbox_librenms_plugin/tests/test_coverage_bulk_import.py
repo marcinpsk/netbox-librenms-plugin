@@ -1042,83 +1042,74 @@ def test_bulk_confirmation_reuses_serial_rules_and_refreshes_them_next_request(c
     assert batch_reads == one_key_reads
 
 
-@pytest.mark.django_db
-@pytest.mark.parametrize("fits", [True, False])
-def test_the_bulk_confirmation_blocks_a_new_device_whose_serial_does_not_fit(client, live_librenms, fits):
-    """The import stores the LibreNMS serial, and the field holds 50 characters."""
+def _confirm(client, device_ids, tag):
+    """Post the bulk confirmation; return the row ids that its form submits and its text."""
+    import re
+    from html import unescape
+
     from django.urls import reverse
-    from django.utils.html import escape
 
-    from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
-
-    prerequisites = TestBulkImportIntegration()._prerequisites()
-    device_id = 291 if fits else 292
-    row = _libre_device(
-        device_id,
-        f"confirm-fit-{fits}",
-        serial="N" * (50 if fits else 51),
-        hardware=prerequisites["hardware"],
-        location=prerequisites["location"],
-    )
-    _register_device(live_librenms, row)
-    cache.set(get_import_device_cache_key(device_id, "default"), row, timeout=300)
-    client.force_login(make_superuser(f"confirm-fit-user-{fits}"))
-
+    client.force_login(make_superuser(f"confirm-{tag}-user"))
     response = client.post(
         reverse("plugins:netbox_librenms_plugin:bulk_import_confirm"),
-        {"server_key": "default", "select": [str(device_id)]},
+        {"server_key": "default", "select": [str(device_id) for device_id in device_ids]},
         HTTP_HX_REQUEST="true",
     )
-
     assert response.status_code == 200
-    (entry,) = response.context["devices"]
-    reason = "The LibreNMS serial has 51 characters; the field holds at most 50."
-    assert (reason in entry["validation"]["issues"]) is (not fits)
-    assert (escape(reason) in response.content.decode()) is (not fits)
+    content = response.content.decode()
+    submitted = [int(value) for value in re.findall(r'<input type="hidden" name="select" value="(\d+)">', content)]
+    # A form without a row has no Import button.
+    assert ("data-bulk-confirm-submit" in content) is bool(submitted)
+    return submitted, unescape(content)
+
+
+def _cached_row(device_id, tag, serial, prerequisites):
+    """Return a LibreNMS row of the import cache."""
+    from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
+
+    row = _libre_device(
+        device_id, tag, serial=serial, hardware=prerequisites["hardware"], location=prerequisites["location"]
+    )
+    cache.set(get_import_device_cache_key(device_id, "default"), row, timeout=300)
+    return row
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("fits", [True, False])
-def test_the_bulk_confirmation_blocks_a_stack_whose_member_serial_does_not_fit(client, live_librenms, fits):
-    """The import creates each stack member with its LibreNMS serial, and the field holds 50 characters."""
-    from django.urls import reverse
+def test_the_bulk_confirmation_blocks_a_new_device_whose_serial_does_not_fit(client, live_librenms):
+    """The import stores the LibreNMS serial, and the field holds 50 characters, so the form omits the long one."""
+    prerequisites = TestBulkImportIntegration()._prerequisites()
+    for device_id, length in ((291, 50), (292, 51)):
+        _register_device(live_librenms, _cached_row(device_id, f"confirm-fit-{length}", "N" * length, prerequisites))
 
-    from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
+    submitted, content = _confirm(client, [291, 292], "fit")
+
+    assert submitted == [291]
+    assert "Device ID 292 cannot be imported: The LibreNMS serial has 51 characters; the field holds at most 50." in (
+        content
+    )
+
+
+@pytest.mark.django_db
+def test_the_bulk_confirmation_blocks_a_stack_whose_member_serial_does_not_fit(client, live_librenms):
+    """The import creates each stack member with its LibreNMS serial, and the field holds 50 characters."""
     from netbox_librenms_plugin.tests.test_virtual_chassis_fallbacks import _seed_stack
 
     prerequisites = TestBulkImportIntegration()._prerequisites()
-    device_id = 293 if fits else 294
-    row = _libre_device(
-        device_id,
-        f"confirm-stack-fit-{fits}",
-        serial=f"STACK-MASTER-{device_id}",
-        hardware=prerequisites["hardware"],
-        location=prerequisites["location"],
-    )
-    _seed_stack(live_librenms.server, device_id, serials=(row["serial"], "N" * (50 if fits else 51)))
-    cache.set(get_import_device_cache_key(device_id, "default"), row, timeout=300)
-    client.force_login(make_superuser(f"confirm-stack-fit-user-{fits}"))
+    for device_id, length in ((293, 50), (294, 51)):
+        row = _cached_row(device_id, f"confirm-stack-fit-{length}", f"STACK-MASTER-{device_id}", prerequisites)
+        _seed_stack(live_librenms.server, device_id, serials=(row["serial"], "N" * length))
 
-    response = client.post(
-        reverse("plugins:netbox_librenms_plugin:bulk_import_confirm"),
-        {"server_key": "default", "select": [str(device_id)]},
-        HTTP_HX_REQUEST="true",
-    )
+    submitted, content = _confirm(client, [293, 294], "stack-fit")
 
-    assert response.status_code == 200
-    (entry,) = response.context["devices"]
-    assert entry["validation"]["virtual_chassis"]["master_identified"]
+    assert submitted == [293]
     reason = "Stack member 2: The LibreNMS serial has 51 characters; the field holds at most 50."
-    assert (reason in entry["validation"]["issues"]) is (not fits)
+    assert f"Device ID 294 cannot be imported: {reason}" in content
 
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("held", [True, False])
 def test_the_bulk_confirmation_checks_only_the_stack_members_that_the_import_creates(client, live_librenms, held):
     """A member serial that keys to an existing Device is skipped at import, so its length blocks nothing."""
-    from django.urls import reverse
-
-    from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
     from netbox_librenms_plugin.tests.test_virtual_chassis_fallbacks import _seed_stack, _seeded_serial_rule
 
     _seeded_serial_rule()
@@ -1126,37 +1117,20 @@ def test_the_bulk_confirmation_checks_only_the_stack_members_that_the_import_cre
     if held:
         make_device("confirm-stack-holder", serial="N" * 47)
     device_id = 295 if held else 296
-    row = _libre_device(
-        device_id,
-        f"confirm-stack-held-{held}",
-        serial=f"STACK-MASTER-{device_id}",
-        hardware=prerequisites["hardware"],
-        location=prerequisites["location"],
-    )
+    row = _cached_row(device_id, f"confirm-stack-held-{held}", f"STACK-MASTER-{device_id}", prerequisites)
     _seed_stack(live_librenms.server, device_id, serials=(row["serial"], f"S/N {'N' * 47}"))
-    cache.set(get_import_device_cache_key(device_id, "default"), row, timeout=300)
-    client.force_login(make_superuser(f"confirm-stack-held-user-{held}"))
 
-    response = client.post(
-        reverse("plugins:netbox_librenms_plugin:bulk_import_confirm"),
-        {"server_key": "default", "select": [str(device_id)]},
-        HTTP_HX_REQUEST="true",
-    )
+    submitted, content = _confirm(client, [device_id], f"stack-held-{held}")
 
-    assert response.status_code == 200
-    (entry,) = response.context["devices"]
-    assert entry["validation"]["virtual_chassis"]["master_identified"]
+    assert submitted == ([device_id] if held else [])
     reason = "Stack member 2: The LibreNMS serial has 51 characters; the field holds at most 50."
-    assert (reason in entry["validation"]["issues"]) is (not held)
+    assert (reason in content) is (not held)
 
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("case", ["unavailable", "ambiguous", "uncertain", "free"])
 def test_the_bulk_confirmation_blocks_a_stack_member_that_the_writer_refuses(client, live_librenms, case):
-    """The member writer refuses the whole stack for these member serials; validation says so."""
-    from django.urls import reverse
-
-    from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
+    """The member writer refuses the whole stack for these member serials, so the form omits the stack."""
     from netbox_librenms_plugin.models import NormalizationRule
     from netbox_librenms_plugin.serial_identity import UNAVAILABLE_MASTER_LINK
     from netbox_librenms_plugin.tests.test_coverage_device_operations import _stray_chassis_member
@@ -1178,25 +1152,11 @@ def test_the_bulk_confirmation_blocks_a_stack_member_that_the_writer_refuses(cli
         make_device("confirm-stack-holder", serial=member_serial[: -len("-X")])
         issue += "a NetBox device stores a serial that can be the same member. Check the serials manually."
     device_id = 297 + ["unavailable", "ambiguous", "uncertain", "free"].index(case) * 2
-    row = _libre_device(
-        device_id,
-        f"confirm-stack-refused-{case}",
-        serial=f"STACK-MASTER-{device_id}",
-        hardware=prerequisites["hardware"],
-        location=prerequisites["location"],
-    )
+    row = _cached_row(device_id, f"confirm-stack-refused-{case}", f"STACK-MASTER-{device_id}", prerequisites)
     _seed_stack(live_librenms.server, device_id, serials=(row["serial"], member_serial))
-    cache.set(get_import_device_cache_key(device_id, "default"), row, timeout=300)
-    client.force_login(make_superuser(f"confirm-stack-refused-user-{case}"))
 
-    response = client.post(
-        reverse("plugins:netbox_librenms_plugin:bulk_import_confirm"),
-        {"server_key": "default", "select": [str(device_id)]},
-        HTTP_HX_REQUEST="true",
-    )
+    submitted, content = _confirm(client, [device_id], f"stack-refused-{case}")
 
-    assert response.status_code == 200
-    (entry,) = response.context["devices"]
-    assert entry["validation"]["virtual_chassis"]["master_identified"]
     # The text of the member writer's refusal.
-    assert (issue in entry["validation"]["issues"]) is (case != "free")
+    assert submitted == ([device_id] if case == "free" else [])
+    assert (f"Device ID {device_id} cannot be imported: {issue}" in content) is (case != "free")

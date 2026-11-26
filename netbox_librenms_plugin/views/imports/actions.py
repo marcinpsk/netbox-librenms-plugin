@@ -1272,6 +1272,10 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 include_vc_detection=True,
                 serial_rules=serial_rules,
             )
+            # The import writer refuses this row, so the form does not submit it. The text names only LibreNMS data.
+            if validation["write_refusals"]:
+                errors.append(f"Device ID {device_id} cannot be imported: {'; '.join(validation['write_refusals'])}")
+                continue
             # Mark validation with VC detection flag for proper URL generation in table
             # Bulk confirm should respect the initial filter's VC detection preference
             validation["_vc_detection_enabled"] = vc_detection_enabled
