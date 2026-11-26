@@ -311,12 +311,12 @@ def _vc_serials_modal(items):
     source = (templates / "netbox_librenms_plugin/librenms_sync_base.html").read_text()
     # The dialog is the body of one {% if %} block, so the slice holds balanced tags.
     start = source.index("<!-- VC Member Serials Modal -->")
-    dialog = source[start : source.index("{% endif %}", source.index("</table>", start))]
+    dialog = source[start : source.index("{% endif %}", source.index("</form>", start))]
     members = [SimpleNamespace(pk=pk, name=f"core-stack-building-a-m{pk}") for pk in (1, 2)]
     context = {
         "object": SimpleNamespace(pk=1),
         "vc_inventory_serials": items,
-        "vc_serial_members": members,
+        "vc_member_choices": members,
         "csrf_token": "test-token",
     }
     return engine.from_string(dialog).render(Context(context, use_l10n=False))

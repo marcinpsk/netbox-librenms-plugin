@@ -326,7 +326,7 @@ class TestRemoveServerMappingView:
 
         vm = make_vm("remove-orphaned-vm-mapping")
         seed_mapping(vm, "orphaned-server", own=42)
-        user = make_user_with_perms("remove-orphaned-vm-writer", [("change", VirtualMachine)])
+        user = make_user_with_perms("remove-orphaned-vm-writer", [("view", VirtualMachine), ("change", VirtualMachine)])
         client.force_login(user)
 
         response = client.post(
@@ -435,7 +435,7 @@ class TestRemoveServerMappingView:
 
         device = make_device("remove-orphaned-device-mapping", librenms_cf={"orphaned-server": 42})
         Device.objects.filter(pk=device.pk).update(face="front")
-        user = make_user_with_perms("remove-orphaned-device-writer", [("change", Device)])
+        user = make_user_with_perms("remove-orphaned-device-writer", [("view", Device), ("change", Device)])
         client.force_login(user)
 
         response = client.post(

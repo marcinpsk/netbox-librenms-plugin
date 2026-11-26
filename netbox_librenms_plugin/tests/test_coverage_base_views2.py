@@ -10,7 +10,14 @@ import json
 
 import pytest
 
-from netbox_librenms_plugin.tests.source_snapshot_helpers import link_row, port_row, sensor_row, seed_cables_snapshot
+from netbox_librenms_plugin.tests.source_snapshot_helpers import (
+    ip_address_row,
+    link_row,
+    port_row,
+    seed_cables_snapshot,
+    seed_ip_snapshot,
+    sensor_row,
+)
 from django.core.cache import cache
 from django.http import Http404
 
@@ -175,7 +182,7 @@ class TestIPAddressVerifyHelpers:
     def test_existing_global_address_returns_its_real_url(self):
         ip = make_ip("198.18.3.1/24")
 
-        exists, in_vrf, url = self._view()._find_existing_ip("198.18.3.1", 24)
+        exists, in_vrf, url = self._view()._find_existing_ip([ip])
 
         assert exists is True
         assert in_vrf is True
@@ -189,7 +196,7 @@ class TestIPAddressVerifyHelpers:
         ip.vrf = vrf
         ip.save(update_fields=["vrf"])
 
-        exists, in_vrf, url = self._view()._find_existing_ip("198.18.4.1", 24)
+        exists, in_vrf, url = self._view()._find_existing_ip([ip])
 
         assert exists is True
         assert in_vrf is False
@@ -263,9 +270,10 @@ class TestIPAddressVerifyEndpoint:
         assert _json(response)["message"] == "Object with ID 2147483647 not found"
 
     def test_existing_address_in_selected_vrf_renders_synced(self):
-        device = make_device("ip-existing")
+        device = make_device("ip-existing", librenms_cf={"default": {"id": 48}})
         interface = make_interface(device, "Ethernet8")
         make_ip("198.18.8.1/24", assigned_object=interface)
+        seed_ip_snapshot(device, [ip_address_row("198.18.8.1", 8)], [{"port_id": 8, "ifName": "Ethernet8"}])
 
         response = _post_ip(
             {
@@ -281,9 +289,10 @@ class TestIPAddressVerifyEndpoint:
     def test_existing_address_in_a_different_vrf_renders_update(self):
         from ipam.models import VRF
 
-        device = make_device("ip-update")
+        device = make_device("ip-update", librenms_cf={"default": {"id": 49}})
         interface = make_interface(device, "Ethernet9")
         make_ip("198.18.9.1/24", assigned_object=interface)
+        seed_ip_snapshot(device, [ip_address_row("198.18.9.1", 9)], [{"port_id": 9, "ifName": "Ethernet9"}])
         vrf = VRF.objects.create(name="new-vrf", rd="64512:10")
 
         response = _post_ip(

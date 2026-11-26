@@ -211,7 +211,7 @@ def _ip_writer(tag, *, device_change=None, ip_change=None):
     from ipam.models import VRF, IPAddress
 
     user = make_user_with_perms(
-        f"{tag}-user", [("view", Device), ("view", Interface), ("view", VRF), ("add", IPAddress)]
+        f"{tag}-user", [("view", Device), ("view", Interface), ("view", VRF), ("view", IPAddress), ("add", IPAddress)]
     )
     user = grant(user, "change", Device, constraints=device_change)
     return grant(user, "change", IPAddress, constraints=ip_change)
@@ -374,7 +374,14 @@ def test_an_existing_interface_that_the_ip_tab_writes_out_of_the_change_scope_is
     )
     user = make_user_with_perms(
         "rb-ip-interface-user",
-        [("view", Device), ("view", Interface), ("add", Interface), ("add", IPAddress), ("change", IPAddress)],
+        [
+            ("view", Device),
+            ("view", Interface),
+            ("add", Interface),
+            ("view", IPAddress),
+            ("add", IPAddress),
+            ("change", IPAddress),
+        ],
     )
     client.force_login(grant(user, "change", Interface, constraints={"description": ""}))
 
@@ -510,7 +517,7 @@ def test_an_interface_move_out_of_the_interface_change_scope_is_rolled_back(clie
 
     donor, _winner = _migrated_pair("rb-move-interface")
     interface = make_interface(donor, "Ethernet1")
-    user = make_user_with_perms("rb-move-interface-user", [("change", Device)])
+    user = make_user_with_perms("rb-move-interface-user", [("view", Device), ("change", Device), ("view", Interface)])
     client.force_login(grant(user, "change", Interface, constraints={"device__name": donor.name}))
 
     response = _post_move(client, "interface_move_to_winner", interface.pk)
@@ -524,7 +531,7 @@ def test_an_interface_move_out_of_the_interface_change_scope_is_rolled_back(clie
 
 @pytest.mark.django_db
 def test_an_ip_move_out_of_the_ip_change_scope_is_rolled_back(client, flushed_events):
-    from dcim.models import Device
+    from dcim.models import Device, Interface
     from ipam.models import IPAddress
 
     from netbox_librenms_plugin.tests.conftest import make_ip
@@ -533,7 +540,9 @@ def test_an_ip_move_out_of_the_ip_change_scope_is_rolled_back(client, flushed_ev
     donor_interface = make_interface(donor, "Ethernet1")
     make_interface(winner, "Ethernet1")
     address = make_ip("198.18.73.51/24", assigned_object=donor_interface)
-    user = make_user_with_perms("rb-move-ip-user", [("change", Device)])
+    user = make_user_with_perms(
+        "rb-move-ip-user", [("view", Device), ("change", Device), ("view", Interface), ("view", IPAddress)]
+    )
     client.force_login(grant(user, "change", IPAddress, constraints={"assigned_object_id": donor_interface.pk}))
 
     response = _post_move(client, "ipaddress_move_to_winner", address.pk)

@@ -2,12 +2,11 @@
 
 from collections import defaultdict
 from dataclasses import dataclass
+from enum import StrEnum
 from ipaddress import ip_interface
-from dcim.models import Device, Interface
+
 from django.contrib.contenttypes.models import ContentType
-from django.db.models import Q
-from ipam.models import IPAddress, VRF
-from virtualization.models import VMInterface
+from ipam.models import VRF
 
 from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.acquisition.resources import port_vrf_id
@@ -18,16 +17,22 @@ from netbox_librenms_plugin.ip_rules import IPRuleMatcher, row_ip_rule_block
 from netbox_librenms_plugin.ip_addressing import parse_librenms_ip_entry
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id, normalize_librenms_port_id
 from netbox_librenms_plugin.server_mappings import read_mapping
+from netbox_librenms_plugin.sync_view_scope import WITHHELD, SyncViewScope, VisibleInterface
 from netbox_librenms_plugin.utils import (
-    get_virtual_chassis_members,
     identify_ip_sync_rows,
-    index_ip_source_interfaces,
     index_ip_port_records,
     ip_row_port_record,
     PortDisclosure,
-    resolve_ip_source_interface,
     same_host,
 )
+
+
+class ViewBlock(StrEnum):
+    """Why an object that the actor cannot view blocks an IP row; the row then carries no NetBox identity."""
+
+    ADDRESS = "address"
+    HELD_ON_HIDDEN_INTERFACE = "held_on_hidden_interface"
+    INTERFACE = "interface"
 
 
 def decide_ip_row_rule(rules, ip_with_mask, vrf_id, interface, netbox_addresses):
@@ -42,7 +47,8 @@ def decide_ip_row_rule(rules, ip_with_mask, vrf_id, interface, netbox_addresses)
         ip_with_mask (str): The row's address with its prefix length.
         vrf_id (int | None): The VRF the row's select shows; None is Global.
         interface (Interface | VMInterface | None): The interface the row resolves to.
-        netbox_addresses (Iterable[IPAddress]): The NetBox addresses equal to the row's address.
+        netbox_addresses (Iterable[IPAddress]): The viewable NetBox addresses equal to the row's address;
+            a blocked address never reaches this rule.
 
     Returns:
         tuple[IPRule | None, bool]: The ignoring mapping, and whether the row shows Synced.
@@ -59,15 +65,6 @@ def decide_ip_row_rule(rules, ip_with_mask, vrf_id, interface, netbox_addresses)
         for ip in netbox_addresses
     )
     return rule, held
-
-
-def interface_scope(subject, actor):
-    """Return the visible owners and their visible interfaces."""
-    if isinstance(subject, Device):
-        member_ids = [member.pk for member in get_virtual_chassis_members(subject)]
-        owners = list(Device.objects.restrict(actor, "view").filter(pk__in=member_ids))
-        return owners, list(Interface.objects.restrict(actor, "view").filter(device__in=owners))
-    return [subject], list(VMInterface.objects.restrict(actor, "view").filter(virtual_machine=subject))
 
 
 def _port_key(port_id):
@@ -233,27 +230,37 @@ class _Assessment:
         interface_name_field = self.interface_name_field
         mgmt_ip = _management_ip(snapshot.value(resource, "device"))
 
+        scope = SyncViewScope.for_request(self.actor, obj, server_key)
         source_address_counts = defaultdict(int)
         for ip_entry in ip_data:
             source_address_counts[str(parse_librenms_ip_entry(ip_entry))] += 1
         # Only an address LibreNMS reported can match a row, so scope the NetBox IP scan to them.
-        prefetched_data = self._prefetch_netbox_data(obj, set(source_address_counts), server_key)
+        address_states = scope.address_states(source_address_counts)
+        bound_port_keys = {
+            _port_key(port_id)
+            for interface in scope.interfaces()
+            if (port_id := read_mapping(interface).own_id(server_key)) is not None
+        }
         ports_by_id, bound_ports_by_id = _index_snapshot_ports(
-            snapshot.value(resource, "ports"), ip_data, set(prefetched_data["interfaces_by_librenms_id"])
+            snapshot.value(resource, "ports"), ip_data, bound_port_keys
         )
+        # The dropdown lists only VRFs the user may view; identity matching is scoped separately.
+        vrfs = list(VRF.objects.restrict(self.actor, "view"))
         rows = self._enrich_rows(
             ip_data,
             obj,
             interface_name_field,
-            prefetched_data,
+            scope,
+            address_states,
+            vrfs,
             source_address_counts,
             ports_by_id,
             _vrf_identities(ports_by_id, ip_data, vrf_rows),
         )
-        assignments = [(row, interface) for row, interface in rows if interface is not None]
-        self._add_rule_blocks(assignments, (ports_by_id, bound_ports_by_id), server_key, prefetched_data)
-        enriched_data = [row for row, _interface in rows]
-        self._add_ip_rule_blocks(rows, prefetched_data["ip_addresses_map"], {vrf.pk for vrf in prefetched_data["vrfs"]})
+        assignments = [(row, target) for row, target in rows if target is not None]
+        self._add_rule_blocks(assignments, (ports_by_id, bound_ports_by_id), server_key)
+        enriched_data = [row for row, _target in rows]
+        self._add_ip_rule_blocks(rows, address_states, {vrf.pk for vrf in vrfs})
         self._flag_management_ip(enriched_data, mgmt_ip)
         return IPAssessment(
             rows=identify_ip_sync_rows(enriched_data),
@@ -264,70 +271,75 @@ class _Assessment:
         )
 
     def _enrich_rows(
-        self, ip_data, obj, interface_name_field, prefetched_data, source_address_counts, ports_by_id, vrf_identities
+        self,
+        ip_data,
+        obj,
+        interface_name_field,
+        scope,
+        address_states,
+        vrfs,
+        source_address_counts,
+        ports_by_id,
+        vrf_identities,
     ):
         """
         Enrich each IP row with its NetBox address, interface and VRF suggestion.
 
+        A row that an object the actor cannot view blocks gets :class:`ViewBlock` and no NetBox
+        identity: no address, no interface, no VRF suggestion and no create.
+
         Returns:
-            list[tuple[dict, Interface | VMInterface | None]]: Each enriched row and its target interface.
+            list[tuple[dict, VisibleInterface | None]]: Each enriched row and its target interface.
 
         """
-        # A matching VRF the user cannot view still blocks a create; only a viewable one
-        # is ever suggested or listed.
-        candidate_rds = {identity["rd"] for identity in vrf_identities.values() if identity["rd"]}
-        candidate_names = {identity["name"] for identity in vrf_identities.values()}
-        candidate_vrfs = VRF.objects.filter(Q(rd__in=candidate_rds) | Q(name__in=candidate_names))
-        vrf_suggestions = self._load_vrf_suggestions(vrf_identities, candidate_vrfs)
-        visible_vrf_ids = {vrf.pk for vrf in prefetched_data["vrfs"]}
-
-        enriched = []
+        vrf_matches = scope.vrf_matches(vrf_identities)
+        bases = []
         for ip_entry in ip_data:
             port_info = ports_by_id.get(_port_key(ip_entry["port_id"]))
-            enriched_ip = self._create_base_ip_entry(ip_entry, obj, prefetched_data["vrfs"])
-            librenms_interface_name = None
+            enriched_ip = self._create_base_ip_entry(ip_entry, obj, vrfs)
             if port_info:
-                librenms_interface_name = port_info.get(interface_name_field)
-                enriched_ip["interface_name"] = librenms_interface_name
+                enriched_ip["interface_name"] = port_info.get(interface_name_field)
+            bases.append(enriched_ip)
+        targets = scope.resolve_ip_interfaces(
+            {"port_id": row["port_id"], "interface_name": row.get("interface_name")} for row in bases
+        )
 
-            ip_address = self._matching_netbox_ip(enriched_ip, source_address_counts, prefetched_data)
+        enriched = []
+        for enriched_ip, target in zip(bases, targets, strict=True):
+            state = address_states[enriched_ip["ip_with_mask"]]
+            view_block = self._view_block(state, target)
+            if view_block is not None:
+                enriched_ip["view_block"] = view_block
+                enriched_ip["status"] = "blocked"
+                enriched.append((enriched_ip, None))
+                continue
+            interface = target.interface if isinstance(target, VisibleInterface) else None
+            ip_address = self._matching_netbox_ip(enriched_ip, source_address_counts, state.visible, interface)
             if ip_address:
-                self._enrich_existing_ip(
-                    enriched_ip, ip_address, ip_entry["port_id"], librenms_interface_name, prefetched_data
-                )
-
-            # Add interface information (regardless of IP status)
-            interface = self._add_interface_info_to_ip(
-                enriched_ip, ip_entry["port_id"], librenms_interface_name, prefetched_data
-            )
-            self._add_vrf_suggestion(
-                enriched_ip,
-                _port_key(ip_entry["port_id"]),
-                vrf_identities,
-                vrf_suggestions,
-                visible_vrf_ids,
-            )
-            enriched.append((enriched_ip, interface))
+                self._enrich_existing_ip(enriched_ip, ip_address, interface)
+            if interface is not None:
+                enriched_ip["interface_name"] = interface.name
+                enriched_ip["netbox_interface"] = interface
+            self._add_vrf_suggestion(enriched_ip, vrf_identities.get(_port_key(enriched_ip["port_id"])), vrf_matches)
+            enriched.append((enriched_ip, target if interface is not None else None))
         return enriched
 
-    def _matching_netbox_ip(self, enriched_ip, source_address_counts, prefetched_data):
+    @staticmethod
+    def _view_block(state, target):
+        """Return why a hidden object blocks the row, or None; an address block wins over an interface block."""
+        if state.blocked:
+            return ViewBlock.HELD_ON_HIDDEN_INTERFACE if state.held_on_hidden_interface else ViewBlock.ADDRESS
+        return ViewBlock.INTERFACE if target is WITHHELD else None
+
+    def _matching_netbox_ip(self, enriched_ip, source_address_counts, ip_matches, interface):
         """
         Return the one NetBox address the row matches, or None, and set the row's status when none does.
 
         An address LibreNMS reports twice matches only on the row's own interface.
         """
         ip_with_mask = enriched_ip["ip_with_mask"]
-        ip_matches = prefetched_data["ip_addresses_map"].get(ip_with_mask, [])
         if source_address_counts[ip_with_mask] > 1:
-            source_interface = resolve_ip_source_interface(
-                enriched_ip,
-                prefetched_data["interfaces_by_librenms_id"],
-                prefetched_data["interfaces_by_name"],
-                server_key=prefetched_data["server_key"],
-            )
-            ip_matches = [
-                ip for ip in ip_matches if source_interface is not None and ip.assigned_object == source_interface
-            ]
+            ip_matches = [ip for ip in ip_matches if interface is not None and ip.assigned_object == interface]
         global_matches = [ip for ip in ip_matches if ip.vrf_id is None]
         ip_address = global_matches[0] if len(global_matches) == 1 else None
         if ip_address is None and len(ip_matches) == 1:
@@ -361,117 +373,29 @@ class _Assessment:
                 entry["is_mgmt_ip"] = True
                 break
 
-    def _prefetch_netbox_data(self, obj, candidate_addresses, server_key):
-        """
-        Prefetch all necessary NetBox data to minimize database queries.
-
-        Args:
-            obj: The NetBox device or virtual machine the IP rows belong to.
-            candidate_addresses: The ``address/prefix`` strings LibreNMS reported. Only these
-                can match a row, so the IPAddress scan is restricted to them.
-            server_key: The LibreNMS server key scoping per-server interface matching.
-
-        Returns:
-            dict: The interface, IP, and VRF lookup maps used during enrichment.
-        """
-        owners, all_interfaces = interface_scope(obj, self.actor)
-        obj_device_id = obj.pk if isinstance(obj, Device) else None
-        interfaces_by_librenms_id, interfaces_by_name = index_ip_source_interfaces(
-            all_interfaces, server_key, obj_device_id
-        )
-
-        # Get the NetBox rows for the reported addresses only
-        ip_addresses_map = defaultdict(list)
-        if candidate_addresses:
-            for ip in IPAddress.objects.filter(address__in=list(candidate_addresses)).select_related(
-                "assigned_object_type", "vrf"
-            ):
-                # NetBox renders through netaddr ("::192.0.2.1/128") while the candidate keys come
-                # from the ipaddress module ("::c000:201/128"). Normalise with the same parser so
-                # an IPv4-compatible IPv6 row still matches.
-                ip_addresses_map[str(ip_interface(str(ip.address)))].append(ip)
-
-        # The dropdown lists only VRFs the user may view; identity matching is scoped separately.
-        vrfs = list(VRF.objects.restrict(self.actor, "view"))
-
-        return {
-            "interfaces_by_librenms_id": interfaces_by_librenms_id,
-            "interfaces_by_name": interfaces_by_name,
-            "server_key": server_key,
-            "all_interfaces": all_interfaces,
-            "owner_by_id": {owner.pk: owner for owner in owners},
-            "device": obj,
-            "ip_addresses_map": ip_addresses_map,
-            "vrfs": vrfs,
-        }
-
-    def _load_vrf_suggestions(self, vrf_identities, netbox_vrfs):
-        """
-        Match the snapshot's LibreNMS VRF identities to current NetBox VRFs.
-
-        Args:
-            vrf_identities: LibreNMS VRF identities keyed by :func:`_port_key`.
-            netbox_vrfs: NetBox VRFs available in the dropdown.
-
-        Returns:
-            dict: Per port, the suggested NetBox VRF and its source data, or ``{"create": True}``
-                when no NetBox VRF has the identity's route distinguisher or name. A value that
-                two NetBox VRFs claim gets neither.
-
-        """
-        netbox_by_rd = defaultdict(list)
-        netbox_by_name = defaultdict(list)
-        for vrf in netbox_vrfs:
-            if vrf.rd:
-                netbox_by_rd[str(vrf.rd)].append(vrf)
-            netbox_by_name[vrf.name].append(vrf)
-        unique_netbox_by_rd = {rd: matches[0] for rd, matches in netbox_by_rd.items() if len(matches) == 1}
-        unique_netbox_by_name = {name: matches[0] for name, matches in netbox_by_name.items() if len(matches) == 1}
-
-        suggestions = {}
-        for port_key, identity in vrf_identities.items():
-            target = unique_netbox_by_rd.get(identity["rd"]) if isinstance(identity["rd"], str) else None
-            matched_by = "route distinguisher"
-            if target is None:
-                target = unique_netbox_by_name.get(identity["name"])
-                matched_by = "name"
-                # A name match must not cross into another routing domain.
-                if target is not None and identity["rd"] and target.rd and str(target.rd) != identity["rd"]:
-                    target = None
-            if target is None:
-                # Any VRF with the RD or the name, an ambiguous one too, rules out a create.
-                if identity["rd"] not in netbox_by_rd and identity["name"] not in netbox_by_name:
-                    suggestions[port_key] = {"create": True}
-                continue
-            suggestions[port_key] = {
-                "vrf_id": target.pk,
-                "source": {"name": identity["name"], "matched_by": matched_by},
-            }
-        return suggestions
-
     @staticmethod
-    def _add_vrf_suggestion(enriched_ip, port_key, vrf_identities, vrf_suggestions, visible_vrf_ids):
+    def _add_vrf_suggestion(enriched_ip, librenms_vrf, vrf_matches):
         """
         Carry the source identity, and suggest or offer a create only for an address NetBox does not hold.
 
         This is the one eligibility rule for the row's Create VRF action: the endpoint re-derives
         the row through it and refuses a row that does not carry ``vrf_create_url``.
         """
-        librenms_vrf = vrf_identities.get(port_key)
-        if librenms_vrf is not None:
-            enriched_ip["librenms_vrf"] = librenms_vrf
+        if librenms_vrf is None:
+            return
+        enriched_ip["librenms_vrf"] = librenms_vrf
         # `exists`, not just `vrf_id`: an address already in the Global table has no vrf_id either,
         # and preselecting a VRF on it contradicts the "Synced" status the row renders.
         if enriched_ip.get("vrf_id") is not None or enriched_ip.get("exists"):
             return
-        suggestion = vrf_suggestions.get(port_key)
-        if suggestion is not None and suggestion.get("create"):
+        match = vrf_matches[_port_key(enriched_ip["port_id"])]
+        if not match.blocks_create:
             enriched_ip["can_create_vrf"] = True
-        elif suggestion is not None and suggestion["vrf_id"] in visible_vrf_ids:
+        elif match.suggested is not None:
             # Its own key, never vrf_id: that one means "the VRF NetBox has for this row", and the
             # verify path reads it to decide whether an address is already synced.
-            enriched_ip["suggested_vrf_id"] = suggestion["vrf_id"]
-            enriched_ip["vrf_suggested_from"] = suggestion["source"]
+            enriched_ip["suggested_vrf_id"] = match.suggested.pk
+            enriched_ip["vrf_suggested_from"] = {"name": librenms_vrf["name"], "matched_by": match.matched_by}
 
     def _create_base_ip_entry(self, ip_entry, obj, vrfs):
         """Create the base data structure for an IP entry."""
@@ -491,17 +415,7 @@ class _Assessment:
         }
         return entry
 
-    @staticmethod
-    def _resolve_ip_row_interface(port_id, librenms_interface_name, prefetched_data):
-        """Resolve one row's source interface, so both callers agree on the row shape."""
-        return resolve_ip_source_interface(
-            {"port_id": port_id, "interface_name": librenms_interface_name},
-            prefetched_data["interfaces_by_librenms_id"],
-            prefetched_data["interfaces_by_name"],
-            server_key=prefetched_data["server_key"],
-        )
-
-    def _enrich_existing_ip(self, enriched_ip, ip_address, port_id, librenms_interface_name, prefetched_data):
+    def _enrich_existing_ip(self, enriched_ip, ip_address, interface):
         """Add information for IP addresses that exist in NetBox."""
         enriched_ip["netbox_ip"] = ip_address
         enriched_ip["netbox_ip_id"] = ip_address.pk
@@ -516,27 +430,10 @@ class _Assessment:
         # Set initial status to update (will change to matched if criteria met)
         enriched_ip["status"] = "update"
 
-        # Only proceed if IP is assigned to an object
-        if not ip_address.assigned_object:
-            return
-
-        assigned_interface = ip_address.assigned_object
-
-        interface = self._resolve_ip_row_interface(port_id, librenms_interface_name, prefetched_data)
-        if interface is not None and assigned_interface == interface:
+        if interface is not None and ip_address.assigned_object == interface:
             enriched_ip["status"] = "matched"
-            enriched_ip["interface_name"] = interface.name
-            enriched_ip["netbox_interface"] = interface
 
-    def _add_interface_info_to_ip(self, enriched_ip, port_id, librenms_interface_name, prefetched_data):
-        """Add the same scoped interface that the sync writer will resolve, and return it."""
-        interface = self._resolve_ip_row_interface(port_id, librenms_interface_name, prefetched_data)
-        if interface is not None:
-            enriched_ip["interface_name"] = interface.name
-            enriched_ip["netbox_interface"] = interface
-        return interface
-
-    def _add_rule_blocks(self, assignments, port_caches, server_key, prefetched_data):
+    def _add_rule_blocks(self, assignments, port_caches, server_key):
         """
         Stamp, on every row, the decision the IP sync makes before it assigns the address.
 
@@ -544,10 +441,9 @@ class _Assessment:
         queries per render.
 
         Args:
-            assignments (list[tuple[dict, Interface | VMInterface]]): Each row and its target.
+            assignments (list[tuple[dict, VisibleInterface]]): Each row and its target.
             port_caches (tuple[dict, dict]): The snapshot's row and bound port records.
             server_key (str): The LibreNMS server whose bindings count.
-            prefetched_data (dict): The owners from :meth:`_prefetch_netbox_data`.
 
         """
         if not assignments:
@@ -556,15 +452,9 @@ class _Assessment:
         decided = [
             (
                 enriched_ip,
-                ip_assignment_ports(
-                    *port_indexes,
-                    enriched_ip["port_id"],
-                    interface,
-                    server_key,
-                    prefetched_data["owner_by_id"][self._interface_owner_id(interface)],
-                ),
+                ip_assignment_ports(*port_indexes, enriched_ip["port_id"], target.interface, server_key, target.owner),
             )
-            for enriched_ip, interface in assignments
+            for enriched_ip, target in assignments
         ]
         rules = InterfaceRuleMatcher.load()
         if not rules.ignores_any_port:
@@ -575,27 +465,30 @@ class _Assessment:
             if (blocked := rules.first_blocked_port(ports, disclose)) is not None:
                 enriched_ip["rule_block"] = row_rule_block(*blocked)
 
-    def _add_ip_rule_blocks(self, row_interfaces, ip_addresses_map, visible_vrf_ids):
+    def _add_ip_rule_blocks(self, row_targets, address_states, visible_vrf_ids):
         """
         Stamp each row whose address an IP mapping ignores in the VRF the row selects first.
 
         The VRF select shows the row's NetBox VRF or its suggested VRF when the user may view it,
         else Global. A VRF change re-decides the row in ``SingleIPAddressVerifyView``, with the same
-        :func:`decide_ip_row_rule`.
+        :func:`decide_ip_row_rule`. A view-blocked row is not decided: the block wins.
 
         Args:
-            row_interfaces (list[tuple[dict, Interface | VMInterface | None]]): Each row and its interface.
-            ip_addresses_map (dict): The NetBox addresses by ``address/prefix``.
+            row_targets (list[tuple[dict, VisibleInterface | None]]): Each row and its interface.
+            address_states (dict): The :class:`AddressState` of each ``address/prefix``.
             visible_vrf_ids (set[int]): The VRFs the select lists.
 
         """
         rules = IPRuleMatcher.load()
-        for enriched_ip, interface in row_interfaces:
+        for enriched_ip, target in row_targets:
+            if enriched_ip.get("view_block") is not None:
+                continue
             shown = (enriched_ip["vrf_id"], enriched_ip.get("suggested_vrf_id"))
             vrf_id = next((pk for pk in shown if pk is not None and pk in visible_vrf_ids), None)
             ip_with_mask = enriched_ip["ip_with_mask"]
+            interface = target.interface if target is not None else None
             rule, held = decide_ip_row_rule(
-                rules, ip_with_mask, vrf_id, interface, ip_addresses_map.get(ip_with_mask, ())
+                rules, ip_with_mask, vrf_id, interface, address_states[ip_with_mask].visible
             )
             if rule is None:
                 continue
@@ -605,11 +498,6 @@ class _Assessment:
             elif enriched_ip["status"] == "matched":
                 # The row's interface holds the address only in a VRF that the select does not show.
                 enriched_ip["status"] = "update"
-
-    @staticmethod
-    def _interface_owner_id(interface):
-        """Return the pk of the Device or VirtualMachine that owns *interface*."""
-        return interface.device_id if isinstance(interface, Interface) else interface.virtual_machine_id
 
 
 def assess(snapshot, *, subject, actor, interface_name_field):
