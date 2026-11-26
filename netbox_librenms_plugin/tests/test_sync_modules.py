@@ -80,12 +80,13 @@ class TestInstallSerialRulePreloading:
             incoming=[item["entPhysicalSerialNum"] for item in items],
             rules=kwargs.get("serial_rules"),
         ).lock_module_types([module_type.pk])
+        results = []
         with (
             patch.object(InstallBranchView, "_find_parent_module_id", return_value=None),
             patch.object(BaseModuleTableView, "_match_bay_for_item", side_effect=lambda *a, **kw: remaining.pop(0)),
         ):
             for item in items:
-                InstallBranchView._install_single(
+                result = InstallBranchView._install_single(
                     device,
                     item,
                     {module_type.model: module_type},
@@ -103,6 +104,8 @@ class TestInstallSerialRulePreloading:
                     norm_rules_bay={},
                     **kwargs,
                 )
+                results.append(result["status"])
+        return results
 
     @staticmethod
     def _rule_queries(captured):
@@ -110,6 +113,7 @@ class TestInstallSerialRulePreloading:
 
     def test_preloaded_serial_rules_replace_the_per_item_rule_queries(self):
         """Without preloaded rules every installed item re-reads the serial rules."""
+        from dcim.models import Module
         from django.db import connection
         from django.test.utils import CaptureQueriesContext
 
@@ -121,7 +125,10 @@ class TestInstallSerialRulePreloading:
         first_bays = [make_module_bay(device, "Slot 1"), make_module_bay(device, "Slot 2")]
 
         with CaptureQueriesContext(connection) as per_item:
-            self._install_two_items(device, first_bays, module_type)
+            installed = self._install_two_items(device, first_bays, module_type)
+
+        assert installed == ["installed", "installed"]
+        assert set(Module.objects.filter(device=device).values_list("serial", flat=True)) == {"S/N SN10", "S/N SN11"}
 
         # Two items, so the unpreloaded path reads the rule table more than once.
         assert len(self._rule_queries(per_item)) >= 2, self._rule_queries(per_item)
@@ -130,7 +137,10 @@ class TestInstallSerialRulePreloading:
         second_bays = [make_module_bay(other, "Slot 1"), make_module_bay(other, "Slot 2")]
 
         with CaptureQueriesContext(connection) as preloaded:
-            self._install_two_items(other, second_bays, module_type, serial_rules=SerialRules.load())
+            installed = self._install_two_items(other, second_bays, module_type, serial_rules=SerialRules.load())
+
+        assert installed == ["installed", "installed"]
+        assert set(Module.objects.filter(device=other).values_list("serial", flat=True)) == {"S/N SN10", "S/N SN11"}
 
         # The preload itself reads the serial rules once; the install loop then reads nothing.
         assert len(self._rule_queries(preloaded)) == 1, self._rule_queries(preloaded)
