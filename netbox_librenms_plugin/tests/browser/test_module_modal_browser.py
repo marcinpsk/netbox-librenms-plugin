@@ -219,6 +219,7 @@ def _mismatch_modal(**context):
         "csrf_token": "test-token",
         # The view offers Replace only when the delete scope covers both removal trees.
         "replace_in_delete_scope": True,
+        "replace_type_resolved": True,
         "replace_removal": {"count": 1, "names": ["Test Card"], "hidden": 0},
     }
     return engine.from_string(template.read_text()).render(Context({**base, **context}, use_l10n=False))
