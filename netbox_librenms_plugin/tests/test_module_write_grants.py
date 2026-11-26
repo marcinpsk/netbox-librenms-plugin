@@ -531,6 +531,29 @@ def test_the_preview_offers_replace_only_when_the_serial_holder_does_not_own_the
         assert [form["fields"].get("conflict_module_id") for form in forms] == [str(holder.pk)]
 
 
+@pytest.mark.parametrize("replacement", ["other-type", "same-type", "no-type"])
+def test_the_preview_offers_replace_only_for_a_model_that_resolves_to_a_module_type(ui, c8300, replacement):
+    """The Replace POST installs the resolved type, so a model that resolves to no type offers no Replace."""
+    from dcim.models import ModuleType
+
+    device, entities = c8300
+    installed_model = (
+        _nim(entities)[0] if replacement == "same-type" else entities[SERVICE_MODULE]["entPhysicalModelName"]
+    )
+    install_module(device, _bay_name(entities, REAL_NIM), installed_model, "OLD")
+    table = render(ui, device)
+    if replacement == "no-type":
+        # The table offered Replace for a resolved type; the type is gone when the dialog opens.
+        ModuleType.objects.get(model=_nim(entities)[0]).delete()
+
+    preview = ui.get(rendered_preview_url(table, REAL_NIM), HTTP_HX_REQUEST="true")
+
+    assert preview.status_code == 200, preview.content
+    html = preview.content.decode()
+    assert len(_replace_forms(html)) == (0 if replacement == "no-type" else 1)
+    assert ("data-replace-no-type" in html) is (replacement == "no-type")
+
+
 @pytest.mark.parametrize("owns_destination", [True, False], ids=["ancestor", "sibling"])
 def test_the_table_offers_move_only_when_the_serial_holder_does_not_own_the_bay(ui, c8300, owns_destination):
     """The table offers the same Move as the preview: never into a bay of the holder's own subtree."""

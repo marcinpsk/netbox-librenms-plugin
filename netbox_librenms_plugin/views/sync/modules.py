@@ -3005,6 +3005,8 @@ class ModuleMismatchPreviewView(
                 and module_move_serials_admitted(incoming, serial_conflict.serial, serial_context),
                 "serial_conflict_owns_bay": serial_conflict_owns_bay,
                 "replace_in_delete_scope": replace_in_delete_scope,
+                # The Replace POST refuses a LibreNMS model that resolves to no module type.
+                "replace_type_resolved": matched_type is not None,
                 "move_token": move_offer_token(serial_conflict, installed_module.module_bay_id, installed_tree)
                 if serial_conflict is not None
                 else "",
