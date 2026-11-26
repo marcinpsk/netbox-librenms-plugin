@@ -227,7 +227,7 @@ def test_a_refresh_keeps_the_record_of_the_port_bound_to_the_target_interface(cl
     The one IP row is on 7101. NetBox eth0 has its name but is bound to 7100, so the row has no
     target until the interfaces are synced. The record of 7100 is evidence only: it is not an IP row.
     """
-    from netbox_librenms_plugin.views.base.ip_addresses_view import assess_ip_snapshot
+    from netbox_librenms_plugin.views.base.ip_addresses_view import read_ip_assessment
 
     InterfaceTypeMapping.objects.create(action=IGNORE, name_pattern="^Vlan")
     device = make_device("ip-assign-refresh", librenms_cf={SERVER_KEY: {"id": DEVICE_ID}})
@@ -246,7 +246,7 @@ def test_a_refresh_keeps_the_record_of_the_port_bound_to_the_target_interface(cl
         HTTP_HX_REQUEST="true",
     )
     snapshot = source_cache.read(device, Resource.IP_ADDRESSES, SERVER_KEY)
-    assessment = assess_ip_snapshot(refreshed.wsgi_request, device, snapshot, SERVER_KEY)
+    assessment = read_ip_assessment(refreshed.wsgi_request, device, snapshot, SERVER_KEY)
     response = _sync(client, device, [_row("198.18.80.10", 7101)])
 
     assert refreshed.status_code == 200

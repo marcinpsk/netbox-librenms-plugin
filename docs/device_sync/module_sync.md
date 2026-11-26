@@ -4,7 +4,7 @@ The Module Sync tab lets you reconcile LibreNMS physical inventory (ENTITY-MIB, 
 
 ## How It Works
 
-When you open the Modules tab, the plugin fetches the ENTITY-MIB inventory tree from LibreNMS, merges in transceiver data from the LibreNMS transceiver API (used for vendors that don't expose SFPs via ENTITY-MIB), and compares each line-card, transceiver, fan, power supply, and other physical component against the NetBox module bays and installed modules for that device.
+Refresh Modules to acquire ENTITY-MIB inventory, ports and transceivers from LibreNMS. The plugin stores these source facts. Each tab render and module action repairs parents, merges transceivers and compares the assessed components with NetBox module bays and installed modules. A LibreNMS release without the transceivers route answers 404: the rows then show without transceiver data. A linked OOB controller has its own inventory source. Its failure blocks only the OOB rows.
 
 Slots and cages that only hold hardware get no row of their own. The hardware inside them gets the row. An entity is a holder when its model is `builtin`, `default` or `n/a`, when its model is empty and it has no serial, or when it is a `container` or `port` entity without a serial that is not identified as a transceiver. An entity with an empty model and a serial is hardware and keeps its row. For example, NX-OS reports its fan bays, power supply bays and port cages with a label as the model but with no serial. A container with a serial, such as a Junos FPC, is hardware and keeps its row.
 

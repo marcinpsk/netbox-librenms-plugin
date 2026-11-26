@@ -1,7 +1,5 @@
 """Unit tests for the shared utils helpers extracted to de-duplicate view logic.
 
-* ``is_valid_ports_payload``: the ports-payload shape gate of the module refresh paths. The
-  interfaces tab checks its ports through the ports contract of source acquisition.
 * ``resolve_server_mapping_display_id`` — the per-server display-id resolver (host id, else the
   nested OOB controller id) shared by the device-sync page and the import-validation modal.
 
@@ -14,7 +12,6 @@ from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
 from netbox_librenms_plugin.utils import (
     cached_row_matches,
-    is_valid_ports_payload,
     row_identity_matches,
 )
 
@@ -75,38 +72,6 @@ class TestRowIdentityMatches:
     def test_two_invalid_ids_do_not_match(self):
         # None == None must not read as a verified identity.
         assert row_identity_matches({"device_id": "abc"}, "abc") is False
-
-
-class TestIsValidPortsPayload:
-    @pytest.mark.parametrize(
-        "payload",
-        [
-            {"ports": [{"port_id": 1}, {"port_id": 2}]},
-            {"ports": [{}]},
-            {"ports": []},  # empty but well-formed
-            {"ports": [], "count": 0},  # extra keys are fine
-        ],
-    )
-    def test_valid_shapes(self, payload):
-        assert is_valid_ports_payload(payload) is True
-
-    @pytest.mark.parametrize(
-        "payload",
-        [
-            None,
-            [],
-            "ports",
-            42,
-            {},  # missing "ports" -> .get returns None, not a list
-            {"ports": None},
-            {"ports": {}},  # dict, not list
-            {"ports": "x"},
-            {"ports": [{}, 5]},  # a non-dict row
-            {"ports": [None]},
-        ],
-    )
-    def test_invalid_shapes(self, payload):
-        assert is_valid_ports_payload(payload) is False
 
 
 def _display_id(entry):

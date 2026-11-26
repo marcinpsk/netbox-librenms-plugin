@@ -1,0 +1,701 @@
+"""The modules tab and its actions assess one bound source snapshot on each read."""
+
+from netbox_librenms_plugin.acquisition.coordinator import plan_acquisition
+
+import pytest
+from django.contrib import messages
+from django.urls import reverse
+
+from netbox_librenms_plugin import source_cache
+from netbox_librenms_plugin.acquisition.registry import Resource
+from netbox_librenms_plugin.acquisition.resources import blocked_scopes
+from netbox_librenms_plugin.acquisition.snapshot import SourceSnapshot
+from netbox_librenms_plugin.constants import MAIN_INVENTORY_SOURCE, OOB_INVENTORY_SOURCE
+from netbox_librenms_plugin.sync_cache import SyncCacheConsistency
+from netbox_librenms_plugin.tests.view_test_helpers import make_request
+from netbox_librenms_plugin.tests.conftest import make_superuser
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping_row
+from netbox_librenms_plugin.tests.source_snapshot_helpers import module_serial_context
+from netbox_librenms_plugin.tests.test_acquisition_modules import HOST_ID, OOB_ID, device, serve
+
+INVENTORY = [
+    {"entPhysicalIndex": 1, "entPhysicalContainedIn": 0, "entPhysicalClass": "chassis"},
+    {
+        "entPhysicalIndex": 2,
+        "entPhysicalContainedIn": 1,
+        "entPhysicalClass": "module",
+        "entPhysicalName": "Slot 1",
+        "entPhysicalModelName": "CARD",
+        "entPhysicalSerialNum": "CARD-SERIAL",
+    },
+]
+
+
+def refresh(client, subject):
+    return client.post(
+        reverse("plugins:netbox_librenms_plugin:device_module_sync", args=[subject.pk]),
+        {"server_key": "default"},
+        HTTP_HX_REQUEST="true",
+    )
+
+
+def fragment(client, subject):
+    url = reverse(
+        "plugins:netbox_librenms_plugin:sync_cache_fragment",
+        kwargs={"object_type": "device", "pk": subject.pk, "tab": "modules"},
+    )
+    return client.get(url, {"server_key": "default"})
+
+
+@pytest.mark.django_db
+def test_oob_failure_keeps_host_modules_readable_and_names_the_failed_source(client, live_librenms):
+    subject = device("module-tab-oob-failure", oob={"id": OOB_ID, "type": "idrac"})
+    client.force_login(make_superuser("module-tab-oob-user"))
+    serve(live_librenms.server, inventory=INVENTORY, transceivers=[])
+    live_librenms.server.register(f"/api/v0/inventory/{OOB_ID}/all", {"status": "error"}, status=500)
+
+    response = refresh(client, subject)
+
+    assert response.status_code == 200
+    assert response.context["module_sync"]["table"] is not None
+    snapshot = source_cache.read(subject, Resource.MODULES, "default")
+    assert snapshot is not None
+    assert set(blocked_scopes(snapshot, Resource.MODULES)) == {"oob"}
+    notices = [str(message) for message in response.context["messages"] if message.level == messages.WARNING]
+    assert any(f"inventory/{OOB_ID}/all" in text for text in notices)
+    requests = list(live_librenms.server.requests)
+    assert fragment(client, subject).context["module_sync"]["table"] is not None
+    assert live_librenms.server.requests == requests
+
+
+@pytest.mark.django_db
+def test_offsets_and_transceiver_synthesis_exist_only_in_the_assessment(client, live_librenms):
+    from django.core.cache import cache
+    from netbox_librenms_plugin.assessment.modules import assess
+
+    subject = device("module-tab-assessment", oob={"id": OOB_ID, "type": "idrac"})
+    client.force_login(make_superuser("module-tab-assessment-user"))
+    serve(live_librenms.server, inventory=INVENTORY)
+    live_librenms.server.register(f"/api/v0/inventory/{OOB_ID}/all", {"status": "ok", "inventory": INVENTORY})
+
+    refresh(client, subject)
+
+    payload = cache.get(source_cache.snapshot_key(subject, Resource.MODULES, "default"))
+    snapshot = SourceSnapshot.from_payload(payload)
+    assert snapshot.value(Resource.MODULES, "inventory") == INVENTORY
+    assert "_source" not in snapshot.value(Resource.MODULES, "inventory")[0]
+    assessed = assess(snapshot, subject=subject, serial_context=module_serial_context(subject))["inventory"]
+    host = [row for row in assessed if row["_source"] == MAIN_INVENTORY_SOURCE]
+    oob = [row for row in assessed if row["_source"] == OOB_INVENTORY_SOURCE]
+    assert {row["entPhysicalIndex"] for row in host} == {1, 2, 9001}
+    assert {row["entPhysicalIndex"] for row in oob} == {10001, 10002}
+    assert next(row for row in host if row["entPhysicalIndex"] == 9001)["_librenms_port_id"] == 7
+    assert snapshot.to_payload() == payload
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "part,path",
+    [
+        ("inventory", f"inventory/{HOST_ID}/all"),
+        ("ports", f"devices/{HOST_ID}/ports"),
+        ("transceivers", f"devices/{HOST_ID}/transceivers"),
+    ],
+)
+def test_failed_refresh_removes_old_modules_and_names_the_failed_part(client, live_librenms, part, path):
+    subject = device("module-tab-failed")
+    client.force_login(make_superuser("module-tab-failed-user"))
+    serve(live_librenms.server, inventory=INVENTORY)
+    complete = refresh(client, subject)
+    assert source_cache.read(subject, Resource.MODULES, "default") is not None
+    assert [message.level for message in complete.context["messages"]] == [messages.SUCCESS]
+    live_librenms.server.register(f"/api/v0/{path}", {"status": "error"}, status=500)
+
+    response = refresh(client, subject)
+
+    assert response.context["module_sync"]["table"] is None
+    assert source_cache.read(subject, Resource.MODULES, "default") is None
+    status = SyncCacheConsistency(subject).status("default")["modules"]
+    assert not status["snapshot_available"]
+    assert status["state"] == "refresh_failed"
+    assert any(path in str(message) for message in response.context["messages"])
+    assert [message for message in response.context["messages"] if message.level == messages.SUCCESS] == []
+
+
+@pytest.mark.django_db
+def test_oob_binding_changes_refuse_every_reader_without_deleting_the_snapshot(client, live_librenms):
+    from django.core.cache import cache
+
+    subject = device("module-tab-binding", oob={"id": "corrupt", "type": "idrac"})
+    client.force_login(make_superuser("module-tab-binding-user"))
+    serve(live_librenms.server, inventory=INVENTORY, transceivers=[])
+    refresh(client, subject)
+    key = source_cache.snapshot_key(subject, Resource.MODULES, "default")
+    original = cache.get(key)
+    assert original is not None
+    assert source_cache.read(subject, Resource.MODULES, "default") is not None
+    seed_stored_mapping_row(subject, {"default": {"id": HOST_ID, "oob": {"id": OOB_ID, "type": "idrac"}}})
+    assert source_cache.read(subject, Resource.MODULES, "default") is None
+    assert fragment(client, subject).status_code == 404
+    assert cache.get(key) == original
+
+
+@pytest.mark.django_db
+def test_a_refresh_that_a_broken_rule_refuses_stays_ready_without_a_success_message(client, live_librenms):
+    from netbox_librenms_plugin.models import InventoryIgnoreRule
+
+    subject = device("module-tab-rule-refusal")
+    client.force_login(make_superuser("module-tab-rule-refusal-user"))
+    serve(live_librenms.server, inventory=INVENTORY, transceivers=[])
+    rule = InventoryIgnoreRule.objects.create(
+        name="Refusing rule", match_type="regex", pattern="^skip$", require_serial_match_parent=False
+    )
+    InventoryIgnoreRule.objects.filter(pk=rule.pk).update(pattern="[")
+
+    response = refresh(client, subject)
+
+    assert response.context["module_sync"]["inventory_rule_error"]
+    assert SyncCacheConsistency(subject).status("default")["modules"]["state"] == "ready"
+    assert [message for message in response.context["messages"] if message.level == messages.SUCCESS] == []
+
+
+@pytest.mark.django_db
+def test_a_rule_edit_recovers_the_table_from_the_same_ready_source(client, live_librenms):
+    from netbox_librenms_plugin.models import InventoryIgnoreRule
+
+    subject = device("module-tab-rule-recovery")
+    client.force_login(make_superuser("module-tab-rule-user"))
+    serve(live_librenms.server, inventory=INVENTORY, transceivers=[])
+    rule = InventoryIgnoreRule.objects.create(
+        name="Module source rule", match_type="regex", pattern="^skip$", require_serial_match_parent=False
+    )
+    InventoryIgnoreRule.objects.filter(pk=rule.pk).update(pattern="[")
+
+    response = refresh(client, subject)
+
+    assert response.context["module_sync"]["table"] is None
+    assert response.context["module_sync"]["inventory_rule_error"]
+    snapshot = source_cache.read(subject, Resource.MODULES, "default")
+    assert snapshot is not None
+    assert SyncCacheConsistency(subject).status("default")["modules"]["snapshot_available"]
+    InventoryIgnoreRule.objects.filter(pk=rule.pk).update(pattern="^skip$")
+    requests = list(live_librenms.server.requests)
+    assert fragment(client, subject).context["module_sync"]["table"] is not None
+    assert source_cache.read(subject, Resource.MODULES, "default").snapshot_id == snapshot.snapshot_id
+    assert live_librenms.server.requests == requests
+
+
+@pytest.mark.django_db
+def test_another_reader_sees_the_blocked_oob_source_on_the_cached_tab(client, live_librenms):
+    from django.contrib.auth import get_user_model
+    from django.test import Client
+
+    subject = device("module-tab-cached-oob", oob={"id": OOB_ID, "type": "idrac"})
+    client.force_login(make_superuser("module-tab-cached-refresh-user"))
+    serve(live_librenms.server, inventory=INVENTORY, transceivers=[])
+    live_librenms.server.register(f"/api/v0/inventory/{OOB_ID}/all", {"status": "error"}, status=500)
+    assert refresh(client, subject).context["module_sync"]["table"] is not None
+    other = Client()
+    other.force_login(get_user_model().objects.create_user(username="module-tab-cached-reader", is_superuser=True))
+    requests = list(live_librenms.server.requests)
+
+    response = fragment(other, subject)
+
+    assert response.context["module_sync"]["table"] is not None
+    assert any(f"inventory/{OOB_ID}/all" in str(message) for message in response.context["messages"])
+    assert live_librenms.server.requests == requests
+
+
+@pytest.mark.django_db
+def test_the_json_verify_of_a_blocked_source_queues_no_page_notice(client, live_librenms):
+    import json
+
+    from django.contrib.messages import get_messages
+
+    subject = device("module-verify-blocked-oob", oob={"id": OOB_ID, "type": "idrac"})
+    client.force_login(make_superuser("module-verify-blocked-user"))
+    serve(live_librenms.server, inventory=INVENTORY, transceivers=[])
+    live_librenms.server.register(f"/api/v0/inventory/{OOB_ID}/all", {"status": "error"}, status=500)
+    assert refresh(client, subject).context["module_sync"]["table"] is not None
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:verify_module"),
+        data=json.dumps(
+            {"device_id": subject.pk, "page_device_id": subject.pk, "ent_physical_index": 2, "server_key": "default"}
+        ),
+        content_type="application/json",
+    )
+
+    # The table was built, so the refused grant answers; a missing table would answer 404.
+    assert response.status_code == 409
+    assert list(get_messages(response.wsgi_request)) == []
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("changed_version", ["plugin", "netbox"])
+def test_a_version_change_requires_a_new_source_snapshot(client, live_librenms, monkeypatch, settings, changed_version):
+    from dataclasses import replace
+
+    import netbox_librenms_plugin
+    from django.core.cache import cache
+
+    subject = device("module-tab-version")
+    client.force_login(make_superuser("module-tab-version-user"))
+    serve(live_librenms.server, inventory=INVENTORY, transceivers=[])
+    assert refresh(client, subject).context["module_sync"]["table"] is not None
+    previous_key = source_cache.snapshot_key(subject, Resource.MODULES, "default")
+    previous_snapshot = cache.get(previous_key)
+    requests = list(live_librenms.server.requests)
+    if changed_version == "plugin":
+        monkeypatch.setattr(netbox_librenms_plugin, "__version__", "0.0.0-test")
+    else:
+        settings.RELEASE = replace(settings.RELEASE, version="0.0.0-test")
+
+    assert source_cache.read(subject, Resource.MODULES, "default") is None
+    assert fragment(client, subject).status_code == 404
+    assert cache.get(previous_key) == previous_snapshot
+    assert live_librenms.server.requests == requests
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("changed_version", ["plugin", "netbox"])
+def test_failed_refresh_of_another_version_preserves_this_versions_state(
+    client, live_librenms, monkeypatch, settings, changed_version
+):
+    from contextlib import ExitStack
+    from dataclasses import replace
+
+    from django.test import override_settings
+
+    import netbox_librenms_plugin
+
+    subject = device("module-tab-isolated-state")
+    client.force_login(make_superuser("module-tab-isolated-state-user"))
+    serve(live_librenms.server, inventory=INVENTORY, transceivers=[])
+    assert refresh(client, subject).status_code == 200
+    original = source_cache.read(subject, Resource.MODULES, "default")
+    assert original is not None
+    with monkeypatch.context() as version, ExitStack() as other_release:
+        if changed_version == "plugin":
+            version.setattr(netbox_librenms_plugin, "__version__", "0.0.0-other")
+        else:
+            other_release.enter_context(override_settings(RELEASE=replace(settings.RELEASE, version="0.0.0-other")))
+        live_librenms.server.register(f"/api/v0/inventory/{HOST_ID}/all", {"status": "error"}, status=500)
+        assert refresh(client, subject).status_code == 200
+        assert not SyncCacheConsistency(subject).status("default")["modules"]["snapshot_available"]
+
+    assert source_cache.read(subject, Resource.MODULES, "default").snapshot_id == original.snapshot_id
+    assert SyncCacheConsistency(subject).status("default")["modules"]["snapshot_available"]
+    assert fragment(client, subject).status_code == 200
+
+
+@pytest.mark.django_db
+def test_corrupt_oob_mapping_keeps_the_host_table_and_warns(client, live_librenms):
+    subject = device("module-tab-invalid-oob-notice", oob={"id": "bad-id", "type": "idrac"})
+    client.force_login(make_superuser("module-tab-invalid-oob-notice-user"))
+    serve(live_librenms.server, inventory=INVENTORY, transceivers=[])
+
+    response = refresh(client, subject)
+
+    snapshot = source_cache.read(subject, Resource.MODULES, "default")
+    (blocker,) = blocked_scopes(snapshot, Resource.MODULES)["oob"]
+    assert blocker.path == "oob"
+    assert response.status_code == 200
+    assert response.context["module_sync"]["table"] is not None
+    warnings = [message for message in response.context["messages"] if message.level == messages.WARNING]
+    assert len(warnings) == 1
+    assert {request["path"] for request in live_librenms.server.requests} == {
+        f"/api/v0/inventory/{HOST_ID}/all",
+        f"/api/v0/devices/{HOST_ID}/ports",
+        f"/api/v0/devices/{HOST_ID}/transceivers",
+    }
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("broken_rule", [False, True], ids=["valid-rules", "broken-rule"])
+@pytest.mark.parametrize("failure", ["missing-owner", "missing-member-owner", "blocked-host"])
+def test_module_grant_reports_an_unusable_source_as_a_snapshot_refusal(
+    live_librenms, monkeypatch, failure, broken_rule
+):
+    """An unusable source refuses as the snapshot, also when the page's policy would refuse for a broken rule."""
+    from dcim.models import Device
+    from django.core.cache import cache
+    from netbox_librenms_plugin.acquisition.coordinator import acquire
+    from netbox_librenms_plugin.models import InventoryIgnoreRule
+    from netbox_librenms_plugin.module_grants import ACTION_INSTALL_SELECTED, GrantRefused, GrantRefusal
+    from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members, map_device_to_librenms
+    from netbox_librenms_plugin.views.sync.modules import _authorize_module_grant
+
+    if failure == "missing-member-owner":
+        # The chassis page holds no mapping; its mapped member owns the source.
+        _chassis, (subject, owner) = make_virtual_chassis_members("module-grant-member-owner", count=2)
+        map_device_to_librenms(owner, HOST_ID, server_key="default")
+    else:
+        subject = owner = device("module-grant-source-refusal")
+    serve(live_librenms.server, inventory=INVENTORY, transceivers=[])
+    snapshot = acquire(plan_acquisition(subject, server_key="default", resources=[Resource.MODULES]))
+    assert snapshot.resources[Resource.MODULES].owner.pk == owner.pk
+    assert source_cache.store(subject, Resource.MODULES, snapshot)
+    if broken_rule:
+        rule = InventoryIgnoreRule.objects.create(
+            name="Broken grant rule", match_type="regex", pattern="^skip$", require_serial_match_parent=False
+        )
+        InventoryIgnoreRule.objects.filter(pk=rule.pk).update(pattern="[")
+    if failure == "missing-owner":
+        Device.objects.filter(pk=subject.pk).delete()
+    elif failure == "missing-member-owner":
+        read = source_cache.read
+
+        def read_then_delete_owner(subject_, resource, server_key, **kwargs):
+            found = read(subject_, resource, server_key, **kwargs)
+            # The owner goes in the window between the cache read and the policy read.
+            Device.objects.filter(pk=owner.pk).delete()
+            return found
+
+        monkeypatch.setattr(source_cache, "read", read_then_delete_owner)
+    else:
+        live_librenms.server.register(f"/api/v0/inventory/{HOST_ID}/all", {"status": "error"}, status=500)
+        snapshot = acquire(plan_acquisition(subject, server_key="default", resources=[Resource.MODULES]))
+        # Inject a stored source with no ready host at the cache transport boundary.
+        cache.set(source_cache.snapshot_key(subject, Resource.MODULES, "default"), snapshot.to_payload(), 300)
+
+    with pytest.raises(GrantRefused) as refusal:
+        _authorize_module_grant(subject, "default", ACTION_INSTALL_SELECTED, None, user=make_request().user)
+
+    assert refusal.value.refusal is GrantRefusal.SNAPSHOT
+
+
+@pytest.mark.django_db
+def test_cached_get_renders_no_inventory_when_the_owner_is_deleted_after_the_cache_read(
+    client, live_librenms, monkeypatch
+):
+    from dcim.models import Device
+
+    subject = device("module-tab-owner-deleted")
+    client.force_login(make_superuser("module-tab-owner-deleted-user"))
+    serve(live_librenms.server, inventory=INVENTORY, transceivers=[])
+    assert refresh(client, subject).status_code == 200
+    read = source_cache.read
+
+    def read_then_delete_owner(subject_, resource, server_key, **kwargs):
+        snapshot = read(subject_, resource, server_key, **kwargs)
+        # Delete the owner in the window between the cache read and the assessment.
+        if resource is Resource.MODULES and snapshot is not None:
+            Device.objects.filter(pk=snapshot.resources[resource].owner.pk).delete()
+        return snapshot
+
+    monkeypatch.setattr(source_cache, "read", read_then_delete_owner)
+
+    response = fragment(client, subject)
+
+    assert response.status_code == 200
+    assert response.context["module_sync"] == {
+        "table": None,
+        "object": subject,
+        "cache_expiry": None,
+        "server_key": "default",
+    }
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("name", [0, 4410])
+def test_numeric_inventory_names_render_through_refresh_and_cached_get(client, live_librenms, name):
+    from netbox_librenms_plugin.models import InventoryIgnoreRule
+    from netbox_librenms_plugin.views.base.modules_view import read_module_assessment
+
+    subject = device("module-tab-numeric-name")
+    client.force_login(make_superuser("module-tab-numeric-name-user"))
+    InventoryIgnoreRule.objects.create(
+        name="Numeric name read", match_type="regex", pattern="^different-name$", require_serial_match_parent=False
+    )
+    serve(live_librenms.server, inventory=[INVENTORY[0], {**INVENTORY[1], "entPhysicalName": name}], transceivers=[])
+
+    response = refresh(client, subject)
+
+    assert response.status_code == 200
+    assert response.context["module_sync"]["table"] is not None
+    snapshot = source_cache.read(subject, Resource.MODULES, "default")
+    assert snapshot.value(Resource.MODULES, "inventory")[1]["entPhysicalName"] == name
+    assessed = read_module_assessment(subject, "default", serial_context=module_serial_context(subject))
+    assert assessed["inventory"][1]["entPhysicalName"] == str(name)
+    requests = list(live_librenms.server.requests)
+    assert fragment(client, subject).context["module_sync"]["table"] is not None
+    assert live_librenms.server.requests == requests
+
+
+@pytest.mark.django_db
+def test_a_module_serial_with_a_nul_renders_through_refresh_and_cached_get(client, live_librenms):
+    """PostgreSQL text cannot hold a NUL, so the serial has no identity and no lookup sends it to the database."""
+    subject = device("module-tab-nul-serial")
+    client.force_login(make_superuser("module-tab-nul-serial-user"))
+    serve(live_librenms.server, inventory=[INVENTORY[0], {**INVENTORY[1], "entPhysicalSerialNum": "ABC\x00DEF"}])
+
+    response = refresh(client, subject)
+
+    assert response.status_code == 200
+    assert response.context["module_sync"]["table"] is not None
+    assert fragment(client, subject).context["module_sync"]["table"] is not None
+
+
+@pytest.mark.django_db
+def test_a_librenms_without_the_transceiver_route_still_shows_the_module_rows(client, live_librenms):
+    from netbox_librenms_plugin.acquisition.snapshot import Outcome
+
+    subject = device("module-tab-no-transceiver-route")
+    client.force_login(make_superuser("module-tab-no-transceiver-route-user"))
+    serve(live_librenms.server, inventory=INVENTORY)
+    live_librenms.server.register(
+        f"/api/v0/devices/{HOST_ID}/transceivers", {"status": "error", "message": "Not Found"}, status=404
+    )
+
+    response = refresh(client, subject)
+
+    assert response.status_code == 200
+    table = response.context["module_sync"]["table"]
+    assert table is not None
+    assert "CARD-SERIAL" in table.as_html(response.wsgi_request)
+    snapshot = source_cache.read(subject, Resource.MODULES, "default")
+    assert snapshot.record(Resource.MODULES, "transceivers").outcome is Outcome.NOT_APPLICABLE
+    assert not any(f"devices/{HOST_ID}/transceivers" in str(message) for message in response.context["messages"])
+    assert fragment(client, subject).context["module_sync"]["table"] is not None
+
+
+def _read_inventory_indices(subject):
+    """Return the entity indices that the cached Modules render reads for *subject*."""
+    from netbox_librenms_plugin.tests.view_test_helpers import make_request
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+    request = make_request("get", {"server_key": "default"}, user=make_superuser(f"{subject.name}-reader"))
+    view = DeviceModuleTableView()
+    view.setup(request, pk=subject.pk)
+    view.cache_only = True
+    _server, _owner, inventory, _policy, empty = view._read_render_inventory(request, subject, "default")
+    assert empty is None, empty
+    return [item["entPhysicalIndex"] for item in inventory["inventory"]]
+
+
+@pytest.mark.django_db
+def test_post_deduplicates_optics_with_the_device_manufacturer_serial_rules(client, live_librenms):
+    import sys
+
+    from netbox_librenms_plugin.assessment.modules import _merge_transceiver_data
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.serial_identity import SerialGroups
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import inventory_row, transceiver_row
+
+    subject = device("module-tab-optic-deduplication")
+    client.force_login(make_superuser("module-tab-optic-deduplication-user"))
+    NormalizationRule.objects.create(
+        scope="serial", manufacturer=subject.device_type.manufacturer, match_pattern=r"^TAG (.+)$", replacement=r"\1"
+    )
+    entity_indexes = range(300, 332)
+    port_ids = range(42, 46)
+    serve(
+        live_librenms.server,
+        inventory=[
+            inventory_row(
+                index, f"Existing optic {index}", model="SFP-10G-LR", serial="TAG OPTIC-7", physical_class="port"
+            )
+            for index in entity_indexes
+        ],
+        transceivers=[
+            transceiver_row(400 + port_id, port_id=port_id, model="SFP-10G-LR", serial="OPTIC-7", kind="SFP+")
+            for port_id in port_ids
+        ],
+        ports=[{"port_id": port_id, "ifName": f"xe-0/0/{port_id}", "ifIndex": port_id} for port_id in port_ids],
+    )
+    find_code = SerialGroups.find.__code__
+    merge_code = _merge_transceiver_data.__code__
+    find_calls = 0
+
+    def profile(frame, event, _arg):
+        nonlocal find_calls
+        if event == "call" and frame.f_code is find_code and frame.f_back.f_code is merge_code:
+            find_calls += 1
+
+    previous_profiler = sys.getprofile()
+    sys.setprofile(profile)
+    try:
+        response = refresh(client, subject)
+    finally:
+        sys.setprofile(previous_profiler)
+
+    assert response.status_code == 200
+    assert response.context["module_sync"]["table"] is not None
+    assert _read_inventory_indices(subject) == list(entity_indexes)
+    assert find_calls == 0
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("change", ["rule-deleted", "device-type-changed"])
+def test_a_cached_read_merges_transceivers_under_the_current_serial_context(client, live_librenms, change):
+    """A serial rule edit or a DeviceType change after the refresh changes the transceiver merge of the next read."""
+    from dcim.models import Device, DeviceType, Manufacturer
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import transceiver_row
+
+    subject = device(f"module-tab-serial-context-{change}")
+    client.force_login(make_superuser(f"module-tab-serial-context-{change}-user"))
+    NormalizationRule.objects.filter(scope=NormalizationRule.SCOPE_SERIAL).delete()
+    NormalizationRule.objects.create(
+        scope="serial",
+        match_pattern=r"^S/N\s+(.+)$",
+        replacement=r"\1",
+        manufacturer=subject.device_type.manufacturer,
+    )
+    # Under the rule the transceiver's "S/N CARD-SERIAL" is the card's "CARD-SERIAL", so the merge drops it.
+    transceivers = [transceiver_row(20, model="SFP-RULE", serial="S/N CARD-SERIAL", kind="sfp")]
+    serve(live_librenms.server, inventory=INVENTORY, transceivers=transceivers)
+    assert refresh(client, subject).context["module_sync"]["table"] is not None
+    assert _read_inventory_indices(subject) == [1, 2]
+
+    if change == "rule-deleted":
+        NormalizationRule.objects.filter(scope=NormalizationRule.SCOPE_SERIAL).delete()
+    else:
+        other_maker = Manufacturer.objects.create(name="Context change maker", slug="context-change-maker")
+        other_type = DeviceType.objects.create(manufacturer=other_maker, model="Context change", slug="context-change")
+        Device.objects.filter(pk=subject.pk).update(device_type=other_type)
+
+    assert _read_inventory_indices(subject) == [1, 2, 20]
+
+
+@pytest.mark.django_db
+def test_a_member_page_merges_transceivers_under_the_serial_rules_of_the_chassis_master(live_librenms):
+    from dcim.models import DeviceType, Manufacturer
+    from netbox_librenms_plugin.acquisition.coordinator import acquire
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members, map_device_to_librenms
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import inventory_row, transceiver_row
+
+    _chassis, (master, member) = make_virtual_chassis_members("module-tab-master-rules", count=2)
+    NormalizationRule.objects.create(
+        scope="serial", manufacturer=master.device_type.manufacturer, match_pattern=r"^TAG (.+)$", replacement=r"\1"
+    )
+    # The member's own type has no serial rules; the chassis master's rules decide the merge.
+    other_maker = Manufacturer.objects.create(name="Member type maker", slug="member-type-maker")
+    member.device_type = DeviceType.objects.create(manufacturer=other_maker, model="Member type", slug="member-type")
+    member.save()
+    map_device_to_librenms(member, HOST_ID, server_key="default")
+    serve(
+        live_librenms.server,
+        inventory=[
+            inventory_row(300, "Existing optic", model="SFP-10G-LR", serial="TAG OPTIC-7", physical_class="port")
+        ],
+        transceivers=[transceiver_row(400, port_id=42, model="SFP-10G-LR", serial="OPTIC-7", kind="SFP+")],
+        ports=[{"port_id": 42, "ifName": "xe-0/0/0"}],
+    )
+    assert source_cache.store(
+        member, Resource.MODULES, acquire(plan_acquisition(member, server_key="default", resources=[Resource.MODULES]))
+    )
+
+    assert _read_inventory_indices(member) == [300]
+
+
+@pytest.mark.django_db
+def test_masterless_chassis_members_read_the_module_source_that_one_refresh_stored(client, live_librenms):
+    """Without a master each member has its own serial context, and no member's read refuses the shared source."""
+    from dcim.models import DeviceType, Manufacturer, VirtualChassis
+    from django.utils.html import escape
+    from netbox_librenms_plugin.import_utils.virtual_chassis import VC_NUMBERING_NO_MASTER
+    from netbox_librenms_plugin.acquisition.coordinator import acquire
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.serial_identity import SerialRules
+    from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members, map_device_to_librenms
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import transceiver_row
+
+    chassis, (owner, page) = make_virtual_chassis_members("module-tab-masterless", count=2)
+    VirtualChassis.objects.filter(pk=chassis.pk).update(master=None)
+    other_maker = Manufacturer.objects.create(name="Masterless page maker", slug="masterless-page-maker")
+    page.device_type = DeviceType.objects.create(
+        manufacturer=other_maker, model="Masterless page", slug="masterless-page"
+    )
+    page.save()
+    NormalizationRule.objects.filter(scope=NormalizationRule.SCOPE_SERIAL).delete()
+    NormalizationRule.objects.create(
+        scope="serial", manufacturer=owner.device_type.manufacturer, match_pattern=r"^S/N\s+(.+)$", replacement=r"\1"
+    )
+    map_device_to_librenms(owner, HOST_ID, server_key="default")
+    owner.refresh_from_db()
+    page.refresh_from_db()
+    rules = SerialRules.load()
+    assert rules.for_device(owner).fingerprint != rules.for_device(page).fingerprint
+    # Only the owner's rule makes "S/N CARD-SERIAL" the card's serial, so each read shows its merge context.
+    transceivers = [transceiver_row(20, model="SFP-RULE", serial="S/N CARD-SERIAL", kind="sfp")]
+    serve(live_librenms.server, inventory=INVENTORY, transceivers=transceivers)
+    assert source_cache.store(
+        page, Resource.MODULES, acquire(plan_acquisition(page, server_key="default", resources=[Resource.MODULES]))
+    )
+
+    for member, indices in ((page, [1, 2, 20]), (owner, [1, 2]), (page, [1, 2, 20])):
+        assert _read_inventory_indices(member) == indices, member.name
+        assert SyncCacheConsistency(member).status("default")["modules"]["snapshot_available"], member.name
+        assert source_cache.read(member, Resource.MODULES, "default") is not None, member.name
+
+    # The table has no numbering rule without a master, so the refresh and each cached page render the refusal.
+    client.force_login(make_superuser("module-tab-masterless-user"))
+    # The refresh starts from a cold cache, so the snapshot that the pages read below is the one it stores.
+    source_cache.delete(page, Resource.MODULES, "default")
+    assert source_cache.read(page, Resource.MODULES, "default") is None
+    refreshed = refresh(client, page)
+    assert refreshed.context["module_sync"]["vc_numbering_error"] == VC_NUMBERING_NO_MASTER
+    for member, response in ((page, refreshed), (page, fragment(client, page)), (owner, fragment(client, owner))):
+        content = response.content.decode()
+        assert response.status_code == 200, member.name
+        assert escape(VC_NUMBERING_NO_MASTER) in content, member.name
+        assert "data-ent-index" not in content, member.name
+        assert SyncCacheConsistency(member).status("default")["modules"]["snapshot_available"], member.name
+        assert source_cache.read(member, Resource.MODULES, "default") is not None, member.name
+
+
+@pytest.mark.django_db
+def test_refresh_does_not_report_success_when_its_source_owner_is_deleted(client, live_librenms, monkeypatch):
+    from dcim.models import Device
+
+    from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members, map_device_to_librenms
+
+    _chassis, (subject, owner) = make_virtual_chassis_members("refresh-owner-deleted", count=2)
+    map_device_to_librenms(owner, HOST_ID, server_key="default")
+    client.force_login(make_superuser("refresh-owner-deleted-user"))
+    serve(live_librenms.server, inventory=INVENTORY, transceivers=[])
+    read = source_cache.require_cached
+    deleted = []
+
+    def read_then_delete_owner(subject_, resource, server_key, snapshot, **kwargs):
+        bound_owner = read(subject_, resource, server_key, snapshot, **kwargs)
+        if resource is Resource.MODULES and not deleted:
+            deleted.append(owner.pk)
+            Device.objects.filter(pk=owner.pk).delete()
+        return bound_owner
+
+    monkeypatch.setattr(source_cache, "require_cached", read_then_delete_owner)
+
+    response = refresh(client, subject)
+
+    assert deleted == [owner.pk]
+    assert response.status_code == 200
+    assert response.context["module_sync"]["table"] is None
+    assert not any("refreshed successfully" in str(message) for message in response.context["messages"])
+    assert not SyncCacheConsistency(subject).status("default")["modules"]["snapshot_available"]
+
+
+@pytest.mark.django_db
+def test_virtual_chassis_seed_keeps_an_explicit_stale_source_id():
+    from django.core.cache import cache
+    from netbox_librenms_plugin.tests.cache_test_helpers import seed_inventory
+    from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+    from netbox_librenms_plugin.server_mappings import read_mapping
+
+    owner = seed_mapping(make_device("seed-source-owner"), own=7)
+    page = make_device("seed-source-page")
+    make_virtual_chassis("seed-source-chassis", owner, page)
+    key = seed_inventory(page, INVENTORY, librenms_id=999)
+
+    snapshot = SourceSnapshot.from_payload(cache.get(key))
+    assert snapshot.resources[Resource.MODULES].host.librenms_id == 999
+    assert snapshot.resources[Resource.MODULES].owner.pk == owner.pk
+    owner.refresh_from_db()
+    page.refresh_from_db()
+    assert read_mapping(owner).own_id("default") == 7
+    assert read_mapping(page).own_id("default") is None
+    assert source_cache.read(page, Resource.MODULES, "default") is None

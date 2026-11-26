@@ -156,7 +156,6 @@ def test_a_blocked_vlan_refresh_reports_the_failed_source_and_keeps_no_snapshot(
 
 @pytest.mark.django_db
 def test_resource_tabs_share_status_fragment_mutation_and_cleanup(client, settings, django_capture_on_commit_callbacks):
-    from django.core.cache import cache
     from django.urls import reverse
 
     from netbox_librenms_plugin import source_cache
@@ -164,8 +163,6 @@ def test_resource_tabs_share_status_fragment_mutation_and_cleanup(client, settin
     from netbox_librenms_plugin.sync_cache import (
         SyncCacheConsistency,
         SyncTab,
-        module_inventory_cache_payload,
-        sync_snapshot_key,
     )
     from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server, make_device, make_superuser
     from netbox_librenms_plugin.tests.source_snapshot_helpers import (
@@ -173,6 +170,7 @@ def test_resource_tabs_share_status_fragment_mutation_and_cleanup(client, settin
         port_row,
         seed_cables_snapshot,
         seed_interfaces_snapshot,
+        seed_modules_snapshot,
         seed_source_snapshot,
     )
 
@@ -186,14 +184,7 @@ def test_resource_tabs_share_status_fragment_mutation_and_cleanup(client, settin
         [port_row(1, "eth1", device_id=506)],
         server_key=SERVER_KEY,
     )
-    inventory_key = sync_snapshot_key(device, "inventory", SERVER_KEY)
-    from netbox_librenms_plugin.serial_identity import SerialRules
-
-    cache.set(
-        inventory_key,
-        module_inventory_cache_payload([], 506, None, serial_context=SerialRules.load().for_device(device)),
-        timeout=300,
-    )
+    seed_modules_snapshot(device, [], server_key=SERVER_KEY)
     coordinator = SyncCacheConsistency(device)
 
     status = coordinator.status(SERVER_KEY)
@@ -228,7 +219,7 @@ def test_resource_tabs_share_status_fragment_mutation_and_cleanup(client, settin
     assert source_cache.read(device, Resource.INTERFACES, SERVER_KEY) == interfaces
     assert source_cache.read(device, Resource.VLANS, SERVER_KEY) is None
     assert source_cache.read(device, Resource.CABLES, SERVER_KEY) is None
-    assert cache.get(inventory_key) is None
+    assert source_cache.read(device, Resource.MODULES, SERVER_KEY) is None
 
     coordinator.invalidate_every_tab()
 
@@ -431,6 +422,7 @@ def test_an_optional_mapping_field_can_use_a_real_ip_refresh(client, live_libren
         ("interfaces", "device_interface_sync", "interface_sync", "table"),
         ("cables", "device_cable_sync", "cable_sync", "table"),
         ("ipaddresses", "device_ipaddress_sync", "ip_sync", "table"),
+        ("modules", "device_module_sync", "module_sync", "table"),
         ("vlans", "device_vlan_sync", "vlan_sync", "vlan_table"),
     ],
 )
@@ -447,6 +439,10 @@ def test_a_refresh_response_refuses_an_identity_change_after_storage(
 
     subject = make_device("receipt-identity-change", librenms_cf={SERVER_KEY: {"id": 5501}})
     _serve_ip_and_vlans(live_librenms.server, 5501)
+    if resource_name == "modules":
+        from netbox_librenms_plugin.tests.test_capture_source_acquisition import serve
+
+        serve(live_librenms.server, 5501)
     live_librenms.server.register("/api/v0/devices/5501/port_stack", {"status": "ok", "mappings": []})
     if resource_name == "cables":
         live_librenms.server.register("/api/v0/devices/5501/links", {"status": "ok", "links": []})
@@ -483,3 +479,42 @@ def test_a_refresh_response_refuses_an_identity_change_after_storage(
     assert state["state"] == SyncTabState.REFRESH_FAILED.value
     assert live_librenms.server.requests
     assert all("5502" not in request["path"] for request in live_librenms.server.requests)
+
+
+def _forbidden_inventory_imports(source):
+    from netbox_librenms_plugin.tests.test_acquisition_imports import _imported_modules
+
+    imported = set(_imported_modules(source))
+    forbidden = {
+        "netbox_librenms_plugin.import_utils.virtual_chassis",
+        "netbox_librenms_plugin.librenms_api",
+        "django.core.cache",
+    }
+    return {bad for bad in forbidden if any(name == bad or name.startswith(f"{bad}.") for name in imported)}
+
+
+@pytest.mark.parametrize("module", ["acquisition/resources.py", "assessment/modules.py", "inventory_identity.py"])
+def test_inventory_helpers_import_no_discovery_or_transport_module(module):
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / module
+    assert not _forbidden_inventory_imports(path.read_text())
+
+
+@pytest.mark.parametrize(
+    "source,forbidden",
+    [
+        ("import django.core.cache", "django.core.cache"),
+        ("from django.core import cache", "django.core.cache"),
+        ("from netbox_librenms_plugin import librenms_api", "netbox_librenms_plugin.librenms_api"),
+        (
+            "from netbox_librenms_plugin.import_utils import virtual_chassis as discovery",
+            "netbox_librenms_plugin.import_utils.virtual_chassis",
+        ),
+        ("from django.core.cache import cache", "django.core.cache"),
+        ("from django.utils import timezone", None),
+        ("import netbox_librenms_plugin.inventory_identity as identity", None),
+    ],
+)
+def test_inventory_import_guard_checks_import_and_from_aliases(source, forbidden):
+    assert _forbidden_inventory_imports(source) == ({forbidden} if forbidden else set())
