@@ -74,12 +74,14 @@ class TestCacheKeyGeneration:
     def test_get_validated_device_cache_key(self):
         """Generate validated device cache key."""
         from netbox_librenms_plugin.import_utils import get_validated_device_cache_key
+        from netbox_librenms_plugin.serial_identity import SerialRules
 
         key = get_validated_device_cache_key(
             server_key="default",
             filters={"location": "NYC"},
             device_id=123,
             vc_enabled=True,
+            serial_rules=SerialRules(()),
         )
 
         assert "validated_device" in key
@@ -100,8 +102,11 @@ class TestCacheKeyGeneration:
     def test_validated_device_cache_key_unique_per_naming_mode(self):
         """Different naming preferences produce different cache keys."""
         from netbox_librenms_plugin.import_utils import get_validated_device_cache_key
+        from netbox_librenms_plugin.serial_identity import SerialRules
 
-        base_args = dict(server_key="default", filters={}, device_id=123, vc_enabled=False)
+        base_args = dict(
+            server_key="default", filters={}, device_id=123, vc_enabled=False, serial_rules=SerialRules(())
+        )
         key_default = get_validated_device_cache_key(**base_args)
         key_no_sysname = get_validated_device_cache_key(**base_args, use_sysname=False)
         key_strip = get_validated_device_cache_key(**base_args, strip_domain=True)
@@ -385,17 +390,26 @@ class TestDeviceRetrieval:
     def test_get_validated_device_cache_key_no_vc(self):
         """Generate cache key without VC enabled."""
         from netbox_librenms_plugin.import_utils import get_validated_device_cache_key
+        from netbox_librenms_plugin.serial_identity import SerialRules
 
-        key = get_validated_device_cache_key(server_key="default", filters={}, device_id=100, vc_enabled=False)
+        key = get_validated_device_cache_key(
+            server_key="default", filters={}, device_id=100, vc_enabled=False, serial_rules=SerialRules(())
+        )
 
         assert "novc" in key
 
     def test_get_validated_device_cache_key_with_vc(self):
         """Generate cache key with VC enabled."""
         from netbox_librenms_plugin.import_utils import get_validated_device_cache_key
+        from netbox_librenms_plugin.serial_identity import SerialRules
 
-        key_vc = get_validated_device_cache_key(server_key="default", filters={}, device_id=100, vc_enabled=True)
-        key_novc = get_validated_device_cache_key(server_key="default", filters={}, device_id=100, vc_enabled=False)
+        no_rules = SerialRules(())
+        key_vc = get_validated_device_cache_key(
+            server_key="default", filters={}, device_id=100, vc_enabled=True, serial_rules=no_rules
+        )
+        key_novc = get_validated_device_cache_key(
+            server_key="default", filters={}, device_id=100, vc_enabled=False, serial_rules=no_rules
+        )
 
         # Keys should be different based on VC setting
         assert key_vc != key_novc
@@ -823,7 +837,13 @@ class TestSerialNumberMatching:
         assert result["existing_match_type"] == "hostname"
         # The owner's identity travels as structured data, never in a warning: only the display
         # gate may name it, and only to a viewer who may see it.
-        assert result["serial_conflict"] == {"pk": owner.pk, "serial": "CONFLICTING_SERIAL", "phase": "importing"}
+        assert result["serial_conflict"] == {
+            "pk": owner.pk,
+            "serial": "CONFLICTING_SERIAL",
+            "phase": "importing",
+            "ambiguous": False,
+            "unavailable": "",
+        }
         assert not any("Serial conflict" in warning for warning in result["warnings"])
 
     def test_librenms_id_match_shows_serial_confirmed(self):
@@ -1390,6 +1410,7 @@ class TestVCPositionHandling:
         expected_names,
     ):
         from netbox_librenms_plugin.import_utils.virtual_chassis import update_vc_member_suggested_names
+        from netbox_librenms_plugin.serial_identity import SerialRules
         from netbox_librenms_plugin.models import LibreNMSSettings
 
         settings_row = LibreNMSSettings.objects.order_by("pk").first()
@@ -1405,7 +1426,7 @@ class TestVCPositionHandling:
             ],
         }
 
-        result = update_vc_member_suggested_names(vc_data, master_name)
+        result = update_vc_member_suggested_names(vc_data, master_name, serial_rules=SerialRules())
 
         assert [member["suggested_name"] for member in result["members"]] == expected_names
         # One invalid position numbers the whole stack in row order from 1.
@@ -1527,8 +1548,9 @@ class TestVCCacheKey:
         from types import SimpleNamespace
 
         from netbox_librenms_plugin.import_utils.virtual_chassis import _vc_cache_key
+        from netbox_librenms_plugin.serial_identity import SerialRules
 
-        key = _vc_cache_key(SimpleNamespace(server_key=server_key), device_id)
+        key = _vc_cache_key(SimpleNamespace(server_key=server_key), device_id, SerialRules(()))
 
         assert "librenms_vc_detection" in key
         assert all(part in key for part in expected_parts)
@@ -1537,13 +1559,15 @@ class TestVCCacheKey:
         from types import SimpleNamespace
 
         from netbox_librenms_plugin.import_utils.virtual_chassis import _vc_cache_key
+        from netbox_librenms_plugin.serial_identity import SerialRules
 
         server_a = SimpleNamespace(server_key="server-a")
         server_b = SimpleNamespace(server_key="server-b")
+        rules = SerialRules(())
 
-        assert _vc_cache_key(server_a, 1) != _vc_cache_key(server_b, 1)
-        assert _vc_cache_key(server_a, 1) != _vc_cache_key(server_a, 2)
-        assert "default" in _vc_cache_key(object(), 1)
+        assert _vc_cache_key(server_a, 1, rules) != _vc_cache_key(server_b, 1, rules)
+        assert _vc_cache_key(server_a, 1, rules) != _vc_cache_key(server_a, 2, rules)
+        assert "default" in _vc_cache_key(object(), 1, rules)
 
 
 @pytest.mark.django_db
@@ -1595,8 +1619,8 @@ class TestVirtualChassisHTTPIntegration:
         from netbox_librenms_plugin.import_utils.virtual_chassis import (
             get_virtual_chassis_data,
             identify_vc_master,
-            vc_serial_key,
         )
+        from netbox_librenms_plugin.serial_identity import SerialRules
 
         device_id = 42
         librenms_server.device_info_response(device_id=device_id, hostname="stack-master", serial="MEMBER-1")
@@ -1608,7 +1632,9 @@ class TestVirtualChassisHTTPIntegration:
         assert result["is_stack"] is True
         assert result["member_count"] == 2
         assert [member["position"] for member in result["members"]] == [1, 2]
-        assert identify_vc_master(result["members"], "MEMBER-1", vc_serial_key()) is result["members"][0]
+        assert (
+            identify_vc_master(result["members"], "MEMBER-1", SerialRules.load().context(None)) is result["members"][0]
+        )
         assert result["members"][0]["suggested_name"] == "stack-master-M1"
 
     def test_negative_result_is_cached_until_forced_refresh(self, settings, librenms_server):
@@ -1718,28 +1744,31 @@ class TestUpdateVCMemberSuggestedNamesAdditional:
     def test_not_stack_returns_vc_data_unchanged(self):
         """When is_stack=False, the function returns immediately without modifying members."""
         from netbox_librenms_plugin.import_utils.virtual_chassis import update_vc_member_suggested_names
+        from netbox_librenms_plugin.serial_identity import SerialRules
 
         vc_data = {
             "is_stack": False,
             "members": [{"serial": "S1", "position": 1, "suggested_name": "old-name"}],
         }
-        result = update_vc_member_suggested_names(vc_data, "sw")
+        result = update_vc_member_suggested_names(vc_data, "sw", serial_rules=SerialRules())
         # suggested_name must not be regenerated
         assert result["members"][0]["suggested_name"] == "old-name"
 
     def test_none_vc_data_returns_none(self):
         """None input is returned as-is (falsy guard)."""
         from netbox_librenms_plugin.import_utils.virtual_chassis import update_vc_member_suggested_names
+        from netbox_librenms_plugin.serial_identity import SerialRules
 
-        result = update_vc_member_suggested_names(None, "sw")
+        result = update_vc_member_suggested_names(None, "sw", serial_rules=SerialRules())
         assert result is None
 
     def test_no_members_returns_empty_members(self):
         """is_stack=True with empty members list processes without error."""
         from netbox_librenms_plugin.import_utils.virtual_chassis import update_vc_member_suggested_names
+        from netbox_librenms_plugin.serial_identity import SerialRules
 
         vc_data = {"is_stack": True, "members": []}
-        result = update_vc_member_suggested_names(vc_data, "sw")
+        result = update_vc_member_suggested_names(vc_data, "sw", serial_rules=SerialRules())
 
         assert result["members"] == []
 
@@ -1791,11 +1820,12 @@ class TestCreateVirtualChassisWithMembers:
 
     def test_a_stack_without_a_matching_member_names_no_master(self):
         """Guessing the master's slot splits the stack into more devices than switches, so none is named."""
-        from netbox_librenms_plugin.import_utils.virtual_chassis import identify_vc_master, vc_serial_key
+        from netbox_librenms_plugin.import_utils.virtual_chassis import identify_vc_master
+        from netbox_librenms_plugin.serial_identity import SerialRules
 
         members = [{"serial": "UNMATCHED-A", "position": 1}, {"serial": "", "position": 2}]
 
-        assert identify_vc_master(members, "ROOT", vc_serial_key()) is None
+        assert identify_vc_master(members, "ROOT", SerialRules.load().context(None)) is None
 
 
 @pytest.mark.django_db
@@ -2151,14 +2181,90 @@ class TestRefreshExistingDeviceCrossModelIdWins:
         assert validation["existing_match_type"] == "ambiguous_hostname_or_serial"
         assert any("Multiple NetBox devices match" in i for i in validation.get("issues", []))
 
+    def test_a_failed_serial_holder_check_keeps_the_match_and_drops_its_actions(self):
+        """A database error in the holder check proves nothing: the row keeps its match, loses its actions, and blocks."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.lock_conflict_helpers import failing_statement
+
+        holder = make_device("holder-check-failure", serial="HOLDER-CHECK-1")
+        validation = {
+            "existing_device": holder,
+            "existing_match_type": "serial",
+            "serial_action": "update_serial",
+            "import_as_vm": False,
+            "is_ready": False,
+            "can_import": False,
+            "issues": [],
+            "warnings": [],
+        }
+        libre_device = {"device_id": 558, "hostname": holder.name, "sysName": holder.name, "serial": "HOLDER-CHECK-1"}
+
+        # The serial lookup is the one statement that reads the trimmed serial.
+        with failing_statement(lambda sql, params: "BTRIM(" in sql, "57014") as failed:
+            _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        assert failed, "precondition: the holder check ran"
+        assert (validation["existing_device"], validation["existing_match_type"]) == (holder, "serial")
+        assert validation["serial_action"] is None
+        assert (validation["can_import"], validation["is_ready"]) == (False, False)
+        # A blocking issue keeps the row blocked through a later recalculation.
+        assert len(validation["issues"]) == 1
+
+    def test_an_unavailable_serial_names_the_reason_and_clears_when_the_link_is_repaired(self):
+        """An Unavailable lookup is no duplicate: the row names the reason, stays blocked, and recovers after repair."""
+        from dcim.models import VirtualChassis
+
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+        from netbox_librenms_plugin.import_utils.device_operations import serial_unavailable_issue
+        from netbox_librenms_plugin.tests.conftest import ip_on, make_device
+        from netbox_librenms_plugin.tests.test_coverage_device_operations import _stray_chassis_member
+
+        member = _stray_chassis_member("refresh-stray", "STRAY-REFRESH-2")
+        holder = make_device("refresh-stray-ip-holder")
+        ip_on(holder, "198.18.30.7/24", "management")
+        libre_device = {
+            "device_id": 557,
+            "hostname": "no-name-match",
+            "sysName": "no-name-match",
+            "serial": "STRAY-REFRESH-2",
+            "ip": "198.18.30.7",
+        }
+        validation = {
+            "existing_device": None,
+            "existing_vm": None,
+            "import_as_vm": False,
+            "is_ready": True,
+            "can_import": True,
+            "issues": [],
+            "warnings": [],
+            "site": {"found": True, "site": holder.site},
+            "device_type": {"found": True, "device_type": holder.device_type},
+            "device_role": {"found": True, "role": holder.role},
+        }
+        unavailable = serial_unavailable_issue("STRAY-REFRESH-2")
+
+        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        assert validation["issues"] == [unavailable]
+        assert (validation["existing_device"], validation.get("existing_match_type")) == (None, None)
+        assert (validation["can_import"], validation["is_ready"]) == (False, False)
+
+        # Repair the link: the stale blocker goes, and the serial now names its holder.
+        VirtualChassis.objects.filter(pk=member.virtual_chassis_id).update(master=None)
+        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        assert unavailable not in validation["issues"]
+        assert (validation["existing_device"], validation["existing_match_type"]) == (member, "serial")
+
     def test_serial_fallback_ignores_a_serial_that_the_rules_make_a_placeholder(self):
-        """A stored serial that the serial rules turn into N/A binds no device on the refresh re-check."""
+        """A stored serial that the serial rules leave without an identity binds no device on the refresh re-check."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
         from netbox_librenms_plugin.models import NormalizationRule
         from netbox_librenms_plugin.tests.conftest import make_device
 
-        NormalizationRule.objects.create(scope="serial", match_pattern=r"^VENDOR-PLACEHOLDER$", replacement="N/A")
-        make_device("rule-placeholder-host", serial="VENDOR-PLACEHOLDER")
+        NormalizationRule.objects.create(scope="serial", match_pattern=r"^VENDOR-PLACEHOLDER(X)?$", replacement=r"\1")
+        holder = make_device("rule-placeholder-host", serial="VENDOR-PLACEHOLDER")
         libre_device = {
             "device_id": 556,
             "hostname": "no-name-match",
@@ -2172,12 +2278,18 @@ class TestRefreshExistingDeviceCrossModelIdWins:
             "is_ready": True,
             "can_import": True,
             "issues": [],
+            "warnings": [],
+            "site": {"found": True, "site": holder.site},
+            "device_type": {"found": True, "device_type": holder.device_type},
+            "device_role": {"found": True, "role": holder.role},
         }
 
         _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
 
         assert validation["existing_device"] is None
         assert validation.get("existing_match_type") != "serial"
+        # An absent identity is no serial-rule error: the row stays importable.
+        assert (validation["issues"], validation["can_import"], validation["is_ready"]) == ([], True, True)
 
     def test_stale_serial_ip_ambiguity_blocker_cleared_on_refresh(self):
         """A cached serial/IP ambiguity blocker must be cleared on refresh re-check once the duplicate is resolved (now a single match), so the row isn't stuck blocked on the stale issue until cache expiry."""

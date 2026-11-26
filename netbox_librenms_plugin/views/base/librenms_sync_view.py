@@ -1,6 +1,8 @@
 import dataclasses
 import re
+from collections import Counter
 from dataclasses import asdict
+from functools import cached_property
 
 from django.conf import settings as django_settings
 from django.contrib import messages
@@ -11,11 +13,9 @@ from netbox.views import generic
 from netbox_librenms_plugin.forms import AddToLIbreSNMPV1V2, AddToLIbreSNMPV3
 from netbox_librenms_plugin.import_utils import _determine_device_name
 from netbox_librenms_plugin.import_utils.virtual_chassis import (
-    _member_name,
-    chassis_serial_key,
+    _existing_member_name,
+    existing_member_name_refusal,
     extract_vc_members,
-    members_by_serial_key,
-    serials_match,
 )
 from netbox_librenms_plugin.platform_versions import (
     PlatformFacts,
@@ -24,6 +24,22 @@ from netbox_librenms_plugin.platform_versions import (
     platform_version_tracking_enabled,
     reason_text,
     target_label,
+)
+from netbox_librenms_plugin.models import RuleConfigurationError
+from netbox_librenms_plugin.serial_identity import (
+    Comparison,
+    MemberSerials,
+    SerialContext,
+    SerialRules,
+    compare,
+    display,
+    is_identity,
+    is_serial_value,
+    is_sole_holder,
+    keeps_stored_serial,
+    stored_form_differs,
+    stored_form_refusal,
+    assignment_fit_refusal,
 )
 from netbox_librenms_plugin.server_mappings import mapped_device_servers, read_mapping
 from netbox_librenms_plugin.server_selection import (
@@ -42,8 +58,6 @@ from netbox_librenms_plugin.utils import (
     get_interface_name_field,
     get_user_pref,
     match_librenms_hardware_to_device_type,
-    normalize_serial,
-    normalize_stack_serial,
     resolve_naming_preferences,
     save_user_pref,
 )
@@ -68,6 +82,35 @@ class BaseLibreNMSSyncView(
     # Render server key resolved in get(); read by get_context_data for the migrated-mode banner.
     # None until get() runs (e.g. a direct get_context_data() call), then active_server_key is used.
     _scoped_render_server_key = None
+
+    @cached_property
+    def serial_rules(self):
+        """Return the serial rules of this request, read once."""
+        return SerialRules.load()
+
+    def _serial_context(self, device) -> SerialContext:
+        """Return the serial context of *device*; a broken serial rule gives an Unavailable context that names it."""
+        try:
+            return self.serial_rules.for_device(device)
+        except RuleConfigurationError as exc:
+            # Only the serial decisions stop; the reason names the rule only to a viewer of the rule.
+            return SerialContext(None, (), unavailable=exc.shown_to(self.request.user).public_message)
+
+    def _serial_matches(self, obj, incoming) -> bool:
+        """Return whether the stored serial of Device *obj* names the hardware that LibreNMS reports; a VM has none."""
+        if obj is None or obj._meta.model_name != "device":
+            return False
+        return compare(obj.serial, incoming, self._serial_context(obj)) is Comparison.SAME
+
+    def _legacy_id_serial_confirmed(self, device, incoming) -> bool:
+        """Return whether the legacy ID conversion may run: *device* is the one Device that holds the serial."""
+        # A list or an object is no serial, and the resolver can not look it up.
+        if not is_serial_value(incoming) or self._serial_context(device).unavailable:
+            return False
+        try:
+            return is_sole_holder(device, incoming, rules=self.serial_rules)
+        except RuleConfigurationError:
+            return False
 
     def get_object(self, pk):
         """Retrieve the object the user may view (same seam as the base table views)."""
@@ -344,11 +387,9 @@ class BaseLibreNMSSyncView(
         # The legacy ID gate compares the serial of the mapping owner, which can differ from the page device.
         # VMs have no serial field in NetBox; skip the gate so the Convert ID button is enabled.
         _lookup_is_vm = _lookup_device._meta.model_name == "virtualmachine" if _lookup_device else False
-        librenms_id_serial_confirmed = _lookup_is_vm or bool(
-            _lookup_device
-            and serials_match(
-                _lookup_device.serial, librenms_info["librenms_serial"], chassis_serial_key(_lookup_device)
-            )
+        # The conversion requires the sole holder of the serial, as the POST does; the badge compares the pair.
+        librenms_id_serial_confirmed = librenms_id_is_legacy and (
+            _lookup_is_vm or self._legacy_id_serial_confirmed(_lookup_device, librenms_info["librenms_serial"])
         )
         device_info_unavailable = librenms_info.get("device_info_unavailable", False)
         show_add_device = not librenms_info["found_in_librenms"] and not device_info_unavailable
@@ -527,6 +568,8 @@ class BaseLibreNMSSyncView(
             "librenms_device_hardware": "-",
             "librenms_device_serial": "-",
             "serial_matches": False,
+            "serial_stored_form_differs": False,
+            "serial_fit_refusal": "",
             "librenms_device_os": "-",
             "librenms_device_version": "-",
             "librenms_device_features": "-",
@@ -556,7 +599,7 @@ class BaseLibreNMSSyncView(
                 # Extract new fields; use `or "-"` so null/empty from LibreNMS renders as "-"
                 hardware = device_info.get("hardware") or "-"
                 librenms_serial = device_info.get("serial")
-                serial = normalize_stack_serial(librenms_serial) or "-"
+                serial = display(librenms_serial) or "-"
                 os_name = device_info.get("os") or "-"
                 version = device_info.get("version") or "-"
                 features = device_info.get("features") or "-"
@@ -565,26 +608,22 @@ class BaseLibreNMSSyncView(
                 hardware_match = match_librenms_hardware_to_device_type(hardware)
 
                 # Compute resolved name using naming preferences
-                resolved_name = None
+                resolved_name = librenms_sysname
+                member_name_refusal = ""
                 if request:
                     use_sysname, strip_domain = resolve_naming_preferences(request)
-                    resolved_name = _determine_device_name(
-                        device_info,
-                        use_sysname=use_sysname,
-                        strip_domain=strip_domain,
-                        device_id=self.librenms_id,
-                    )
-
-                    # For VC members, generate the expected VC member name
-                    if (
-                        resolved_name
-                        and hasattr(obj, "virtual_chassis")
-                        and obj.virtual_chassis is not None
-                        and obj.vc_position is not None
-                    ):
-                        resolved_name = _member_name(
-                            resolved_name, obj.vc_position, obj.serial, None, chassis_serial_key(obj)
+                    resolved_name = (
+                        _determine_device_name(
+                            device_info,
+                            use_sysname=use_sysname,
+                            strip_domain=strip_domain,
+                            device_id=self.librenms_id,
                         )
+                        or librenms_sysname
+                    )
+                    resolved_name = _existing_member_name(resolved_name, obj, self.serial_rules)
+                    if resolved_name is None:
+                        member_name_refusal = existing_member_name_refusal(obj, self.serial_rules)
 
                 # Update device details regardless of match
                 librenms_device_details.update(
@@ -592,16 +631,31 @@ class BaseLibreNMSSyncView(
                         "librenms_device_url": f"{self.librenms_api.librenms_url}/device/device={self.librenms_id}/",
                         "librenms_device_hardware": hardware,
                         "librenms_device_serial": serial,
-                        "serial_matches": serials_match(
-                            getattr(obj, "serial", None), librenms_serial, chassis_serial_key(obj)
-                        ),
+                        "serial_matches": self._serial_matches(obj, librenms_serial),
+                        "serial_unavailable": self._serial_context(obj).unavailable
+                        if obj._meta.model_name == "device"
+                        else "",
+                        # The writer refuses a serial without an identity, so the page offers no sync for it.
+                        "serial_admitted": obj._meta.model_name == "device"
+                        and is_serial_value(librenms_serial)
+                        and is_identity(librenms_serial, self._serial_context(obj)),
+                        # A legacy stored form names the same hardware; the update action writes the LibreNMS text.
+                        "serial_stored_form_differs": obj._meta.model_name == "device"
+                        and stored_form_differs(obj.serial, librenms_serial, self._serial_context(obj)),
+                        # The writer refuses a serial that does not fit the field, so the page offers no sync for it.
+                        "serial_fit_refusal": assignment_fit_refusal(
+                            librenms_serial, type(obj), self._serial_context(obj)
+                        )
+                        if obj._meta.model_name == "device"
+                        else "",
                         "librenms_device_os": os_name,
                         "librenms_device_version": version,
                         "librenms_device_features": features,
                         "librenms_device_location": device_info.get("location") or "-",
                         "librenms_device_ip": librenms_ip,
                         "sysName": librenms_sysname,
-                        "resolved_name": resolved_name or librenms_sysname,
+                        "resolved_name": resolved_name,
+                        "member_name_refusal": member_name_refusal,
                         "librenms_device_hostname": device_info.get("hostname") or "-",
                         "librenms_device_hardware_match": hardware_match,
                     }
@@ -805,10 +859,14 @@ class BaseLibreNMSSyncView(
             list: [
                 {
                     'description': 'Member component description',
-                    'serial': 'serial key, as the dialog shows it',
+                    'serial': 'the LibreNMS serial, as the dialog shows it',
                     'librenms_serial': 'trimmed raw serial, as the dialog posts it',
                     'model': 'model name',
                     'assigned_member': Device object or None (if serial matches existing assignment)
+                    'selected_member': the assigned member when the user may change it, no other row
+                        has it too and the writer can store the serial, else None
+                    'shared_holder': whether another row has the same assigned member
+                    'fit_refusal': why the writer cannot store the serial, or ""
                 }
             ]
 
@@ -817,30 +875,53 @@ class BaseLibreNMSSyncView(
         if not success:
             return []
 
-        # Get all VC members
-        vc_members = obj.virtual_chassis.members.all()
+        # Each member reads its own serial context, so load the rows that decide it with the members.
+        vc_members = obj.virtual_chassis.members.select_related("device_type", "virtual_chassis__master__device_type")
 
-        # Members store the raw serial, so both sides go through the serial key; the dialog shows the key.
-        serial_key = chassis_serial_key(obj)
-        # A serial key that two members share assigns neither.
-        members_by_key = members_by_serial_key(vc_members, serial_key)
+        # Each member's own Device serial context admits and compares: a masterless member keeps its own rules.
+        members_by_serial = MemberSerials(vc_members, self._serial_context)
+
+        # The form posts every preselected member, and the writer refuses a member outside the change scope.
+        changeable = set(
+            self.restricted_queryset(type(obj), "change")
+            .filter(virtual_chassis_id=obj.virtual_chassis_id)
+            .values_list("pk", flat=True)
+        )
 
         result = []
-        for component in extract_vc_members(inventory, (serial_key,)):
-            serial = serial_key(component["serial"])
-            if not serial:
+        # Like admits(), the stack holds when the rules of any member explain it; the dialog shows the LibreNMS text.
+        for component in extract_vc_members(inventory, members_by_serial.contexts()):
+            if not members_by_serial.admits(component["serial"]):
                 continue
-            assigned_member = members_by_key.get(serial)
+            # A serial that two members share assigns neither.
+            holders = members_by_serial.find(component["serial"])
+            assigned_member = holders[0] if len(holders) == 1 else None
 
             result.append(
                 {
                     "description": component["description"] or "-",
-                    "serial": serial,
-                    "librenms_serial": normalize_serial(component["serial"]),
+                    "serial": display(component["serial"]),
+                    "librenms_serial": display(component["serial"]),
                     "model": component["model"] or "-",
                     "assigned_member": assigned_member,
                 }
             )
+
+        # Two rows that preselect one member make the writer refuse the whole post, so neither row preselects it.
+        holder_rows = Counter(item["assigned_member"].pk for item in result if item["assigned_member"] is not None)
+        for item in result:
+            holder = item["assigned_member"]
+            item["shared_holder"] = holder is not None and holder_rows[holder.pk] > 1
+            # A row that selects a member for a serial that does not fit makes the writer roll back the whole post.
+            item["fit_refusal"] = stored_form_refusal(item["librenms_serial"], type(obj))
+            # A preselected row must post no change: any write it makes can refuse and roll back the other rows.
+            preselect = (
+                holder is not None
+                and holder.pk in changeable
+                and not item["shared_holder"]
+                and keeps_stored_serial(holder.serial, item["librenms_serial"], type(obj))
+            )
+            item["selected_member"] = holder if preselect else None
 
         return result
 

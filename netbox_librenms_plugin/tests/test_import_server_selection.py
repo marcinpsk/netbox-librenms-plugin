@@ -73,6 +73,8 @@ def test_cached_search_aggregation_omits_expired_stale_and_removed_server_metada
         get_active_cached_searches_for_servers,
         get_cache_metadata_key,
     )
+    from netbox_librenms_plugin.import_utils.cache import serial_rules_version
+    from netbox_librenms_plugin.serial_identity import SerialRules
 
     now = datetime.now(timezone.utc)
 
@@ -86,6 +88,7 @@ def test_cached_search_aggregation_omits_expired_stale_and_removed_server_metada
             "use_sysname": True,
             "strip_domain": False,
             "device_count": 1,
+            "serial_rules": serial_rules_version(SerialRules(())),
         }
 
     primary_key = get_cache_metadata_key("primary", {"hostname": "shared-edge"}, False)
@@ -123,7 +126,7 @@ def test_cached_search_aggregation_omits_expired_stale_and_removed_server_metada
         cache.set(retired_key, metadata("retired", now), timeout=300)
 
         searches = get_active_cached_searches_for_servers(
-            {"primary": "Primary LibreNMS", "secondary": "Secondary LibreNMS"}
+            {"primary": "Primary LibreNMS", "secondary": "Secondary LibreNMS"}, SerialRules(())
         )
 
         assert [(search["server_key"], search["cache_key"]) for search in searches] == [("primary", primary_key)]
@@ -680,6 +683,9 @@ def test_completed_filter_job_results_are_private_to_the_job_owner(client, setti
     from django.core.cache import cache
 
     from netbox_librenms_plugin.import_utils import get_validated_device_cache_key
+    from netbox_librenms_plugin.import_utils.cache import serial_rules_version
+    from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+    from netbox_librenms_plugin.serial_identity import SerialRules
 
     LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "primary"})
     user_model = get_user_model()
@@ -689,6 +695,9 @@ def test_completed_filter_job_results_are_private_to_the_job_owner(client, setti
     device_id = 46105
     filters = {"hostname": "private-job-result"}
     cached_device = librenms_device(device_id, "private-job-result")
+    cached_device["_validation"] = validate_device_for_import(
+        cached_device, server_key="secondary", include_vc_detection=False
+    )
     cache_key = get_validated_device_cache_key(
         server_key="secondary",
         filters=filters,
@@ -707,23 +716,25 @@ def test_completed_filter_job_results_are_private_to_the_job_owner(client, setti
             "device_ids": [device_id],
             "filters": filters,
             "server_key": "secondary",
+            "serial_rules": serial_rules_version(SerialRules.load()),
             "vc_detection_enabled": False,
             "use_sysname": True,
             "strip_domain": False,
         },
     )
-    client.force_login(requester)
-
     try:
+        client.force_login(owner)
+        owner_response = client.get(import_url, {"job_id": job.pk})
+        assert owner_response.status_code == 200
+        assert [row.record["device_id"] for row in owner_response.context["table"].rows] == [device_id]
+
+        client.force_login(requester)
         response = client.get(import_url, {"job_id": job.pk})
     finally:
         cache.delete(cache_key)
 
     assert response.status_code == 200
-    html = response.content.decode()
-    marker = "private-job-result"
-    marker_index = html.find(marker)
-    assert marker_index == -1, html[max(0, marker_index - 200) : marker_index + 200]
+    assert [row.record["device_id"] for row in response.context["table"].rows] == []
 
 
 @pytest.mark.django_db
@@ -794,6 +805,8 @@ def test_completed_filter_job_rebinds_results_and_follow_up_forms_to_its_server(
     """A completed job remains authoritative when its result URL omits server_key."""
     from core.models import Job
 
+    from netbox_librenms_plugin.import_utils.cache import serial_rules_version
+
     LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "primary"})
     user = make_superuser("import-job-server-owner")
     client.force_login(user)
@@ -819,6 +832,7 @@ def test_completed_filter_job_rebinds_results_and_follow_up_forms_to_its_server(
             "device_ids": [46103],
             "filters": {"hostname": "job-edge"},
             "server_key": "secondary",
+            "serial_rules": serial_rules_version(),
             "vc_detection_enabled": False,
             "use_sysname": True,
             "strip_domain": False,
