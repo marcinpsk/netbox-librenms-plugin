@@ -1575,6 +1575,7 @@ def test_replacement_refuses_a_child_reparented_within_the_observed_tree(client)
     from dcim.models import Module, ModuleBay
     from django.core.cache import cache
 
+    from netbox_librenms_plugin.module_writes import _CHANGED
     from netbox_librenms_plugin.tests.lock_conflict_helpers import commit_row_change, second_connection
     from netbox_librenms_plugin.tests.view_test_helpers import rendered_preview_url
     from netbox_librenms_plugin.views.mixins import CacheMixin
@@ -1612,6 +1613,7 @@ def test_replacement_refuses_a_child_reparented_within_the_observed_tree(client)
 
     assert changed
     assert response.status_code == 302
+    assert any(_CHANGED in text for _level, text in messages_on(response.wsgi_request))
     assert Module.objects.filter(pk=parent.pk).exists(), "stale topology must refuse before deletion"
     child.refresh_from_db()
     assert child.module_bay_id == destination.pk
