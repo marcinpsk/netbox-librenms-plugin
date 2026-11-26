@@ -1185,6 +1185,8 @@ rules:
     paths:
       exclude:
         - "**/server_mappings.py"
+        # The migration classifier reads stored values itself: it runs on old plugin versions.
+        - "**/mapping_classifier.py"
         - "**/migrations/**"
     mode: taint
     options:
@@ -1239,6 +1241,8 @@ rules:
     paths:
       exclude:
         - "**/server_mappings.py"
+        # The migration classifier reads stored values itself: it runs on old plugin versions.
+        - "**/mapping_classifier.py"
         - "**/migrations/**"
     pattern-either:
       - patterns:
@@ -1288,6 +1292,8 @@ rules:
     paths:
       exclude:
         - "**/server_mappings.py"
+        # The migration classifier reads stored values itself: it runs on old plugin versions.
+        - "**/mapping_classifier.py"
         - "**/migrations/**"
     pattern-either:
       - patterns:
