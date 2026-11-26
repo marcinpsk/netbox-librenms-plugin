@@ -1151,33 +1151,43 @@ def test_the_bulk_confirmation_checks_only_the_stack_members_that_the_import_cre
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("unavailable", [True, False])
-def test_the_bulk_confirmation_blocks_a_stack_member_whose_serial_lookup_is_unavailable(
-    client, live_librenms, unavailable
-):
-    """The member writer refuses a member serial that a broken chassis master link hides; validation says so."""
+@pytest.mark.parametrize("case", ["unavailable", "ambiguous", "uncertain", "free"])
+def test_the_bulk_confirmation_blocks_a_stack_member_that_the_writer_refuses(client, live_librenms, case):
+    """The member writer refuses the whole stack for these member serials; validation says so."""
     from django.urls import reverse
 
     from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
+    from netbox_librenms_plugin.models import NormalizationRule
     from netbox_librenms_plugin.serial_identity import UNAVAILABLE_MASTER_LINK
     from netbox_librenms_plugin.tests.test_coverage_device_operations import _stray_chassis_member
     from netbox_librenms_plugin.tests.test_virtual_chassis_fallbacks import _seed_stack
 
     prerequisites = TestBulkImportIntegration()._prerequisites()
-    member_serial = f"STRAY-MEMBER-{unavailable}"
-    if unavailable:
+    member_serial = f"REFUSED-MEMBER-{case}".upper() + ("-X-X" if case == "uncertain" else "")
+    issue = f"Stack member 2: Cannot create VC member with serial '{member_serial}': "
+    if case == "unavailable":
         _stray_chassis_member("confirm-stray", member_serial)
-    device_id = 297 if unavailable else 298
+        issue = f"Stack member 2: Cannot check VC member serial '{member_serial}': {UNAVAILABLE_MASTER_LINK}"
+    elif case == "ambiguous":
+        for index in range(2):
+            make_device(f"confirm-stack-holder-{index}", serial=member_serial)
+        issue += "several NetBox devices already hold this serial."
+    elif case == "uncertain":
+        # The rule changes its own output, so the holder's "...-X" is the import's key but no match.
+        NormalizationRule.objects.create(scope="serial", match_pattern=r"^(.+)-X$", replacement=r"\1")
+        make_device("confirm-stack-holder", serial=member_serial[: -len("-X")])
+        issue += "a NetBox device stores a serial that can be the same member. Check the serials manually."
+    device_id = 297 + ["unavailable", "ambiguous", "uncertain", "free"].index(case) * 2
     row = _libre_device(
         device_id,
-        f"confirm-stack-stray-{unavailable}",
+        f"confirm-stack-refused-{case}",
         serial=f"STACK-MASTER-{device_id}",
         hardware=prerequisites["hardware"],
         location=prerequisites["location"],
     )
     _seed_stack(live_librenms.server, device_id, serials=(row["serial"], member_serial))
     cache.set(get_import_device_cache_key(device_id, "default"), row, timeout=300)
-    client.force_login(make_superuser(f"confirm-stack-stray-user-{unavailable}"))
+    client.force_login(make_superuser(f"confirm-stack-refused-user-{case}"))
 
     response = client.post(
         reverse("plugins:netbox_librenms_plugin:bulk_import_confirm"),
@@ -1189,5 +1199,4 @@ def test_the_bulk_confirmation_blocks_a_stack_member_whose_serial_lookup_is_unav
     (entry,) = response.context["devices"]
     assert entry["validation"]["virtual_chassis"]["master_identified"]
     # The text of the member writer's refusal.
-    issue = f"Stack member 2: Cannot check VC member serial '{member_serial}': {UNAVAILABLE_MASTER_LINK}"
-    assert (issue in entry["validation"]["issues"]) is unavailable
+    assert (issue in entry["validation"]["issues"]) is (case != "free")

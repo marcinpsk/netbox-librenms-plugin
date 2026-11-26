@@ -71,7 +71,7 @@ from .virtual_chassis import (
     existing_member_name_refusal,
     get_virtual_chassis_data,
     identify_vc_master,
-    member_serial_unavailable_message,
+    member_serial_refusal,
     members_to_create,
     unnamed_member_refusal,
     unnamed_members,
@@ -695,14 +695,14 @@ def _stack_member_serial_refusals(result, incoming_serial, serial_rules) -> list
     members = [(member, member.get("position"), display(member.get("serial"))) for member in vc["members"]]
     members = [entry for entry in members if entry[0] is not master]
     taken = resolve_devices_write([serial for _member, _position, serial in members], context, rules=serial_rules)
-    # The member writer refuses the whole stack for an Unavailable member, so validation blocks it too.
-    unavailable = [
-        f"Stack member {position}: {member_serial_unavailable_message(serial)}"
+    # The member writer refuses the whole stack for such a member, so validation blocks it too.
+    refusals = [
+        f"Stack member {position}: {refusal}"
         for _member, position, serial in members
-        if taken[serial].kind is ResolutionKind.UNAVAILABLE
+        if (refusal := member_serial_refusal(serial, taken[serial]))
     ]
-    if unavailable:
-        return unnamed + unavailable
+    if refusals:
+        return unnamed + refusals
     created = {
         id(member)
         for member, *_rest in members_to_create(

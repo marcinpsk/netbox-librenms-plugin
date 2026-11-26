@@ -616,8 +616,7 @@ def test_the_import_answer_fails_a_stack_row_whose_chassis_create_failed(client,
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("holder_count", [1, 2])
-def test_a_confirmed_member_serial_conflict_skips_only_that_member(live_librenms, caplog, holder_count):
+def test_a_confirmed_member_serial_conflict_skips_only_that_member(live_librenms, caplog):
     from dcim.models import Device, VirtualChassis
 
     from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
@@ -628,7 +627,7 @@ def test_a_confirmed_member_serial_conflict_skips_only_that_member(live_librenms
     members = [_chassis(100 * position, serial, position=position) for position, serial in enumerate(serials, start=1)]
     device_id = 96314
     prerequisites, row = _importable_row(live_librenms, device_id, "stack-taken-member", members=members)
-    holders = {make_device(f"stack-taken-holder-{index}", serial=serials[-1]).pk for index in range(holder_count)}
+    holders = {make_device("stack-taken-holder", serial=serials[-1]).pk}
 
     result = bulk_import_devices_shared(
         [device_id],
@@ -651,6 +650,50 @@ def test_a_confirmed_member_serial_conflict_skips_only_that_member(live_librenms
         and serials[-1] in record.getMessage()
         for record in caplog.records
     )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("case", ["ambiguous", "uncertain"])
+def test_a_member_serial_the_import_cannot_create_safely_refuses_the_stack(live_librenms, case):
+    """Two holders, or a holder whose serial can be the same member, refuse the stack; nothing of it is written."""
+    from dcim.models import Device, VirtualChassis
+
+    from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.tests.test_bulk_import_job_control import _chassis
+
+    device_id = 96317 if case == "ambiguous" else 96318
+    member_serial = "REFUSED-STACK-BBB" if case == "ambiguous" else "REFUSED-STACK-BBB-X-X"
+    members = [_chassis(100, f"REFUSED-STACK-AAA-{case}", position=1), _chassis(200, member_serial, position=2)]
+    prerequisites, row = _importable_row(live_librenms, device_id, f"stack-refused-{case}", members=members)
+    if case == "ambiguous":
+        for index in range(2):
+            make_device(f"stack-refused-holder-{index}", serial=member_serial)
+        reason = (
+            f"Cannot create VC member with serial '{member_serial}': several NetBox devices already hold this serial."
+        )
+    else:
+        # The rule changes its own output, so the holder's "...-X" is the import's key but no match.
+        NormalizationRule.objects.create(scope="serial", match_pattern=r"^(.+)-X$", replacement=r"\1")
+        make_device("stack-refused-holder", serial="REFUSED-STACK-BBB-X")
+        reason = (
+            f"Cannot create VC member with serial '{member_serial}': a NetBox device stores a serial that can be "
+            "the same member. Check the serials manually."
+        )
+    before = {model: set(model.objects.values_list("pk", flat=True)) for model in (Device, VirtualChassis)}
+
+    result = bulk_import_devices_shared(
+        [device_id],
+        server_key="default",
+        manual_mappings_per_device={device_id: prerequisites},
+        libre_devices_cache={device_id: row},
+        user=make_superuser(f"stack-refused-{case}-user"),
+    )
+
+    assert result["success"] == []
+    assert result["virtual_chassis_created"] == 0
+    assert result["failed"] == [{"device_id": device_id, "error": f"Cannot import stack device {device_id}: {reason}"}]
+    assert {model: set(model.objects.values_list("pk", flat=True)) for model in before} == before
 
 
 MASTER_UNKNOWN = "Imported device {} without a virtual chassis: the stack master could not be identified by serial."

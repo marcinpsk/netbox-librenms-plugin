@@ -1153,10 +1153,23 @@ def members_to_create(members, taken, context, name_of):
         yield member, position, serial, member_name
 
 
-def member_serial_unavailable_message(serial) -> str:
-    """Return why the member writer refuses a member serial whose lookup is Unavailable; validation reports it too."""
-    # The constant, not the lookup's reason: a Device lookup is Unavailable only for a broken master link.
-    return f"Cannot check VC member serial '{display(serial)}': {UNAVAILABLE_MASTER_LINK}"
+def member_serial_refusal(serial, resolution) -> str:
+    """Return why the member writer refuses the whole stack for a member *serial*, else ""; validation reports it too."""
+    reported = display(serial)
+    if resolution.kind is ResolutionKind.UNAVAILABLE:
+        # The constant, not the lookup's reason: a Device lookup is Unavailable only for a broken master link.
+        return f"Cannot check VC member serial '{reported}': {UNAVAILABLE_MASTER_LINK}"
+    # A Unique holder is the member itself, so the writer skips it. The text names no holder: the lookup is unrestricted.
+    if resolution.kind is ResolutionKind.UNIQUE:
+        return ""
+    if resolution.kind is ResolutionKind.AMBIGUOUS:
+        return f"Cannot create VC member with serial '{reported}': several NetBox devices already hold this serial."
+    if resolution.uncertain:
+        return (
+            f"Cannot create VC member with serial '{reported}': a NetBox device stores a serial that can be "
+            "the same member. Check the serials manually."
+        )
+    return ""
 
 
 def _member_serial_taken(serial, resolution, created_members) -> bool:
@@ -1168,19 +1181,13 @@ def _member_serial_taken(serial, resolution, created_members) -> bool:
         resolution: The Devices that held *serial* before this stack's members were created.
         created_members: The members that this stack created so far, grouped by serial.
 
+    Raises:
+        ValidationError: The import cannot create the member safely, so it refuses the whole stack.
+
     """
-    if resolution.kind is ResolutionKind.UNAVAILABLE:
-        raise ValidationError(member_serial_unavailable_message(serial))
+    if refusal := member_serial_refusal(serial, resolution):
+        raise ValidationError(refusal)
     if created_members.find(serial) or resolution.kind is ResolutionKind.UNIQUE:
         logger.warning(f"Device with serial '{serial}' already exists, skipping VC member creation")
-        return True
-    if resolution.kind is ResolutionKind.AMBIGUOUS:
-        logger.warning(f"Skipped VC member with serial '{serial}': several devices already hold this serial")
-        return True
-    if resolution.uncertain:
-        logger.warning(
-            f"Skipped VC member with serial '{serial}': a device stores serial "
-            f"'{display(resolution.uncertain[0].serial)}', which can be the same member. Check the two serials manually."
-        )
         return True
     return False
