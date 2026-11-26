@@ -8,6 +8,7 @@ from typing import List
 
 from dcim.models import Device, VirtualChassis
 from django.core.cache import cache
+from django.db import DatabaseError, connection, transaction
 
 from ..import_validation_helpers import (
     apply_cluster_to_validation,
@@ -240,6 +241,14 @@ def detect_collisions_for_device_ids(
             # (e.g. a same-batch retry that hits the cache instead of re-fetching), even though this
             # id is (correctly) recorded unresolved above.
             devices_cache[device_id] = libre_device
+        # The batch reads the serial rules here first, in a savepoint, so a failed NetBox read refuses only this row.
+        try:
+            with transaction.atomic() if connection.in_atomic_block else nullcontext():
+                _ = serial_rules.digest
+        except DatabaseError:
+            logger.exception("Collision pre-check could not read the serial rules for device %s", device_id)
+            unresolved[device_id] = NETBOX_ROW_UNREADABLE
+            continue
         validation = validate_device_for_import(
             # DB-only collision pre-check: don't hand the validator an API client (it would let
             # API-backed validation paths run even with the cache supplied + include_vc_detection

@@ -1030,7 +1030,9 @@ def test_collision_precheck_reads_the_serial_rules_once_for_the_batch(live_libre
 
 
 @pytest.mark.django_db
-def test_collision_precheck_continues_when_the_vc_cache_stamp_cannot_read_rules(live_librenms):
+@pytest.mark.parametrize("serial", ["", "STAMP-UNMATCHED-SERIAL"], ids=["vc-cache-stamp", "serial-lookup"])
+def test_collision_precheck_continues_when_the_vc_cache_stamp_cannot_read_rules(live_librenms, serial):
+    """A blank serial reads the rules first in the VC cache stamp; an unmatched serial reads them in its lookup."""
     from netbox_librenms_plugin.import_utils.bulk_import import NETBOX_ROW_UNREADABLE, detect_collisions_for_device_ids
     from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data
     from netbox_librenms_plugin.tests.lock_conflict_helpers import aborting_statement
@@ -1040,7 +1042,7 @@ def test_collision_precheck_continues_when_the_vc_cache_stamp_cannot_read_rules(
     members = [_chassis(100, "STAMP-AAA", position=1), _chassis(200, "STAMP-BBB", position=2)]
     _, first = _importable_row(live_librenms, first_id, "vc-stamp-first", members=members)
     _, second = _importable_row(live_librenms, second_id, "vc-stamp-second")
-    first["serial"] = ""
+    first["serial"] = serial
     live_librenms.api.cache_timeout = 300
     assert get_virtual_chassis_data(live_librenms.api, first_id, force_refresh=True)["is_stack"]
     live_librenms.server.requests.clear()
