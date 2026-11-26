@@ -80,6 +80,7 @@ from netbox_librenms_plugin.server_mappings import (
 logger = logging.getLogger(__name__)
 
 LIBRENMS_ROW_UNREADABLE = "LibreNMS data couldn't be read to verify the row"
+NETBOX_ROW_UNREADABLE = "NetBox data couldn't be read to verify the row"
 NETBOX_SERIAL_UNVERIFIED = "NetBox could not verify the serial"
 
 # Stable fragment of the ambiguous-librenms_id blocker message. Shared by the writer
@@ -269,10 +270,9 @@ def detect_collisions_for_device_ids(
         if _stopped_at_unavailable_serial(validation):
             unresolved[device_id] = NETBOX_SERIAL_UNVERIFIED
             continue
-        if device_id not in vm_id_set and get_virtual_chassis_data(api, device_id, serial_rules=serial_rules).get(
-            "detection_failed"
-        ):
-            unresolved[device_id] = LIBRENMS_ROW_UNREADABLE
+        vc_data = {} if device_id in vm_id_set else get_virtual_chassis_data(api, device_id, serial_rules=serial_rules)
+        if vc_data.get("detection_failed"):
+            unresolved[device_id] = NETBOX_ROW_UNREADABLE if vc_data.get("netbox_failed") else LIBRENMS_ROW_UNREADABLE
         devices.append(
             {
                 "device_id": device_id,

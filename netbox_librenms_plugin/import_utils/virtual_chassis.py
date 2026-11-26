@@ -73,11 +73,13 @@ def _clone_virtual_chassis_data(data: dict | None) -> dict:
     }
 
 
-def _failed_virtual_chassis_data(error: str) -> dict:
-    """Return a VC payload that distinguishes a failed read from a non-stack device."""
+def _failed_virtual_chassis_data(error: str, *, netbox_failed: bool = False) -> dict:
+    """Return a VC payload that tells a failed read from a non-stack device; *netbox_failed* marks a NetBox read."""
     data = empty_virtual_chassis_data()
     data["detection_failed"] = True
     data["detection_error"] = error
+    if netbox_failed:
+        data["netbox_failed"] = True
     return data
 
 
@@ -117,7 +119,7 @@ def _cached_virtual_chassis_data(api: LibreNMSAPI, device_id, force_refresh: boo
             cache_key = _vc_cache_key(api, device_id, serial_rules)
     except DatabaseError as e:
         logger.exception("Could not read serial rules for virtual chassis detection on device %s", device_id)
-        return _failed_virtual_chassis_data(exception_text_for(e, VirtualChassis, None))
+        return _failed_virtual_chassis_data(exception_text_for(e, VirtualChassis, None), netbox_failed=True)
     _cache_timeout = getattr(api, "cache_timeout", None)
     cache_timeout = 300 if _cache_timeout is None else _cache_timeout
     if not force_refresh and cache_timeout != 0:

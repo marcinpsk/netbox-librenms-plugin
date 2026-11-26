@@ -1028,7 +1028,7 @@ def test_collision_precheck_reads_the_serial_rules_once_for_the_batch(live_libre
 
 @pytest.mark.django_db
 def test_collision_precheck_continues_when_the_vc_cache_stamp_cannot_read_rules(live_librenms):
-    from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+    from netbox_librenms_plugin.import_utils.bulk_import import NETBOX_ROW_UNREADABLE, detect_collisions_for_device_ids
     from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data
     from netbox_librenms_plugin.tests.lock_conflict_helpers import aborting_statement
     from netbox_librenms_plugin.tests.test_bulk_import_job_control import _chassis
@@ -1050,7 +1050,8 @@ def test_collision_precheck_continues_when_the_vc_cache_stamp_cannot_read_rules(
         )
 
     assert failed
-    assert (collisions, list(unresolved)) == ([], [first_id])
+    # NetBox failed, not LibreNMS, so the reason gives no LibreNMS retry hint.
+    assert (collisions, unresolved) == ([], {first_id: NETBOX_ROW_UNREADABLE})
     assert {request["path"] for request in live_librenms.server.requests} == {
         f"/api/v0/devices/{second_id}",
         f"/api/v0/inventory/{second_id}",
