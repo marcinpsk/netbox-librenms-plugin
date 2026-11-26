@@ -1,6 +1,7 @@
 {% load i18n %}
 {% load librenms_sync_query %}
 {# Every link keeps the page query (server, name field, sort, filters) and states only its tab, page and size. #}
+{# sync_draft.js loads each data-sync-nav link into the sync tabs. #}
 
 {% if table.page %}
   <div class="d-flex justify-content-between align-items-center border-{% if placement == 'top' %}bottom{% else %}top{% endif %} p-2">
@@ -9,7 +10,7 @@
         <ul class="pagination mb-0">
           {% if table.page.has_previous %}
             <li class="page-item">
-              <a href="{% sync_tab_url prefix=table.prefix tab=table.tab page=table.page.previous_page_number per_page=table.paginator.per_page %}" class="page-link" aria-label="{% trans "Previous page" %}">
+              <a href="{% sync_tab_url prefix=table.prefix tab=table.tab page=table.page.previous_page_number per_page=table.paginator.per_page %}" class="page-link" data-sync-nav aria-label="{% trans "Previous page" %}">
                 <i class="mdi mdi-chevron-left" aria-hidden="true"></i>
               </a>
             </li>
@@ -18,7 +19,7 @@
           {% for p in table.page.smart_pages %}
             <li class="page-item{% if table.page.number == p %} active{% endif %}">
               {% if p %}
-              <a href="{% sync_tab_url prefix=table.prefix tab=table.tab page=p per_page=table.paginator.per_page %}" class="page-link">{{ p }}</a>
+              <a href="{% sync_tab_url prefix=table.prefix tab=table.tab page=p per_page=table.paginator.per_page %}" class="page-link" data-sync-nav>{{ p }}</a>
               {% else %}
                 <span class="page-link" disabled>&hellip;</span>
               {% endif %}
@@ -27,7 +28,7 @@
 
           {% if table.page.has_next %}
             <li class="page-item">
-              <a href="{% sync_tab_url prefix=table.prefix tab=table.tab page=table.page.next_page_number per_page=table.paginator.per_page %}" class="page-link" aria-label="{% trans "Next page" %}">
+              <a href="{% sync_tab_url prefix=table.prefix tab=table.tab page=table.page.next_page_number per_page=table.paginator.per_page %}" class="page-link" data-sync-nav aria-label="{% trans "Next page" %}">
                 <i class="mdi mdi-chevron-right" aria-hidden="true"></i>
               </a>
             </li>
@@ -52,7 +53,7 @@
         </button>
         <div class="dropdown-menu">
           {% for n in table.paginator.get_page_lengths %}
-          <a href="{% sync_tab_url prefix=table.prefix tab=table.tab per_page=n page=table.page.number %}" class="dropdown-item">{{ n }}</a>
+          <a href="{% sync_tab_url prefix=table.prefix tab=table.tab per_page=n page=table.page.number %}" class="dropdown-item" data-sync-nav>{{ n }}</a>
           {% endfor %}
         </div>
       </div>

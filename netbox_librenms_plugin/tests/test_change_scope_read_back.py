@@ -27,7 +27,12 @@ from netbox_librenms_plugin.tests.conftest import (
 from netbox_librenms_plugin.tests.interface_sync_post_helpers import sync_port
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, seed_ip_snapshot
-from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, make_user_with_perms
+from netbox_librenms_plugin.tests.view_test_helpers import (
+    grant,
+    make_request,
+    make_user_with_perms,
+    submit_ip_selection,
+)
 from netbox_librenms_plugin.transactions import outside_change_scope, update_existing_row
 
 SERVER_KEY = "default"
@@ -229,15 +234,7 @@ def test_a_primary_ip_out_of_the_device_change_scope_is_rolled_back(client, live
     row_id = "198.18.73.11/24"
     client.force_login(_ip_writer("rb-primary", device_change={"primary_ip4__isnull": True}))
 
-    response = client.post(
-        _ip_sync_url(device),
-        {
-            "server_key": SERVER_KEY,
-            "select": [row_id],
-            f"vrf_{row_id}": "",
-            "set-primary-ip-toggle": "true",
-        },
-    )
+    response = submit_ip_selection(client, device, [row_id], server_key=SERVER_KEY, **{"set-primary-ip-toggle": "true"})
 
     assert response.status_code == 302
     device.refresh_from_db()
@@ -261,8 +258,14 @@ def test_a_confirmed_ip_change_out_of_the_ip_change_scope_is_rolled_back(client,
     _seed_ip_rows(device, [("198.18.73.12", 9312, target.name)])
     row_id = "198.18.73.12/24"
     client.force_login(_ip_writer("rb-confirmed-ip", ip_change={"assigned_object_id": current.pk}))
-    form = {"server_key": SERVER_KEY, "select": row_id, f"vrf_{row_id}": str(blue.pk)}
-    conflict = client.post(_ip_sync_url(device), form, HTTP_HX_REQUEST="true").context["conflicts"][0]
+    conflict = submit_ip_selection(
+        client,
+        device,
+        [row_id],
+        server_key=SERVER_KEY,
+        vrfs={row_id: str(blue.pk)},
+        headers={"HTTP_HX_REQUEST": "true"},
+    ).context["conflicts"][0]
 
     response = client.post(
         _ip_sync_url(device),
@@ -385,14 +388,8 @@ def test_an_existing_interface_that_the_ip_tab_writes_out_of_the_change_scope_is
     )
     client.force_login(grant(user, "change", Interface, constraints={"description": ""}))
 
-    response = client.post(
-        _ip_sync_url(device),
-        {
-            "server_key": SERVER_KEY,
-            "create-missing-interfaces-toggle": "on",
-            "select": ["198.18.73.31/24"],
-            "vrf_198.18.73.31/24": "",
-        },
+    response = submit_ip_selection(
+        client, device, ["198.18.73.31/24"], server_key=SERVER_KEY, **{"create-missing-interfaces-toggle": "on"}
     )
 
     assert response.status_code == 302

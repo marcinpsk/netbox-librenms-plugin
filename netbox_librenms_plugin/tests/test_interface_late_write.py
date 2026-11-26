@@ -17,7 +17,6 @@ from core.models import ObjectChange
 from dcim.models import Device, Interface, MACAddress
 from django.contrib.contenttypes.models import ContentType
 from django.db import transaction
-from django.urls import reverse
 from extras import events
 from ipam.models import VLAN, VRF, IPAddress, VLANGroup
 from utilities.ordering import naturalize_interface
@@ -53,7 +52,7 @@ from netbox_librenms_plugin.tests.mapping_fixtures import (
     seed_stored_mapping,
 )
 from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, port_vlans, seed_ip_snapshot
-from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms, messages_on
+from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms, messages_on, submit_ip_selection
 from netbox_librenms_plugin.views.mixins import VlanAssignmentMixin
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
@@ -589,18 +588,14 @@ def seed_ip_rows(device, rows):
 
 
 def post_ip_sync(client, device, addresses, *, extra=None):
-    """Post the IP sync of *device* for *addresses*, with the missing interfaces created; *extra* adds fields."""
-    data = {
-        "server_key": SERVER_KEY,
-        "create-missing-interfaces-toggle": "on",
-        "select": [f"{address}/24" for address in addresses],
-        **{f"vrf_{address}/24": "" for address in addresses},
-        **(extra or {}),
-    }
-    url = reverse(
-        "plugins:netbox_librenms_plugin:sync_device_ip_addresses", kwargs={"object_type": "device", "pk": device.pk}
+    """Select *addresses* in the tab's draft, then post the IP sync that creates missing interfaces; *extra* adds fields."""
+    return submit_ip_selection(
+        client,
+        device,
+        [f"{address}/24" for address in addresses],
+        server_key=SERVER_KEY,
+        **{"create-missing-interfaces-toggle": "on", **(extra or {})},
     )
-    return client.post(url, data)
 
 
 def commit_when_the_ip_tab_writes(monkeypatch, pk, commit):

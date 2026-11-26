@@ -21,7 +21,7 @@ from netbox_librenms_plugin.tests.conftest import (
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, seed_ip_snapshot, seed_source_snapshot
-from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms, submit_ip_selection
 from netbox_librenms_plugin.utils import get_librenms_cable_tag
 
 
@@ -239,7 +239,7 @@ class TestIPAddressWriteFailures:
 
         response = client.post(
             _ip_url(device),
-            {"server_key": "removed", "select": "198.18.121.10/24"},
+            {"server_key": "removed"},
         )
 
         assert response.status_code == 302
@@ -252,7 +252,7 @@ class TestIPAddressWriteFailures:
         _seed_ip(device, "198.18.122.10", 8321, interface)
         _login(client, "ip-no-selection-user")
 
-        response = client.post(_ip_url(device), {"server_key": SERVER_KEY})
+        response = submit_ip_selection(client, device, [], server_key=SERVER_KEY)
 
         assert response.status_code == 302
         assert IPAddress.objects.count() == 0
@@ -268,10 +268,7 @@ class TestIPAddressWriteFailures:
         _seed_ip(device, "198.18.123.10", 8331, intended)
         _login(client, "ip-conflict-user")
 
-        response = client.post(
-            _ip_url(device),
-            {"server_key": SERVER_KEY, "select": row_id, f"vrf_{row_id}": ""},
-        )
+        response = submit_ip_selection(client, device, [row_id], server_key=SERVER_KEY)
 
         assert response.status_code == 200
         assert row_id.encode() in response.content
@@ -288,10 +285,7 @@ class TestIPAddressWriteFailures:
         _seed_ip(device, "198.18.124.10", 8341, interface)
         _login(client, "ip-vrf-user")
 
-        response = client.post(
-            _ip_url(device),
-            {"server_key": SERVER_KEY, "select": row_id, f"vrf_{row_id}": vrf.pk},
-        )
+        response = submit_ip_selection(client, device, [row_id], server_key=SERVER_KEY, vrfs={row_id: str(vrf.pk)})
 
         assert response.status_code == 302
         address = IPAddress.objects.get(address=row_id, vrf=vrf)
@@ -306,10 +300,7 @@ class TestIPAddressWriteFailures:
         _seed_ip(vm, "198.18.125.10", 8351, interface)
         _login(client, "ip-vm-user")
 
-        response = client.post(
-            _ip_url(vm),
-            {"server_key": SERVER_KEY, "select": row_id, f"vrf_{row_id}": ""},
-        )
+        response = submit_ip_selection(client, vm, [row_id], server_key=SERVER_KEY)
 
         assert response.status_code == 302
         assert IPAddress.objects.get(address=row_id).assigned_object == interface
