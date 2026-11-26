@@ -2047,6 +2047,31 @@ class TestImportSingleDevice:
         assert result["device"] is None
         assert result["error"] == "Device role is required but not provided"
 
+    def test_lazy_validation_uses_the_supplied_serial_rules(self, librenms_api):
+        """A caller's rule snapshot decides the validation too, so a newer stored rule does not match a Device."""
+        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
+        _api, server = librenms_api
+        infrastructure = make_device("supplied-rules-holder", serial="ABC-5609")
+        NormalizationRule.objects.create(
+            scope="serial", manufacturer=None, match_pattern=r"^TAG-(.+)$", replacement=r"\1"
+        )
+        server.device_info_response(
+            device_id=5609,
+            hostname="supplied-rules-import",
+            hardware=infrastructure.device_type.model,
+            serial="TAG-ABC-5609",
+            location=infrastructure.site.name,
+        )
+        server.vc_inventory_callable(5609, [], {})
+
+        result = import_single_device(5609, SERVER_KEY, serial_rules=SerialRules(()))
+
+        assert (result["success"], result["device"]) == (False, None)
+        assert result["error"] == "Device role is required but not provided"
+
     def _import_location_payload(self, location, *, pattern, validation, manual_mappings=None):
         """Import through the real parser and reload the persisted device."""
         from netbox_librenms_plugin.import_utils.device_operations import import_single_device

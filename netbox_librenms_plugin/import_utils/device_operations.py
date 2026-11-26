@@ -1933,7 +1933,7 @@ def import_single_device(  # noqa: C901
         user: User whose view scope authorizes explicit object selections.
         text_viewer: User who reads the ``error`` text. None (the default) for text that is saved,
             such as job output, so that only the hidden text of a NetBox refusal is kept.
-        serial_rules: The batch's :class:`SerialRules`; None reads them in the import transaction.
+        serial_rules: The batch's :class:`SerialRules`; None reads them once for this import.
 
     Returns:
         dict: Import result with structure:
@@ -1969,6 +1969,8 @@ def import_single_device(  # noqa: C901
                     "synced": {},
                 }
 
+        # The validation and the write use one snapshot of the serial rules.
+        serial_rules = serial_rules or SerialRules.load()
         # Validate device if validation not provided
         if validation is None:
             use_sysname_opt = sync_options.get("use_sysname", True) if sync_options else True
@@ -1979,6 +1981,7 @@ def import_single_device(  # noqa: C901
                 use_sysname=use_sysname_opt,
                 strip_domain=strip_domain_opt,
                 server_key=api.server_key,
+                serial_rules=serial_rules,
             )
 
         if validation.get("virtual_chassis", {}).get("detection_failed"):
@@ -2092,7 +2095,6 @@ def import_single_device(  # noqa: C901
         # Create device in NetBox
         with atomic_with_events():
             # The serial identity locks come first; then the lookup sees a concurrent import's committed device.
-            serial_rules = serial_rules or SerialRules.load()
             incoming_serial = display(libre_device.get("serial"))
             assignment_lock([incoming_serial], model=Device, rules=serial_rules)
             # The insert writes the type row's device count anyway; lock it now, so the context is its manufacturer.
