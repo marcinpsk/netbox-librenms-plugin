@@ -86,10 +86,62 @@ def device(device_id):
     return Endpoint(SourceRequest(f"devices/{device_id}"), decode)
 
 
+def _is_vlan_id(value):
+    """Return whether a value names a VLAN id: an int, or a string of ASCII digits."""
+    if isinstance(value, str):
+        return value.isascii() and value.isdigit()
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _has_usable_vlans(port):
+    """Return whether every VLAN field of a port row names a VLAN id, so the assessment parses it."""
+    if_vlan = port.get("ifVlan")
+    if if_vlan not in (None, "") and not _is_vlan_id(if_vlan):
+        return False
+    vlans = port.get("vlans")
+    return vlans is None or (
+        isinstance(vlans, list) and all(isinstance(row, dict) and _is_vlan_id(row.get("vlan")) for row in vlans)
+    )
+
+
 def ports(device_id, *, with_vlans):
     """Return the ports endpoint; a recording keys it on the path only."""
+    contract = _rows_contract("ports")
+
+    def decode(status, body):
+        decoded = contract(status, body)
+        # A VLAN reader never drops a VLAN silently: one unusable row makes its answer malformed.
+        if (
+            with_vlans
+            and decoded.outcome is Outcome.OBTAINED
+            and not all(_has_usable_vlans(port) for port in decoded.value)
+        ):
+            return Decoded(Outcome.FAILED, reason="LibreNMS returned a port row whose VLAN fields name no VLAN id.")
+        return decoded
+
     params = (("columns", LIBRENMS_PORTS_COLUMNS),) + ((("with", "vlans"),) if with_vlans else ())
-    return Endpoint(SourceRequest(f"devices/{device_id}/ports", params, key_params=False), _rows_contract("ports"))
+    return Endpoint(SourceRequest(f"devices/{device_id}/ports", params, key_params=False), decode)
+
+
+def _is_port_pair(row):
+    return isinstance(row, dict) and "high_port_id" in row and "low_port_id" in row
+
+
+def port_stack(device_id):
+    """Return the port_stack endpoint: only an absent or "ok" status with a list of port pairs is an answer."""
+
+    def decode(status, body):
+        if not _is_success(status) or not isinstance(body, dict):
+            return _failed_status(status, body)
+        reported = body.get("status")
+        if reported is not None and (not isinstance(reported, str) or reported.lower() != "ok"):
+            return _failed_status(status, body)
+        mappings = body.get("mappings")
+        if not isinstance(mappings, list) or not all(_is_port_pair(row) for row in mappings):
+            return Decoded(Outcome.FAILED, reason="LibreNMS returned port_stack mappings that are not port pairs.")
+        return Decoded(Outcome.OBTAINED, value=mappings)
+
+    return Endpoint(SourceRequest(f"devices/{device_id}/port_stack"), decode)
 
 
 def _is_usable_ip_row(row):

@@ -837,7 +837,12 @@ from netbox_librenms_plugin.data_shapes.compress import compress_recording
 from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 from netbox_librenms_plugin.tests.mock_librenms_server import MockLibreNMSServer
-from netbox_librenms_plugin.tests.test_recordings import _assert_port_relationships
+from netbox_librenms_plugin.acquisition.coordinator import _Fetch
+from netbox_librenms_plugin.acquisition.resources import ACQUIRERS
+from netbox_librenms_plugin.acquisition.registry import Resource
+from netbox_librenms_plugin.interface_relationships import resolve_port_relationships
+from netbox_librenms_plugin.data_shapes.ports import compile_lag_patterns, compile_sap_patterns
+from netbox_librenms_plugin.tests.conftest import name_rules
 pattern, name, pipeline, map_name = json.loads(sys.argv[1])
 recording = {
     "schema_version": 1, "name": "bounded-regex", "device_id": 1,
@@ -866,7 +871,9 @@ else:
         }
         api = LibreNMSAPI(server_key="bounded-regex")
         expected = {"lag_members": {1: 2} if map_name == "lag_patterns" and not name.endswith("!") else {}}
-        _assert_port_relationships(api, 1, recording, expected)
+        parts = ACQUIRERS[Resource.INTERFACES](_Fetch(api), 1)
+        relationships = resolve_port_relationships(parts["ports"].value, parts["port_stack"].value, **name_rules(lag=compile_lag_patterns(recording), sap=compile_sap_patterns(recording)))
+        assert relationships["lag_members"] == expected["lag_members"]
     finally:
         server.stop()
 """
@@ -963,8 +970,8 @@ def test_recording_replay_treats_unencodable_names_as_non_matches(kind):
             },
         },
     }
-    patterns = {f"compiled_{name}_patterns": [] for name in ("lag", "sap", "bridge")}
-    patterns[f"compiled_{kind}_patterns"] = compile_lag_patterns({"lag_patterns": {"example": r"^Po\d+$"}})
+    patterns = {f"{name}_patterns": [] for name in ("lag", "sap", "bridge")}
+    patterns[f"{kind}_patterns"] = compile_lag_patterns({"lag_patterns": {"example": r"^Po\d+$"}})
     server = MockLibreNMSServer()
     server.start()
     try:

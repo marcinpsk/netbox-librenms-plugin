@@ -1,6 +1,8 @@
 """Integration tests for shared interface attribute and MAC synchronization."""
 
 import pytest
+
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from dcim.models import Interface
 
 from netbox_librenms_plugin.interface_sync import assign_interface_mac
@@ -31,7 +33,7 @@ class TestUpdateInterfaceAttributes:
     def test_updates_fields_and_stable_port_identity(self, client, settings):
         from netbox_librenms_plugin.models import InterfaceTypeMapping
 
-        interface = bound_interface(make_device("interface-fields"), "old-name", 77)
+        interface = bound_interface(seed_mapping(make_device("interface-fields"), "default", own=501), "old-name", 77)
         InterfaceTypeMapping.objects.create(librenms_type="ethernetCsmacd", netbox_type="1000base-t")
 
         _post_sync(
@@ -63,7 +65,12 @@ class TestUpdateInterfaceAttributes:
     def test_excluded_fields_and_mac_remain_unchanged(self, client, settings):
         from dcim.models import MACAddress
 
-        interface = bound_interface(make_device("interface-exclusions"), "keep-name", 1, iface_type="1000base-t")
+        interface = bound_interface(
+            seed_mapping(make_device("interface-exclusions"), "default", own=501),
+            "keep-name",
+            1,
+            iface_type="1000base-t",
+        )
         interface.speed = 1000
         interface.description = "keep-description"
         interface.mtu = 9000

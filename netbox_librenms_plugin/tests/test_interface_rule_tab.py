@@ -12,7 +12,6 @@ from urllib.parse import parse_qs
 
 import pytest
 from dcim.models import Interface, Platform
-from django.core.cache import cache
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
@@ -26,9 +25,8 @@ from netbox_librenms_plugin.tests.conftest import (
     make_virtual_chassis_members,
     make_vm,
 )
-from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
-from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+from netbox_librenms_plugin.tests.source_snapshot_helpers import port_pair, seed_interfaces_snapshot
 
 SERVER_KEY = "default"
 IGNORE = InterfaceTypeMapping.ACTION_IGNORE
@@ -63,10 +61,8 @@ def _device(name, platform=None):
     return device
 
 
-def _seed(owner, ports, relationships=None):
-    cache_owner = get_librenms_sync_device(owner, server_key=SERVER_KEY) or owner
-    payload = {"ports": ports, "port_stack_relationships": relationships or {}}
-    cache.set(SyncInterfacesView().get_cache_key(cache_owner, "ports", SERVER_KEY), payload, timeout=300)
+def _seed(owner, ports, port_stack=()):
+    seed_interfaces_snapshot(owner, ports, port_stack, server_key=SERVER_KEY)
 
 
 def _netbox_only(client, owner):
@@ -102,10 +98,6 @@ def _row_tag(row):
 
 def _cell(row, column):
     return re.search(rf'<td[^>]*data-col="{column}"[^>]*>(.*?)</td>', row, flags=re.S).group(1)
-
-
-def _lag_of(member_id, aggregate_id):
-    return {"lag_members": {member_id: aggregate_id}, "sub_interfaces": {}, "bridge_members": {}}
 
 
 def _vlan_ports():
@@ -446,7 +438,8 @@ class TestAnIncompleteRecordIsBlocked:
     @staticmethod
     def _incomplete_port(port_id):
         port = _port(port_id, "eth0")
-        del port["ifDescr"]
+        # The assessment fills a missing ifName or ifDescr with "", so only another key stays missing.
+        del port["ifSpeed"]
         return port
 
     def test_the_tab_asks_for_a_refresh_and_offers_no_sync(self, superuser_client):
@@ -458,7 +451,7 @@ class TestAnIncompleteRecordIsBlocked:
 
         assert 'data-rule-state="incomplete"' in _row_tag(row)
         assert "Refresh needed" in row
-        assert "the cached LibreNMS port record has no ifDescr; refresh the data" in row
+        assert "the cached LibreNMS port record has no ifSpeed; refresh the data" in row
         assert "1000base-t" not in row
         assert 'name="select"' not in row
         assert 'name="sync_one"' not in row
@@ -497,7 +490,7 @@ class TestTheRulePillSitsInTheActionsCell:
     def _member(state):
         member = _port(21, "Gi1/0/1")
         if state == "incomplete":
-            del member["ifDescr"]
+            del member["ifSpeed"]
         return member
 
     @pytest.mark.parametrize(
@@ -512,7 +505,7 @@ class TestTheRulePillSitsInTheActionsCell:
             InterfaceTypeMapping.objects.create(platform=platform, name_pattern="^Gi", netbox_type="1000base-t")
             InterfaceTypeMapping.objects.create(platform=platform, name_pattern="/1$", netbox_type="10gbase-t")
         device = _device(f"rule-tab-pill-{state}", platform)
-        _seed(device, [_port(20, "ae0", if_type="ieee8023adLag"), self._member(state)], _lag_of(21, 20))
+        _seed(device, [_port(20, "ae0", if_type="ieee8023adLag"), self._member(state)], [port_pair(21, 20)])
 
         row = _rows(_tab(superuser_client, device, interfaces_show_ignored="1"))[21]
 
@@ -530,7 +523,7 @@ class TestTheRulePillSitsInTheActionsCell:
         _vc, (first, _second) = make_virtual_chassis_members("rule-tab-pill-owner")
         seed_stored_mapping(first, {SERVER_KEY: {"id": 69}})
         first.save()
-        _seed(first, [_port(30, "ae0", if_type="ieee8023adLag"), _port(31, "Vlan10")], _lag_of(31, 30))
+        _seed(first, [_port(30, "ae0", if_type="ieee8023adLag"), _port(31, "Vlan10")], [port_pair(31, 30)])
 
         row = _rows(_tab(superuser_client, first))[31]
 
@@ -547,7 +540,7 @@ class TestTheRulePillSitsInTheActionsCell:
         first.platform = platform
         seed_stored_mapping(first, {SERVER_KEY: {"id": 70}})
         first.save()
-        _seed(first, [_port(40, "ae0", if_type="ieee8023adLag"), _port(41, "Gi1/0/1")], _lag_of(41, 40))
+        _seed(first, [_port(40, "ae0", if_type="ieee8023adLag"), _port(41, "Gi1/0/1")], [port_pair(41, 40)])
 
         response = superuser_client.post(
             reverse("plugins:netbox_librenms_plugin:verify_interface"),
@@ -600,5 +593,7 @@ def test_one_tab_render_reads_the_rules_once(superuser_client):
     with CaptureQueriesContext(connection) as queries:
         _tab(superuser_client, device, interfaces_show_ignored="1")
 
-    assert sum(RULE_TABLE in query["sql"] for query in queries.captured_queries) == 1
+    # The rows cache key counts the rule table with an aggregate; that query reads no rule.
+    rule_reads = [q for q in queries.captured_queries if RULE_TABLE in q["sql"] and "rows_cache_count" not in q["sql"]]
+    assert len(rule_reads) == 1
     assert not Interface.objects.filter(device=device).exists()

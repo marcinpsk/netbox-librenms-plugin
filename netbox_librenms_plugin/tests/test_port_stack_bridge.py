@@ -2,8 +2,11 @@
 
 import pytest
 
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+
 from netbox_librenms_plugin.interface_relationships import resolve_port_relationships
 from netbox_librenms_plugin.tests.conftest import (
+    name_rules,
     _PORT_KEYS_UNSET,
     configure_default_librenms_server,
     make_device,
@@ -12,11 +15,22 @@ from netbox_librenms_plugin.tests.conftest import (
     typed_maps,
 )
 from netbox_librenms_plugin.tests.interface_sync_post_helpers import post_interface_sync, seed_ports
+from netbox_librenms_plugin.tests.source_snapshot_helpers import interface_rows, port_pair, seed_interfaces_snapshot
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser, post
 from netbox_librenms_plugin.utils import _get_netbox_version_tuple, normalize_relationship_maps
 
 
 pytestmark = pytest.mark.django_db
+
+
+def _seed_relationships(subject, ports, port_stack=(), *, os=None):
+    """Store the raw snapshot that the inline views read, and return the relationships it gives."""
+    seed_interfaces_snapshot(subject, ports, port_stack, device=None if os is None else {"os": os})
+    return typed_maps(interface_rows(subject)["port_stack_relationships"])
+
+
+def _maps(lag=None, sub=None, bridge=None):
+    return {"lag_members": lag or {}, "sub_interfaces": sub or {}, "bridge_members": bridge or {}}
 
 
 LINUX_PORTS = [
@@ -36,9 +50,7 @@ def test_bridge_members_are_independent_from_parent_relationships():
             {"high_port_id": 102, "low_port_id": 100},
             {"high_port_id": 100, "low_port_id": 103},
         ],
-        lag_patterns={},
-        bridge_patterns={"linux": r"^(vmbr|br|bridge)\d+$"},
-        compiled_sap_patterns=[],
+        **name_rules(sap=[], bridge=[r"^(vmbr|br|bridge)\d+$"]),
     )
 
     assert typed_maps(relationships) == {
@@ -67,9 +79,7 @@ def test_bridge_pair_is_not_reclassified_as_lag_by_name_field_fallback():
             },
         ],
         [{"high_port_id": 100, "low_port_id": 101}],
-        lag_patterns={},
-        bridge_patterns={"linux": r"^(vmbr|br|bridge)\d+$"},
-        compiled_sap_patterns=[],
+        **name_rules(sap=[], bridge=[r"^(vmbr|br|bridge)\d+$"]),
     )
 
     assert typed_maps(relationships) == {
@@ -98,10 +108,8 @@ def test_name_field_fallback_does_not_reclassify_a_sub_interface_pair_as_bridge(
             },
         ],
         [{"high_port_id": 100, "low_port_id": 101}],
+        **name_rules(sap=[], bridge=[r"^(vmbr|br|bridge)\d+$"]),
         interface_name_field="ifName",
-        lag_patterns={},
-        bridge_patterns={"linux": r"^(vmbr|br|bridge)\d+$"},
-        compiled_sap_patterns=[],
     )
 
     assert typed_maps(relationships) == {
@@ -139,16 +147,13 @@ def test_normalize_relationship_maps_includes_bridge_edges():
     assert normalize_relationship_maps(relationships) == ({10: 20}, {30: 40}, {50: 60})
 
 
-def test_inline_parent_sync_promotes_a_physical_child_to_virtual():
+def test_inline_parent_sync_promotes_a_physical_child_to_virtual(settings):
     """Prepare the source type before NetBox validates a parent relationship."""
-    from types import SimpleNamespace
+    configure_default_librenms_server(settings)
 
-    from django.core.cache import cache
-
-    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
-    device = make_device("parent-type-promotion")
+    device = seed_mapping(make_device("parent-type-promotion"), "default", own=501)
     child = make_interface(device, "bond0.110", iface_type="1000base-t")
     parent = make_interface(device, "bond0")
     for interface, port_id in ((child, 102), (parent, 101)):
@@ -159,21 +164,11 @@ def test_inline_parent_sync_promotes_a_physical_child_to_virtual():
         {"port_id": "102", "parent_port_id": "101", "interface_name_field": "ifName"},
     )
     view = SyncInterfaceParentView()
-    view._librenms_api = SimpleNamespace(server_key="default")
-    cache.set(
-        view.get_cache_key(device, "ports", "default"),
-        {
-            "ports": [
-                {**_PORT_KEYS_UNSET, "port_id": 102, "ifName": child.name},
-                {**_PORT_KEYS_UNSET, "port_id": 101, "ifName": parent.name},
-            ],
-            "port_stack_relationships": {
-                "lag_members": {},
-                "sub_interfaces": {102: 101},
-                "bridge_members": {},
-            },
-        },
-    )
+    ports = [
+        {**_PORT_KEYS_UNSET, "port_id": 102, "ifName": child.name},
+        {**_PORT_KEYS_UNSET, "port_id": 101, "ifName": parent.name},
+    ]
+    assert _seed_relationships(device, ports) == _maps(sub={102: 101})
 
     response = post(view, request, object_type="device", object_id=device.pk)
 
@@ -184,16 +179,13 @@ def test_inline_parent_sync_promotes_a_physical_child_to_virtual():
 
 
 @pytest.mark.parametrize("role", ["lag", "bridge"])
-def test_inline_parent_sync_preserves_a_virtual_role_and_its_members(role):
+def test_inline_parent_sync_preserves_a_virtual_role_and_its_members(role, settings):
     """Reject a parent edge instead of silently replacing a LAG or bridge role."""
-    from types import SimpleNamespace
+    configure_default_librenms_server(settings)
 
-    from django.core.cache import cache
-
-    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
-    device = make_device(f"parent-{role}-preservation")
+    device = seed_mapping(make_device(f"parent-{role}-preservation"), "default", own=501)
     child = make_interface(device, f"target-{role}", iface_type=role)
     role_member = make_interface(device, "nic0")
     setattr(role_member, role, child)
@@ -207,21 +199,9 @@ def test_inline_parent_sync_preserves_a_virtual_role_and_its_members(role):
         {"port_id": "100", "parent_port_id": "101", "interface_name_field": "ifName"},
     )
     view = SyncInterfaceParentView()
-    view._librenms_api = SimpleNamespace(server_key="default")
-    cache.set(
-        view.get_cache_key(device, "ports", "default"),
-        {
-            "ports": [
-                {"port_id": 100, "ifName": child.name},
-                {"port_id": 101, "ifName": parent.name},
-            ],
-            "port_stack_relationships": {
-                "lag_members": {},
-                "sub_interfaces": {100: 101},
-                "bridge_members": {},
-            },
-        },
-    )
+    # The names share no base, so only an ipForward child makes the pair a parent edge.
+    ports = [{"port_id": 100, "ifName": child.name, "ifType": "ipForward"}, {"port_id": 101, "ifName": parent.name}]
+    assert _seed_relationships(device, ports, [port_pair(100, 101)]) == _maps(sub={100: 101})
 
     response = post(view, request, object_type="device", object_id=device.pk)
 
@@ -233,19 +213,17 @@ def test_inline_parent_sync_preserves_a_virtual_role_and_its_members(role):
     assert getattr(role_member, f"{role}_id") == child.pk
 
 
-def test_inline_lag_sync_does_not_replace_a_parent_child_role():
+def test_inline_lag_sync_does_not_replace_a_parent_child_role(settings):
     """Reject LAG promotion when the target is already a virtual child."""
-    from types import SimpleNamespace
+    configure_default_librenms_server(settings)
 
-    from django.core.cache import cache
-
-    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+    from netbox_librenms_plugin.models import PortStackLagPattern
     from netbox_librenms_plugin.views.sync.interfaces import (
         SyncInterfaceLagView,
         SyncInterfaceParentView,
     )
 
-    device = make_device("lag-target-parent-preservation")
+    device = seed_mapping(make_device("lag-target-parent-preservation"), "default", own=501)
     target = make_interface(device, "bond0.110", iface_type="1000base-t")
     parent = make_interface(device, "bond0")
     member = make_interface(device, "nic0")
@@ -253,26 +231,18 @@ def test_inline_lag_sync_does_not_replace_a_parent_child_role():
         seed_mapping(interface, own=port_id, save=False)
         interface.save()
 
-    api = SimpleNamespace(server_key="default")
     parent_view = SyncInterfaceParentView()
-    parent_view._librenms_api = api
     lag_view = SyncInterfaceLagView()
-    lag_view._librenms_api = api
-    cache.set(
-        parent_view.get_cache_key(device, "ports", "default"),
-        {
-            "ports": [
-                {**_PORT_KEYS_UNSET, "port_id": 100, "ifName": target.name},
-                {**_PORT_KEYS_UNSET, "port_id": 101, "ifName": parent.name},
-                {**_PORT_KEYS_UNSET, "port_id": 102, "ifName": member.name},
-            ],
-            "port_stack_relationships": {
-                "lag_members": {102: 100},
-                "sub_interfaces": {100: 101},
-                "bridge_members": {},
-            },
-        },
-    )
+    # ifName resolves bond0.110 to bond0, so the LAG edge comes from a name rule on the ifDescr names.
+    # The aggregate is not typed ieee8023adLag, because a Set type rule would then make it a LAG first.
+    PortStackLagPattern.objects.create(librenms_os="bridge-test-agg", lag_name_pattern=r"^agg\d+$")
+    ports = [
+        {**_PORT_KEYS_UNSET, "port_id": 100, "ifName": target.name, "ifDescr": "agg100"},
+        {**_PORT_KEYS_UNSET, "port_id": 101, "ifName": parent.name, "ifDescr": "parent101"},
+        {**_PORT_KEYS_UNSET, "port_id": 102, "ifName": member.name, "ifDescr": member.name},
+    ]
+    relationships = _seed_relationships(device, ports, [port_pair(102, 100)], os="bridge-test-agg")
+    assert relationships == _maps(lag={102: 100}, sub={100: 101})
 
     parent_response = post(
         parent_view,
@@ -302,18 +272,16 @@ def test_inline_lag_sync_does_not_replace_a_parent_child_role():
     assert member.lag_id is None
 
 
-def test_inline_lag_sync_rejects_cross_member_parent_on_netbox_44(monkeypatch):
+def test_inline_lag_sync_rejects_cross_member_parent_on_netbox_44(monkeypatch, settings):
     """Reject an invalid LAG target before NetBox 4.4 reaches its VC validation bug."""
-    from types import SimpleNamespace
-
+    configure_default_librenms_server(settings)
     from dcim.models import Interface
-    from django.core.cache import cache
 
     from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
-    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
 
     _virtual_chassis, (parent_device, target_device) = make_virtual_chassis_members("lag-target-cross-member-parent")
+    seed_mapping(parent_device, "default", own=501)
     parent = make_interface(parent_device, "bond0")
     target = make_interface(target_device, "bond0.110", iface_type="virtual")
     target.parent = parent
@@ -324,21 +292,11 @@ def test_inline_lag_sync_rejects_cross_member_parent_on_netbox_44(monkeypatch):
         interface.save()
 
     view = SyncInterfaceLagView()
-    view._librenms_api = SimpleNamespace(server_key="default")
-    cache.set(
-        view.get_cache_key(parent_device, "ports", "default"),
-        {
-            "ports": [
-                {**_PORT_KEYS_UNSET, "port_id": 100, "ifName": target.name},
-                {**_PORT_KEYS_UNSET, "port_id": 102, "ifName": member.name},
-            ],
-            "port_stack_relationships": {
-                "lag_members": {102: 100},
-                "sub_interfaces": {},
-                "bridge_members": {},
-            },
-        },
-    )
+    ports = [
+        {**_PORT_KEYS_UNSET, "port_id": 100, "ifName": target.name, "ifType": "ieee8023adLag"},
+        {**_PORT_KEYS_UNSET, "port_id": 102, "ifName": member.name},
+    ]
+    assert _seed_relationships(parent_device, ports, [port_pair(102, 100)]) == _maps(lag={102: 100})
 
     original_clean = Interface.clean
 
@@ -382,16 +340,13 @@ def test_parent_promotion_preserves_a_channel_sub_interface():
     assert not _parent_child_needs_promotion(child)
 
 
-def test_inline_bridge_sync_sets_the_bridge_relationship():
+def test_inline_bridge_sync_sets_the_bridge_relationship(settings):
     """Apply a bridge edge through the same inline flow as LAG and parent edges."""
-    from types import SimpleNamespace
+    configure_default_librenms_server(settings)
 
-    from django.core.cache import cache
-
-    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceBridgeView
 
-    device = make_device("inline-bridge-sync")
+    device = seed_mapping(make_device("inline-bridge-sync"), "default", own=501)
     member = make_interface(device, "nic0")
     bridge = make_interface(device, "vmbr0", iface_type="virtual")
     for interface, port_id in ((member, 103), (bridge, 100)):
@@ -402,21 +357,11 @@ def test_inline_bridge_sync_sets_the_bridge_relationship():
         {"port_id": "103", "bridge_port_id": "100", "interface_name_field": "ifName"},
     )
     view = SyncInterfaceBridgeView()
-    view._librenms_api = SimpleNamespace(server_key="default")
-    cache.set(
-        view.get_cache_key(device, "ports", "default"),
-        {
-            "ports": [
-                {**_PORT_KEYS_UNSET, "port_id": 103, "ifName": member.name},
-                {**_PORT_KEYS_UNSET, "port_id": 100, "ifName": bridge.name},
-            ],
-            "port_stack_relationships": {
-                "lag_members": {},
-                "sub_interfaces": {},
-                "bridge_members": {103: 100},
-            },
-        },
-    )
+    ports = [
+        {**_PORT_KEYS_UNSET, "port_id": 103, "ifName": member.name},
+        {**_PORT_KEYS_UNSET, "port_id": 100, "ifName": bridge.name},
+    ]
+    assert _seed_relationships(device, ports, [port_pair(103, 100)], os="linux") == _maps(bridge={103: 100})
 
     response = post(view, request, object_type="device", object_id=device.pk)
 
@@ -425,20 +370,19 @@ def test_inline_bridge_sync_sets_the_bridge_relationship():
     assert member.bridge_id == bridge.pk
 
 
-def test_inline_bridge_sync_accepts_cross_member_parent_on_netbox_44(monkeypatch):
+def test_inline_bridge_sync_accepts_cross_member_parent_on_netbox_44(monkeypatch, settings):
     """Keep a valid cross-member parent while NetBox 4.4 validates a bridge edge."""
-    from types import SimpleNamespace
+    configure_default_librenms_server(settings)
     from unittest.mock import patch
 
     from dcim.models import Interface
-    from django.core.cache import cache
 
     from netbox_librenms_plugin import utils
     from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
-    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceBridgeView
 
     _virtual_chassis, (parent_device, child_device) = make_virtual_chassis_members("bridge-cross-member-parent")
+    seed_mapping(parent_device, "default", own=501)
     parent = make_interface(parent_device, "bond0", iface_type="lag")
     child = make_interface(child_device, "bond0.110", iface_type="virtual")
     child.parent = parent
@@ -449,22 +393,13 @@ def test_inline_bridge_sync_accepts_cross_member_parent_on_netbox_44(monkeypatch
         interface.save()
 
     view = SyncInterfaceBridgeView()
-    view._librenms_api = SimpleNamespace(server_key="default")
-    cache.set(
-        view.get_cache_key(parent_device, "ports", "default"),
-        {
-            "ports": [
-                {**_PORT_KEYS_UNSET, "port_id": 101, "ifName": parent.name},
-                {**_PORT_KEYS_UNSET, "port_id": 102, "ifName": child.name},
-                {**_PORT_KEYS_UNSET, "port_id": 100, "ifName": bridge.name},
-            ],
-            "port_stack_relationships": {
-                "lag_members": {},
-                "sub_interfaces": {102: 101},
-                "bridge_members": {102: 100},
-            },
-        },
-    )
+    ports = [
+        {**_PORT_KEYS_UNSET, "port_id": 101, "ifName": parent.name},
+        {**_PORT_KEYS_UNSET, "port_id": 102, "ifName": child.name},
+        {**_PORT_KEYS_UNSET, "port_id": 100, "ifName": bridge.name},
+    ]
+    relationships = _seed_relationships(parent_device, ports, [port_pair(102, 100)], os="linux")
+    assert relationships == _maps(sub={102: 101}, bridge={102: 100})
 
     original_clean = Interface.clean
 
@@ -499,22 +434,22 @@ def test_inline_bridge_sync_accepts_cross_member_parent_on_netbox_44(monkeypatch
     assert child.bridge_id == bridge.pk
 
 
-def test_inline_bridge_sync_refuses_a_parent_on_another_chassis_on_netbox_44(monkeypatch, caplog):
+def test_inline_bridge_sync_refuses_a_parent_on_another_chassis_on_netbox_44(monkeypatch, caplog, settings):
     """The 4.4.0 fault stands in for the refusal NetBox means, so the edge gets that refusal, not a crash."""
+    configure_default_librenms_server(settings)
     import logging
-    from types import SimpleNamespace
     from unittest.mock import patch
 
     from dcim.models import Interface
-    from django.core.cache import cache
 
     from netbox_librenms_plugin import utils
     from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
-    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceBridgeView
 
     child_chassis, (child_device, _member) = make_virtual_chassis_members("bridge-other-chassis-child")
+    seed_mapping(child_device, "default", own=501)
     _parent_chassis, (parent_device,) = make_virtual_chassis_members("bridge-other-chassis-parent", count=1)
+    seed_mapping(parent_device, "default", own=501)
     parent = make_interface(parent_device, "bond0", iface_type="lag")
     child = make_interface(child_device, "bond0.110", iface_type="virtual")
     child.parent = parent
@@ -525,17 +460,11 @@ def test_inline_bridge_sync_refuses_a_parent_on_another_chassis_on_netbox_44(mon
         interface.save()
 
     view = SyncInterfaceBridgeView()
-    view._librenms_api = SimpleNamespace(server_key="default")
-    cache.set(
-        view.get_cache_key(child_device, "ports", "default"),
-        {
-            "ports": [
-                {**_PORT_KEYS_UNSET, "port_id": 102, "ifName": child.name},
-                {**_PORT_KEYS_UNSET, "port_id": 100, "ifName": bridge.name},
-            ],
-            "port_stack_relationships": {"lag_members": {}, "sub_interfaces": {}, "bridge_members": {102: 100}},
-        },
-    )
+    ports = [
+        {**_PORT_KEYS_UNSET, "port_id": 102, "ifName": child.name},
+        {**_PORT_KEYS_UNSET, "port_id": 100, "ifName": bridge.name},
+    ]
+    assert _seed_relationships(child_device, ports, [port_pair(102, 100)], os="linux") == _maps(bridge={102: 100})
 
     original_clean = Interface.clean
 
@@ -619,20 +548,19 @@ class TestNetBox440ParentChassisFault:
         assert type_change_refusal(child, "virtual").message == "Virtual interfaces cannot have a parent LAG interface."
 
 
-def test_inline_lag_sync_rejects_cross_member_parented_member_on_netbox_44(monkeypatch):
+def test_inline_lag_sync_rejects_cross_member_parented_member_on_netbox_44(monkeypatch, settings):
     """Run the remaining validation after bypassing NetBox 4.4's parent defect."""
-    from types import SimpleNamespace
+    configure_default_librenms_server(settings)
     from unittest.mock import patch
 
     from dcim.models import Interface
-    from django.core.cache import cache
 
     from netbox_librenms_plugin import utils
     from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
-    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
 
     _virtual_chassis, (parent_device, child_device) = make_virtual_chassis_members("lag-cross-member-parented-member")
+    seed_mapping(parent_device, "default", own=501)
     parent = make_interface(parent_device, "Ethernet1")
     child = make_interface(child_device, "Ethernet1.110", iface_type="virtual")
     child.parent = parent
@@ -643,22 +571,14 @@ def test_inline_lag_sync_rejects_cross_member_parented_member_on_netbox_44(monke
         interface.save()
 
     view = SyncInterfaceLagView()
-    view._librenms_api = SimpleNamespace(server_key="default")
-    cache.set(
-        view.get_cache_key(parent_device, "ports", "default"),
-        {
-            "ports": [
-                {**_PORT_KEYS_UNSET, "port_id": 101, "ifName": parent.name},
-                {**_PORT_KEYS_UNSET, "port_id": 102, "ifName": child.name},
-                {**_PORT_KEYS_UNSET, "port_id": 100, "ifName": aggregate.name},
-            ],
-            "port_stack_relationships": {
-                "lag_members": {102: 100},
-                "sub_interfaces": {102: 101},
-                "bridge_members": {},
-            },
-        },
-    )
+    # ifName resolves Ethernet1.110 to Ethernet1 for a LAG, so the child carries its unit name in ifDescr only.
+    ports = [
+        {**_PORT_KEYS_UNSET, "port_id": 101, "ifName": parent.name, "ifDescr": parent.name},
+        {**_PORT_KEYS_UNSET, "port_id": 102, "ifName": "unit110", "ifDescr": child.name},
+        {**_PORT_KEYS_UNSET, "port_id": 100, "ifName": aggregate.name, "ifType": "ieee8023adLag"},
+    ]
+    relationships = _seed_relationships(parent_device, ports, [port_pair(102, 100)])
+    assert relationships == _maps(lag={102: 100}, sub={102: 101})
 
     original_clean = Interface.clean
 
@@ -696,11 +616,10 @@ def test_inline_lag_sync_rejects_cross_member_parented_member_on_netbox_44(monke
 
 def test_bulk_sync_applies_parent_and_bridge_to_the_same_interface(client, settings):
     """Keep bridge membership independent from the child interface's parent edge."""
-    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
     configure_default_librenms_server(settings)
     client.force_login(make_superuser("bulk-parent-bridge-sync-user"))
-    device = make_device("bulk-parent-bridge-sync")
+    device = seed_mapping(make_device("bulk-parent-bridge-sync"), "default", own=501)
     child = make_interface(device, "bond0.110", iface_type="1000base-t")
     parent = make_interface(device, "bond0", iface_type="lag")
     bridge = make_interface(device, "vmbr0", iface_type="virtual")
@@ -712,7 +631,7 @@ def test_bulk_sync_applies_parent_and_bridge_to_the_same_interface(client, setti
         {**_PORT_KEYS_UNSET, "port_id": 101, "ifName": parent.name},
         {**_PORT_KEYS_UNSET, "port_id": 100, "ifName": bridge.name},
     ]
-    seed_ports(device, ports, sub_interfaces={102: 101}, bridge_members={102: 100})
+    seed_ports(device, ports, [port_pair(102, 101), port_pair(102, 100)], device={"os": "linux"})
 
     post_interface_sync(client, device, [102], htmx=False)
 
@@ -778,18 +697,15 @@ def test_relationship_column_renders_bridge_in_the_existing_column():
     assert "sync-interface-bridge" in html
 
 
-def test_inline_bridge_sync_supports_virtual_machine_interfaces():
+def test_inline_bridge_sync_supports_virtual_machine_interfaces(settings):
     """Use NetBox's VMInterface.bridge field through the shared bridge endpoint."""
-    from types import SimpleNamespace
-
-    from django.core.cache import cache
+    configure_default_librenms_server(settings)
     from virtualization.models import VMInterface
 
     from netbox_librenms_plugin.tests.conftest import make_vm
-    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceBridgeView
 
-    vm = make_vm("vm-bridge-sync")
+    vm = seed_mapping(make_vm("vm-bridge-sync"), "default", own=501)
     member = VMInterface.objects.create(virtual_machine=vm, name="nic0")
     bridge = VMInterface.objects.create(virtual_machine=vm, name="vmbr0")
     for interface, port_id in ((member, 103), (bridge, 100)):
@@ -797,21 +713,11 @@ def test_inline_bridge_sync_supports_virtual_machine_interfaces():
         interface.save()
     request = make_request("post", {"port_id": "103", "bridge_port_id": "100"})
     view = SyncInterfaceBridgeView()
-    view._librenms_api = SimpleNamespace(server_key="default")
-    cache.set(
-        view.get_cache_key(vm, "ports", "default"),
-        {
-            "ports": [
-                {**_PORT_KEYS_UNSET, "port_id": 103, "ifName": member.name},
-                {**_PORT_KEYS_UNSET, "port_id": 100, "ifName": bridge.name},
-            ],
-            "port_stack_relationships": {
-                "lag_members": {},
-                "sub_interfaces": {},
-                "bridge_members": {103: 100},
-            },
-        },
-    )
+    ports = [
+        {**_PORT_KEYS_UNSET, "port_id": 103, "ifName": member.name},
+        {**_PORT_KEYS_UNSET, "port_id": 100, "ifName": bridge.name},
+    ]
+    assert _seed_relationships(vm, ports, [port_pair(103, 100)], os="linux") == _maps(bridge={103: 100})
 
     response = post(view, request, object_type="virtualmachine", object_id=vm.pk)
 
@@ -851,7 +757,7 @@ def test_interface_selection_and_inline_action_include_bridge_dependencies():
     assert "`${relation}_port_id`" in source
 
 
-def test_device_interface_lookup_prefetches_bridge(db, django_assert_num_queries):
+def test_device_interface_lookup_prefetches_bridge(db, django_assert_num_queries, settings):
     """Render device bridge state without a query for each matched interface."""
     from netbox_librenms_plugin.librenms_api import LibreNMSAPI
     from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
@@ -863,9 +769,8 @@ def test_device_interface_lookup_prefetches_bridge(db, django_assert_num_queries
     member.save(update_fields=["bridge"])
     view = DeviceInterfaceTableView()
     view.setup(make_request("get"))
-    api = object.__new__(LibreNMSAPI)
-    api.server_key = "default"
-    view._librenms_api = api
+    configure_default_librenms_server(settings)
+    view._librenms_api = LibreNMSAPI(server_key="default")
 
     maps = view._build_interface_lookup_maps(device)
 
@@ -873,7 +778,7 @@ def test_device_interface_lookup_prefetches_bridge(db, django_assert_num_queries
         assert maps["by_name"]["nic0"].bridge.pk == bridge.pk
 
 
-def test_vm_interface_lookup_prefetches_bridge(db, django_assert_num_queries):
+def test_vm_interface_lookup_prefetches_bridge(db, django_assert_num_queries, settings):
     """Render VM bridge state without a query for each matched interface."""
     from virtualization.models import VMInterface
 
@@ -886,9 +791,8 @@ def test_vm_interface_lookup_prefetches_bridge(db, django_assert_num_queries):
     VMInterface.objects.create(virtual_machine=vm, name="nic0", bridge=bridge)
     view = VMInterfaceTableView()
     view.setup(make_request("get"))
-    api = object.__new__(LibreNMSAPI)
-    api.server_key = "default"
-    view._librenms_api = api
+    configure_default_librenms_server(settings)
+    view._librenms_api = LibreNMSAPI(server_key="default")
 
     maps = view._build_interface_lookup_maps(vm)
 

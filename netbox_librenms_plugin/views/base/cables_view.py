@@ -74,7 +74,6 @@ from netbox_librenms_plugin.views.mixins import (
     LibreNMSAPIMixin,
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
-    extract_cached_ports,
     parse_request_json,
     server_unavailable_json,
 )
@@ -857,31 +856,14 @@ class BaseCableTableView(
             return None
         return interface if interface.pk in context["visible_interface_ids"] else None
 
-    def get_ports_data(self, obj, server_key=None):
-        """Get ports data without affecting cache."""
-        # Scope to the POST-resolved server when provided; else the shared degrading resolver
-        # (avoids a GET 500 on a missing/misconfigured default).
-        server_key = server_key or self._render_server_key()
-        # self.librenms_id is set as a side effect of get_links_data(); read it defensively so a
-        # caller that reaches this public method first (or a subclass that doesn't run links) gets
-        # the OOB-only/no-host behaviour instead of an AttributeError.
-        librenms_id = getattr(self, "librenms_id", None)
-        # No host LibreNMS id (OOB-only device): return empty BEFORE consulting the cache. A stale
-        # host-ports snapshot cached from a previous (mapped) refresh must not resurface and feed
-        # the new render now that the host mapping is gone. There is also nothing to fetch —
-        # get_ports(None) would issue a GET /devices/None/ports that always 404s.
+    def get_ports_data(self, librenms_id):
+        """Fetch the host ports that name the cable rows as ``(ports_data, error)``; an OOB-only owner has none."""
         if librenms_id is None:
-            return {"ports": []}
-        ports_cache_key = self.get_cache_key(obj, "ports", server_key)
-        # Shape-guard the cached entry (mirrors _extract_cached_links): a truthy but
-        # malformed value would AttributeError-500 get_links_data's .get("ports") reads.
-        cached_data = extract_cached_ports(cache.get(ports_cache_key), ports_cache_key)
-        if cached_data:
-            return cached_data
+            return {"ports": []}, None
         success, data = self.librenms_api.get_ports(librenms_id, with_vlans=False)
-        if not success:
-            return {"ports": []}
-        return data
+        if success and isinstance(data, dict) and isinstance(data.get("ports"), list) and data.get("status") != "error":
+            return data, None
+        return {"ports": []}, f"Host ports fetch failed: {self._classify_links_fetch_error(success, data)}"
 
     @staticmethod
     def _build_cable_port_name_maps(ports_data, interface_name_field, alt_name_field):
@@ -1348,7 +1330,11 @@ class BaseCableTableView(
         # interface may still be named from ifDescr (and vice versa). Carrying the alternate
         # name lets enrich_local_port fall back to either field (issue #88).
         alt_name_field = "ifDescr" if interface_name_field == "ifName" else "ifName"
-        ports_data = self.get_ports_data(lookup_device, server_key=server_key)
+        ports_data, ports_error = self.get_ports_data(self.librenms_id)
+        if ports_error is not None:
+            # The host rows take their port names from the ports, so they fail with them.
+            self._links_fetch_error = self._links_fetch_error or ports_error
+            lldp_ok = False
         local_ports_map, local_ports_alt_map = self._build_cable_port_name_maps(
             ports_data, interface_name_field, alt_name_field
         )

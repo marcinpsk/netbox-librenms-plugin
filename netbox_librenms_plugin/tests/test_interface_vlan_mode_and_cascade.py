@@ -7,6 +7,8 @@ rule vendor-neutral (Juniper reports VLANs on the aggregate, other platforms on 
 """
 
 import pytest
+
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from dcim.models import Interface
 
 
@@ -17,7 +19,7 @@ def _fixture(tag, vlans=()):
     from netbox_librenms_plugin.tests.conftest import make_device, make_interface
     from netbox_librenms_plugin.views.mixins import VlanAssignmentMixin
 
-    interface = make_interface(make_device(f"vlan-mode-{tag}"), "eth0")
+    interface = make_interface(seed_mapping(make_device(f"vlan-mode-{tag}"), "default", own=501), "eth0")
     created = [VLAN.objects.create(vid=vid, name=f"VLAN-MODE-{tag}-{vid}") for vid in vlans]
     return VlanAssignmentMixin(), interface, VlanAssignmentMixin._index_vlans(created), created
 
@@ -137,13 +139,14 @@ class TestTheViewPassesTheReportedMode:
             make_superuser,
         )
         from netbox_librenms_plugin.tests.interface_sync_post_helpers import post_interface_sync, seed_ports, sync_port
+        from netbox_librenms_plugin.tests.source_snapshot_helpers import port_vlans
 
-        device = make_device("vlan-mode-view")
+        device = seed_mapping(make_device("vlan-mode-view"), "default", own=501)
         interface = make_interface(device, "Ethernet1")
         vlan = VLAN.objects.create(vid=100, name="VLAN-MODE-VIEW-100", status="active")
         configure_default_librenms_server(settings)
         client.force_login(make_superuser("vlan-mode-view-user"))
-        seed_ports(device, [sync_port(10, "Ethernet1", mode="tagged", untagged_vlan=100, tagged_vlans=[])])
+        seed_ports(device, [sync_port(10, "Ethernet1", **port_vlans("tagged", 100, []))])
 
         post_interface_sync(client, device, [10], htmx=False, exclude_columns=("mac_address",))
 
@@ -373,6 +376,7 @@ def test_vlan_sync_preserves_an_existing_assignment_when_the_requested_vid_is_mi
 
     from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server, make_superuser
     from netbox_librenms_plugin.tests.interface_sync_post_helpers import post_interface_sync, seed_ports, sync_port
+    from netbox_librenms_plugin.tests.source_snapshot_helpers import port_vlans
 
     _mixin, interface, _maps, vlans = _fixture("unresolved-untagged", [100, 200])
     interface.mode = "access"
@@ -380,9 +384,8 @@ def test_vlan_sync_preserves_an_existing_assignment_when_the_requested_vid_is_mi
     interface.save()
     configure_default_librenms_server(settings)
     client.force_login(make_superuser("unresolved-untagged-user"))
-    seed_ports(
-        interface.device, [sync_port(10, interface.name, mode="access", untagged_vlan=requested_vid, tagged_vlans=[])]
-    )
+    vlan_fields = port_vlans("access", requested_vid) if requested_vid is not None else port_vlans()
+    seed_ports(interface.device, [sync_port(10, interface.name, **vlan_fields)])
 
     post_interface_sync(client, interface.device, [10], htmx=False, exclude_columns=("mac_address",))
 
