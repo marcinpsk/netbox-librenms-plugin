@@ -871,7 +871,7 @@ def test_a_type_change_of_a_chassis_master_waits_for_a_master_change_and_reads_t
         assert status == 302
 
     assert VirtualChassis.objects.get(pk=chassis.pk).master_id == master.pk
-    assert (Device.objects.get(pk=old_master.pk).device_type_id == new_type.pk) is not demote
+    assert (Device.objects.get(pk=old_master.pk).device_type_id == new_type.pk) is (not demote)
     assert (("error", RETYPE_HELD) in posted) is demote, posted
 
 
@@ -1004,7 +1004,7 @@ def test_a_type_change_of_a_member_that_becomes_master_waits_and_reads_its_new_s
     assert {"40P01", "55P03"}.isdisjoint(sqlstates), sqlstates
     assert status == 302
     assert VirtualChassis.objects.get(pk=chassis.pk).master_id == master.pk
-    assert (Device.objects.get(pk=promoted.pk).device_type_id == rule_type.pk) is not promote
+    assert (Device.objects.get(pk=promoted.pk).device_type_id == rule_type.pk) is (not promote)
     assert (("error", RETYPE_HELD) in posted) is promote, posted
 
 
