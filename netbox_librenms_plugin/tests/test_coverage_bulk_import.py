@@ -1128,7 +1128,7 @@ def test_the_bulk_confirmation_checks_only_the_stack_members_that_the_import_cre
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("case", ["unavailable", "ambiguous", "uncertain", "free"])
+@pytest.mark.parametrize("case", ["unavailable", "ambiguous", "uncertain", "unique-uncertain", "free"])
 def test_the_bulk_confirmation_blocks_a_stack_member_that_the_writer_refuses(client, live_librenms, case):
     """The member writer refuses the whole stack for these member serials, so the form omits the stack."""
     from netbox_librenms_plugin.models import NormalizationRule
@@ -1137,7 +1137,7 @@ def test_the_bulk_confirmation_blocks_a_stack_member_that_the_writer_refuses(cli
     from netbox_librenms_plugin.tests.test_virtual_chassis_fallbacks import _seed_stack
 
     prerequisites = TestBulkImportIntegration()._prerequisites()
-    member_serial = f"REFUSED-MEMBER-{case}".upper() + ("-X-X" if case == "uncertain" else "")
+    member_serial = f"REFUSED-MEMBER-{case}".upper() + ("-X-X" if case.endswith("uncertain") else "")
     issue = f"Stack member 2: Cannot create VC member with serial '{member_serial}': "
     if case == "unavailable":
         _stray_chassis_member("confirm-stray", member_serial)
@@ -1146,12 +1146,15 @@ def test_the_bulk_confirmation_blocks_a_stack_member_that_the_writer_refuses(cli
         for index in range(2):
             make_device(f"confirm-stack-holder-{index}", serial=member_serial)
         issue += "several NetBox devices already hold this serial."
-    elif case == "uncertain":
+    elif case.endswith("uncertain"):
         # The rule changes its own output, so the holder's "...-X" is the import's key but no match.
         NormalizationRule.objects.create(scope="serial", match_pattern=r"^(.+)-X$", replacement=r"\1")
         make_device("confirm-stack-holder", serial=member_serial[: -len("-X")])
+        if case == "unique-uncertain":
+            # One holder matches, so the lookup is Unique; the other can still be the same member.
+            make_device("confirm-stack-exact-holder", serial=member_serial)
         issue += "a NetBox device stores a serial that can be the same member. Check the serials manually."
-    device_id = 297 + ["unavailable", "ambiguous", "uncertain", "free"].index(case) * 2
+    device_id = 297 + ["unavailable", "ambiguous", "uncertain", "unique-uncertain", "free"].index(case) * 2
     row = _cached_row(device_id, f"confirm-stack-refused-{case}", f"STACK-MASTER-{device_id}", prerequisites)
     _seed_stack(live_librenms.server, device_id, serials=(row["serial"], member_serial))
 

@@ -653,7 +653,7 @@ def test_a_confirmed_member_serial_conflict_skips_only_that_member(live_librenms
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("case", ["ambiguous", "uncertain"])
+@pytest.mark.parametrize("case", ["ambiguous", "uncertain", "unique-uncertain"])
 def test_a_member_serial_the_import_cannot_create_safely_refuses_the_stack(live_librenms, case):
     """Two holders, or a holder whose serial can be the same member, refuse the stack; nothing of it is written."""
     from dcim.models import Device, VirtualChassis
@@ -662,7 +662,7 @@ def test_a_member_serial_the_import_cannot_create_safely_refuses_the_stack(live_
     from netbox_librenms_plugin.models import NormalizationRule
     from netbox_librenms_plugin.tests.test_bulk_import_job_control import _chassis
 
-    device_id = 96317 if case == "ambiguous" else 96318
+    device_id = 96317 + ["ambiguous", "uncertain", "unique-uncertain"].index(case)
     member_serial = "REFUSED-STACK-BBB" if case == "ambiguous" else "REFUSED-STACK-BBB-X-X"
     members = [_chassis(100, f"REFUSED-STACK-AAA-{case}", position=1), _chassis(200, member_serial, position=2)]
     prerequisites, row = _importable_row(live_librenms, device_id, f"stack-refused-{case}", members=members)
@@ -676,6 +676,9 @@ def test_a_member_serial_the_import_cannot_create_safely_refuses_the_stack(live_
         # The rule changes its own output, so the holder's "...-X" is the import's key but no match.
         NormalizationRule.objects.create(scope="serial", match_pattern=r"^(.+)-X$", replacement=r"\1")
         make_device("stack-refused-holder", serial="REFUSED-STACK-BBB-X")
+        if case == "unique-uncertain":
+            # One holder matches, so the lookup is Unique; the other can still be the same member.
+            make_device("stack-refused-exact-holder", serial=member_serial)
         reason = (
             f"Cannot create VC member with serial '{member_serial}': a NetBox device stores a serial that can be "
             "the same member. Check the serials manually."

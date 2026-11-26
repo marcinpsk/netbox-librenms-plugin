@@ -1161,16 +1161,16 @@ def member_serial_refusal(serial, resolution) -> str:
     if resolution.kind is ResolutionKind.UNAVAILABLE:
         # The constant, not the lookup's reason: a Device lookup is Unavailable only for a broken master link.
         return f"Cannot check VC member serial '{reported}': {UNAVAILABLE_MASTER_LINK}"
-    # A Unique holder is the member itself, so the writer skips it. The text names no holder: the lookup is unrestricted.
-    if resolution.kind is ResolutionKind.UNIQUE:
-        return ""
+    # The text names no holder: the lookup is unrestricted.
     if resolution.kind is ResolutionKind.AMBIGUOUS:
         return f"Cannot create VC member with serial '{reported}': several NetBox devices already hold this serial."
+    # An uncertain row refuses a Unique outcome too: the writer cannot tell which row is the member.
     if resolution.uncertain:
         return (
             f"Cannot create VC member with serial '{reported}': a NetBox device stores a serial that can be "
             "the same member. Check the serials manually."
         )
+    # A Unique holder without an uncertain row is the member itself, so the writer skips it.
     return ""
 
 
