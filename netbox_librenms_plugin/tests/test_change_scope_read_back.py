@@ -193,7 +193,7 @@ def _seed_ip_rows(device, rows):
     from netbox_librenms_plugin.sync_cache import TAB_SPECS, SyncTab, sync_snapshot_key
 
     cache.set(
-        sync_snapshot_key(device, TAB_SPECS[SyncTab.IP_ADDRESSES].data_type, SERVER_KEY),
+        sync_snapshot_key(device, TAB_SPECS[SyncTab.IP_ADDRESSES].source.data_type, SERVER_KEY),
         {
             "ip_addresses": rows,
             "mgmt_ip": "",
@@ -379,7 +379,7 @@ def test_an_existing_interface_that_the_ip_tab_writes_out_of_the_change_scope_is
     device = make_device("rb-ip-interface", librenms_cf={SERVER_KEY: {"id": 7331}})
     interface = make_interface(device, "eth0")
     cache.set(
-        sync_snapshot_key(device, TAB_SPECS[SyncTab.IP_ADDRESSES].data_type, SERVER_KEY),
+        sync_snapshot_key(device, TAB_SPECS[SyncTab.IP_ADDRESSES].source.data_type, SERVER_KEY),
         {
             # No interface name in the row: the address finds its interface through the port.
             "ip_addresses": [

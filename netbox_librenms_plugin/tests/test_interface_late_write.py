@@ -580,7 +580,7 @@ def seed_ip_rows(device, rows):
     An IP row has no interface name, so the IP tab resolves the interface from the cached port.
     """
     cache.set(
-        sync_snapshot_key(device, TAB_SPECS[SyncTab.IP_ADDRESSES].data_type, SERVER_KEY),
+        sync_snapshot_key(device, TAB_SPECS[SyncTab.IP_ADDRESSES].source.data_type, SERVER_KEY),
         {
             "ip_addresses": [
                 {"ip_address": address, "prefix_length": 24, "ip_with_mask": f"{address}/24", "port_id": port_id}

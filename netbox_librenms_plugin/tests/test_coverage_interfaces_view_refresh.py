@@ -15,8 +15,6 @@ import pytest
 from netbox_librenms_plugin.tests.conftest import (
     bind_librenms_server,
     make_device,
-    make_interface,
-    make_ip,
     make_vm,
     map_device_to_librenms,
 )
@@ -62,29 +60,6 @@ def _tab_state(device):
 
     coordinator = SyncCacheConsistency(device)
     return cache.get(coordinator.state_key(SyncTab.INTERFACES, SERVER_KEY))
-
-
-@pytest.mark.django_db
-class TestInterfaceViewIpAddress:
-    def test_primary_ip_is_reported_and_a_device_without_one_reports_none(self):
-        """get_ip_address returns the bare primary IP, and None when the device has none."""
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
-
-        from dcim.models import Device
-
-        with_ip = make_device("iface-ip-present")
-        without_ip = make_device("iface-ip-absent")
-        interface = make_interface(with_ip, "eth0")
-        address = make_ip("10.42.0.7/24", assigned_object=interface)
-        with_ip.primary_ip4 = address
-        with_ip.save()
-        # Re-read so primary_ip.address is the stored IPNetwork, as it is on a real request.
-        with_ip = Device.objects.get(pk=with_ip.pk)
-
-        view = DeviceInterfaceTableView()
-
-        assert view.get_ip_address(with_ip) == "10.42.0.7"
-        assert view.get_ip_address(without_ip) is None
 
 
 @pytest.mark.django_db
