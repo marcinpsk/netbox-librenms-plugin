@@ -2387,6 +2387,41 @@ def test_a_stack_row_that_no_member_reported_names_no_bay_in_its_type_mapping(ui
     assert ("Card Slot" in description) is (not withheld)
 
 
+def _type_fix_manufacturers(actions):
+    """Return the manufacturer prefills of the Add Type Mapping and Add Module Type links in *actions*."""
+    queries = [
+        parse_qs(urlsplit(href.replace("&amp;", "&")).query)
+        for pattern in (r'href="([^"]*module-type-mappings/add[^"]*)"', r'href="([^"]*module-types/add[^"]*)"')
+        for href in re.findall(pattern, actions)
+    ]
+    assert len(queries) == 2, actions
+    return [query.get("manufacturer", []) for query in queries]
+
+
+@pytest.mark.parametrize("attribution", ["unattributed", "attributed", "pinned"])
+def test_a_stack_row_that_no_member_reported_prefills_no_manufacturer_in_its_type_fixes(ui, vc_grants, attribution):
+    """The row can belong to a member of another vendor, so only a confirmed member gives the manufacturer."""
+    serial = "" if attribution == "attributed" else "12"
+    page, member = vc_grants(
+        card={"entPhysicalModelName": "GR-UNKNOWN", "entPhysicalContainedIn": 0, "entPhysicalSerialNum": serial}
+    )
+    content = render(ui, page)
+    if attribution == "pinned":
+        response = verify(ui, content, page, member, CARD)
+        assert response.status_code == 200, response.content
+        actions = response.json()["formatted_row"]["actions"]
+    else:
+        (actions,) = re.findall(rf'<tr[^>]*data-ent-index="{CARD}".*?</tr>', content, flags=re.S)
+        assert ("data-member-unattributed" in actions) is (attribution == "unattributed")
+
+    expected = {
+        "unattributed": [],
+        "attributed": [str(page.device_type.manufacturer_id)],
+        "pinned": [str(member.device_type.manufacturer_id)],
+    }[attribution]
+    assert _type_fix_manufacturers(actions) == [expected, expected]
+
+
 @pytest.mark.parametrize("pick_page", [False, True], ids=["other-member", "page-device"])
 def test_a_member_pick_offers_the_install_of_a_stack_row_that_no_member_reported(ui, vc_grants, pick_page):
     """The user names the member, so the table pinned to it offers the install there.
