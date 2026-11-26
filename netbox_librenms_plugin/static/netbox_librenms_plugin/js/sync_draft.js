@@ -20,10 +20,30 @@
  * Every element of a tab or its dialogs that posts carries data-draft-command, and that marker alone makes
  * its request a command of the writer. The value says what else the command does: "draft" names the user's
  * draft (a bulk submit claims it), "refresh" answers with new tab content, "action" does neither. An
- * element with hx-confirm asks first: its command is admitted when the user confirms.
+ * "action" in a row of the draft table (a relationship button) names the draft, its revision and the
+ * row's evidence, so the server refuses it when the row changed. An element with hx-confirm asks first:
+ * its command is admitted when the user confirms.
  *
  * Every operation runs in ONE queue, one at a time in admission order (see admit()): the writes, the
  * commands and the READs. So a READ never shows a state from before an operation admitted ahead of it.
+ *
+ * A dialog form with data-write-url (the bulk VC member, a row's VLAN groups) is a write: its
+ * data-draft-write button sends the form's fields to that URL through the queue. A form that names its own
+ * draft_id and expected_revision (the VLAN groups dialog, from the draft state that it read) is sent with
+ * them, so the server refuses it when the draft changed after the dialog was read; every other write names
+ * the writer's draft and revision.
+ *
+ * A dialog opener (data-dialog-url) reads its dialog through its loader (data-dialog-loader) as a READ of the
+ * queue, so the dialog shows the draft after every write admitted before it. An answer that a later input
+ * made stale never shows: the dialog keeps its loading state and is read again. Only the last opening shows:
+ * the gate runs on the dialog content (the swap target), which stays in the page also when a tab read
+ * replaces the element that sent the read.
+ *
+ * A row with data-intent has a tri-state intent: on (selected), off (excluded) or none. Such a row also names
+ * the rows it requires (data-requires) and how many selected rows of other pages require it
+ * (data-offpage-requirers); while #autoSelectLagMembers is checked, the page mirrors the server's required-row
+ * rule over these attributes (mirrorChecks), so a required row ticks at once. A click on a row that stays
+ * required unticks it as an exclusion.
  */
 (function () {
     'use strict';
@@ -36,9 +56,12 @@
     const ROW_CHECKBOX = 'td input[type="checkbox"][name="select"]';
     const REVISION_HEADER = 'X-Draft-Revision';
     const ROW_READ_EVENT = 'librenms:row-read';
+    const DIALOG_OPENER = '[data-dialog-url]';
+    const DIALOG_READ_EVENT = 'librenms:dialog-read';
     const ROW_STALE_EVENT = 'lnms-row-stale';
     const RESULTS_STALE_EVENT = 'lnms-results-stale';
     const NOTICE_ID = 'librenms-draft-notice';
+    const AUTO_SELECT_ID = 'autoSelectLagMembers';
     const BATCH_DELAY_MS = 100;
     const CONFLICT_NOTICE_MS = 10000;
     // The operations that write the draft with a fetch: a batch of row states, and a choice or Set Primary IP.
@@ -63,6 +86,8 @@
     const reads = new WeakMap();
     // True while htmx swaps the answer of a page READ, which holds the whole page.
     let pageSwap = false;
+    // The count of dialog openings: a read of an earlier opening is never sent again.
+    let dialogEpoch = 0;
 
     // The draft writer of this document: one writer, so its acknowledgements give the next expected revision.
     const writer = {
@@ -106,8 +131,9 @@
      *
      * The kinds: "batch" (row states), "write" (a choice or Set Primary IP), "command" (a marked element's
      * request), "navigation" (a READ of the loader), "filter" (a filter request that waits for its turn),
-     * "row" (a row READ) and "turn" (flush()). The supersession rules are these, and only these: a newer
-     * navigation removes the queued navigations, filters and row READs (reserveNavigation()); row states join
+     * "row" (a row READ), "dialog" (a dialog READ) and "turn" (flush()). The supersession rules are these, and
+     * only these: a newer navigation removes the queued navigations, filters and row READs
+     * (reserveNavigation()); a newer dialog opening sends no read of an earlier one (readDialog()); row states join
      * only the batch at the tail of the queue (tailBatch()); a choice replaces only a choice of its row at the
      * tail (enqueue()); a failed write drops every queued operation that is not a write (failure()); a
      * refused write drops the queued commands but a refresh, and refuses new ones until a fresh presentation
@@ -292,8 +318,13 @@
     // THE DRAFT WRITER
     // ============================================
 
+    // The sync page renders the pane of every tab, so several draft tables can be in the document: only the
+    // pane of the active tab takes input. Its data-active-tab names the pane already in htmx:afterSwap, while
+    // htmx settles the panes' class later. A page without the tab panes has one draft table.
     function draftTable() {
-        return document.querySelector(DRAFT_TABLE);
+        if (!document.getElementById('librenmsTabContent')) return document.querySelector(DRAFT_TABLE);
+        const activeTab = document.getElementById('librenms-sync-tabs')?.dataset.activeTab;
+        return (activeTab && document.getElementById(activeTab)?.querySelector(DRAFT_TABLE)) || null;
     }
 
     function csrfToken() {
@@ -327,8 +358,94 @@
         writer.stale = false;
         writer.refused = false;
         writer.choices.clear();
+        applyMirror(table);
         // Also while the navigation that brought the table waits for its end: that READ is the stale one.
         if (older) navigate(destination, 'replace');
+    }
+
+    // ============================================
+    // THE REQUIRED-ROW MIRROR
+    // ============================================
+
+    /**
+     * Return which rows show checked under the required-row rule, as the server decides it (required_rows.py).
+     *
+     * A row shows checked when it is selected, or while the rule is enabled when it is not excluded and a selected
+     * row of another page (offpage > 0) or a selected row of this page requires it.
+     *
+     * @param {{key: string, intent: string, requires: string[], offpage: number}[]} rows - The page's rows.
+     * @param {boolean} enabled - Whether selected rows take their required rows along.
+     * @returns {Map<string, boolean>} The checked state of each row key.
+     */
+    function mirrorChecks(rows, enabled) {
+        const required = new Set();
+        if (enabled) {
+            rows.filter((row) => row.intent === 'on').forEach((row) => row.requires.forEach((key) => required.add(key)));
+        }
+        return new Map(rows.map((row) => [
+            row.key,
+            row.intent === 'on' || (enabled && row.intent !== 'off' && (row.offpage > 0 || required.has(row.key))),
+        ]));
+    }
+
+    function autoSelectEnabled() {
+        return Boolean(document.getElementById(AUTO_SELECT_ID)?.checked);
+    }
+
+    // The tri-state rows of a table, with their enabled checkboxes.
+    function ruleRows(table) {
+        return Array.from(table?.querySelectorAll('tr[data-intent]') || []).map((element) => {
+            let requires = [];
+            try {
+                requires = JSON.parse(element.dataset.requires || '[]');
+            } catch (_) {
+                requires = [];
+            }
+            return {
+                element,
+                box: element.querySelector(ROW_CHECKBOX),
+                key: element.dataset.rowKey,
+                intent: element.dataset.intent,
+                requires,
+                offpage: Number(element.dataset.offpageRequirers || 0),
+            };
+        });
+    }
+
+    /**
+     * Tick each enabled checkbox of the table's tri-state rows as the required-row rule decides.
+     *
+     * @param {?HTMLTableElement} table - A draft table.
+     * @returns {void}
+     */
+    function applyMirror(table) {
+        const rows = ruleRows(table);
+        if (!rows.length) return;
+        const checks = mirrorChecks(rows, autoSelectEnabled());
+        rows.forEach((row) => {
+            if (row.box && !row.box.disabled) row.box.checked = checks.get(row.key);
+        });
+    }
+
+    /**
+     * Set the intents of tri-state rows that one input set to *checked*, then tick the table again.
+     *
+     * A row that the input clears takes 'none', or 'off' when a selected row still requires it.
+     *
+     * @param {HTMLTableElement} table - The draft table.
+     * @param {HTMLInputElement[]} boxes - The row checkboxes that the input set.
+     * @returns {void}
+     */
+    function setIntents(table, boxes) {
+        const changed = boxes.map((box) => box.closest('tr[data-intent]')).filter(Boolean);
+        changed.forEach((row) => {
+            row.dataset.intent = row.querySelector(ROW_CHECKBOX).checked ? 'on' : 'none';
+        });
+        const checks = mirrorChecks(ruleRows(table), autoSelectEnabled());
+        changed.forEach((row) => {
+            if (row.dataset.intent === 'none' && checks.get(row.dataset.rowKey)) row.dataset.intent = 'off';
+        });
+        applyMirror(table);
     }
 
     function rowByKey(key) {
@@ -354,6 +471,32 @@
             },
         });
     }
+
+    /**
+     * Read a dialog through its loader when its turn comes; a later opening replaces it.
+     *
+     * @param {{loader: string, url: string, epoch: number}} dialog - The loader's ID, the dialog URL and its opening.
+     * @returns {void}
+     */
+    function readDialog(dialog) {
+        admit({
+            kind: 'dialog',
+            run: (op) => {
+                const loader = document.getElementById(dialog.loader);
+                if (dialog.epoch === dialogEpoch) {
+                    loader?.dispatchEvent(new CustomEvent(DIALOG_READ_EVENT, { detail: dialog }));
+                }
+                done(op);
+            },
+        });
+    }
+
+    document.addEventListener('click', function (event) {
+        const opener = event.target instanceof Element ? event.target.closest(DIALOG_OPENER) : null;
+        if (!opener) return;
+        dialogEpoch += 1;
+        readDialog({ loader: opener.dataset.dialogLoader, url: opener.dataset.dialogUrl, epoch: dialogEpoch });
+    });
 
     // A navigation that waits shows the draft with its own history entry, so it is the fresh READ.
     function readResults() {
@@ -384,8 +527,10 @@
     function sendWrite(op) {
         const fields = op.kind === 'batch' ? { assignments: JSON.stringify(Object.fromEntries(op.rows)) } : op.fields;
         const body = new FormData();
-        body.set('draft_id', writer.draftId);
-        body.set('expected_revision', String(writer.revision));
+        if (!Object.hasOwn(fields, 'draft_id')) {
+            body.set('draft_id', writer.draftId);
+            body.set('expected_revision', String(writer.revision));
+        }
         Object.entries(fields).forEach(([name, value]) => body.set(name, value));
         fetch(op.kind === 'batch' ? writer.urls.selection : op.url, {
             method: 'POST',
@@ -507,8 +652,8 @@
     function setRowState(checkbox) {
         const row = checkbox.closest('tr[data-row-key]');
         if (!row) return;
-        const checked = checkbox.checked;
-        tailBatch().set(row.dataset.rowKey, { state: checked ? 'on' : 'none', token: checked ? row.dataset.evidence : null });
+        const state = row.dataset.intent || (checkbox.checked ? 'on' : 'none');
+        tailBatch().set(row.dataset.rowKey, { state, token: state === 'on' ? row.dataset.evidence : null });
     }
 
     /**
@@ -560,6 +705,7 @@
      */
     function takeInput(boxes) {
         bumpInputEpoch();
+        setIntents(writer.table, boxes);
         boxes.forEach(setRowState);
         schedule();
         pump();
@@ -582,14 +728,19 @@
         const table = control.closest(DRAFT_TABLE);
         if (table && control.matches('th input.toggle')) {
             if (!accepts(table)) return;
-            const boxes = selectableBoxes(table).filter((box) => box.checked !== control.checked);
+            // Select all selects every row of the page, also one that another row requires.
+            const boxes = selectableBoxes(table).filter((box) => {
+                const intent = box.closest('tr')?.dataset.intent;
+                if (intent === undefined || !control.checked) return box.checked !== control.checked;
+                return intent !== 'on';
+            });
             boxes.forEach((box) => {
                 box.checked = control.checked;
             });
             takeInput(boxes);
         } else if (table && control.matches(ROW_CHECKBOX)) {
             if (accepts(table)) takeInput([control]);
-        } else if (table && control.matches('select.vrf-select')) {
+        } else if (table && control.matches('select.vrf-select, select[data-draft-choice]')) {
             const row = control.closest('tr[data-row-key]');
             const key = row?.dataset.rowKey;
             if (!key) return;
@@ -598,12 +749,27 @@
             // TomSelect can announce the value the row shows already; only a new value is a choice.
             if (control.value === shown || !accepts(table)) return;
             writer.choices.set(key, control.value);
-            enqueue({ url: writer.urls.choice, row: key, fields: { row: key, value: control.value } });
+            const fields = { row: key, value: control.value };
+            if (control.dataset.draftChoice) fields.field = control.dataset.draftChoice;
+            enqueue({ url: writer.urls.choice, row: key, fields });
         } else if (control.matches('#set-primary-ip-toggle-cb') && draftTable()) {
             if (!accepts(draftTable())) return;
             const evidence = JSON.stringify(shownManagementEvidence(draftTable()));
             enqueue({ url: writer.urls.management, fields: { selected: control.checked ? 'on' : 'off', evidence } });
+        } else if (control.matches(`#${AUTO_SELECT_ID}`)) {
+            // The rule's option changes what the rows require, never a row's intent.
+            applyMirror(draftTable());
         }
+    });
+
+    // A dialog's write (the bulk VC member, a row's VLAN groups) sends the fields of its form.
+    document.addEventListener('click', function (event) {
+        const button = event.target instanceof Element ? event.target.closest('[data-draft-write]') : null;
+        const form = button?.closest('form[data-write-url]');
+        if (!form) return;
+        event.preventDefault();
+        if (!accepts(draftTable())) return;
+        enqueue({ url: form.dataset.writeUrl, fields: Object.fromEntries(new FormData(form)) });
     });
 
     // A shift-click sets every row from the last clicked row to this one to the state of the last clicked row.
@@ -662,9 +828,11 @@
         event.returnValue = '';
     });
 
+    // A row action names one row and leaves the draft as it is.
+    const ROW_ACTIONS = ['sync_one', 'rebind_one', 'create_vrf'];
+
     function isBulkSubmit(event) {
-        const name = event.detail.triggeringEvent?.submitter?.name;
-        return name !== 'sync_one' && name !== 'create_vrf';
+        return !ROW_ACTIONS.includes(event.detail.triggeringEvent?.submitter?.name);
     }
 
     /**
@@ -801,7 +969,7 @@
         // A page READ whose swap did not happen leaves no flag behind for a later request.
         pageSwap = false;
         const read = reads.get(event.detail.xhr);
-        if (read && !read.rowKey && !read.region) endNavigation(read.navEpoch);
+        if (read && !read.rowKey && !read.region && !read.dialog) endNavigation(read.navEpoch);
         if (isCommandAnswer(event.detail)) finishCommand(writer.running, event.detail.xhr, event.detail.successful);
     });
 
@@ -828,7 +996,7 @@
         const elt = event.detail.elt;
         const parameters = event.detail.parameters;
         const op = writer.running;
-        if (elt.id === LOADER_ID) {
+        if (elt.id === LOADER_ID || event.detail.triggeringEvent?.type === DIALOG_READ_EVENT) {
             event.detail.path = event.detail.triggeringEvent.detail.url;
             return;
         }
@@ -840,11 +1008,18 @@
             });
             if (op.submitter) parameters.set(op.submitter.name, op.submitter.value);
         }
+        const actionRow = elt.matches?.('[data-draft-command="action"]') ? elt.closest('tr[data-row-key]') : null;
+        if (actionRow && writer.table?.contains(actionRow) && writer.draftId) {
+            // An action of a row acts on the row that the page shows: its evidence names the row's member.
+            parameters.set('draft_id', writer.draftId);
+            parameters.set('expected_revision', String(writer.revision));
+            parameters.set('evidence', actionRow.dataset.evidence || '');
+        }
         if (elt.matches?.('[data-draft-command="draft"]') && writer.draftId) {
             parameters.set('draft_id', writer.draftId);
             parameters.set('expected_revision', String(writer.revision));
-            // A row action syncs the row that the page shows: its evidence names the row's state and VRF.
-            const rowKey = parameters.get('sync_one');
+            // A row action acts on the row that the page shows: its evidence names the row's state and choices.
+            const rowKey = parameters.get('sync_one') || parameters.get('rebind_one');
             if (rowKey) parameters.set('evidence', rowByKey(rowKey)?.dataset.evidence || '');
         }
     });
@@ -857,6 +1032,8 @@
         if (elt.id === LOADER_ID) {
             const { url, history, navEpoch: epoch } = event.detail.requestConfig.triggeringEvent.detail;
             reads.set(xhr, { navEpoch: epoch, inputEpoch, url, history });
+        } else if (event.detail.requestConfig.triggeringEvent?.type === DIALOG_READ_EVENT) {
+            reads.set(xhr, { inputEpoch, dialog: event.detail.requestConfig.triggeringEvent.detail });
         } else if (elt.matches('.sync-filter-form')) {
             // The filter keeps the identity it took at its first confirm.
             const epoch = filterEpochs.get(event.detail.requestConfig.triggeringEvent);
@@ -867,7 +1044,7 @@
             // A tab fragment or a data refresh replaces the draft table too. A fragment is sent outside the
             // queue; a refresh is a command, which runs when nothing else does.
             const command = isCommandAnswer(event.detail);
-            reads.set(xhr, { navEpoch, inputEpoch, region: true, draft: true, sentIdle: command || !writesPending() });
+            reads.set(xhr, { navEpoch, inputEpoch, region: true, draft: true, command, sentIdle: command || !writesPending() });
         } else if (event.detail.requestConfig.verb === 'get' && event.detail.target?.closest?.('#librenms-sync-tabs')) {
             // Any other READ of a tab region, such as a tab fragment that the cache check reloads.
             reads.set(xhr, { navEpoch, inputEpoch, region: true, draft: false });
@@ -877,7 +1054,7 @@
     // The gate runs before htmx reads any header, out-of-band content or swap of the response.
     document.addEventListener('htmx:beforeOnLoad', function (event) {
         const read = reads.get(event.detail.xhr);
-        if (!read || read.region) return;
+        if (!read || read.region || read.dialog) return;
         const superseded = read.navEpoch !== navEpoch;
         if (superseded && !inFilterRun(read)) {
             event.preventDefault();
@@ -898,12 +1075,24 @@
     // htmx writes its history before the swap too, so the swapped content reads the new URL.
     document.addEventListener('htmx:beforeSwap', function (event) {
         const read = reads.get(event.detail.xhr);
+        if (read?.dialog) {
+            // htmx fires this one on the dialog content. A later opening wins; a later input or write reads it again.
+            if (read.dialog.epoch !== dialogEpoch) {
+                event.detail.shouldSwap = false;
+            } else if (read.inputEpoch !== inputEpoch) {
+                event.detail.shouldSwap = false;
+                readDialog(read.dialog);
+            }
+            return;
+        }
         if (read?.region) {
             // Decided here, not in beforeOnLoad: the fragment loader reads the request outcome, and only a swap is held.
             // A navigation or a search that started after the READ was sent replaces it; a draft region also
             // waits for the writes. The page then reads its current destination (a navigation that waits is it).
             const draftChanged = read.draft && (read.inputEpoch !== inputEpoch || !read.sentIdle);
-            if (read.navEpoch !== navEpoch || draftChanged) {
+            // A navigation or a search that waits shows the page, so a fragment must not replace the form it reads.
+            const navigationWaits = !read.command && pendingNav !== null;
+            if (read.navEpoch !== navEpoch || draftChanged || navigationWaits) {
                 event.detail.shouldSwap = false;
                 readResults();
             }
@@ -938,6 +1127,8 @@
     document.addEventListener('htmx:afterSettle', function (event) {
         const read = reads.get(event.detail.xhr);
         if (!read?.accepted || !read.rowKey) return;
+        // The row's new intent can change what the other rows of the page require.
+        applyMirror(draftTable());
         rowByKey(read.rowKey)?.dispatchEvent(new CustomEvent('librenms:row-swapped', { bubbles: true }));
     });
 
@@ -958,5 +1149,5 @@
         if (reads.get(event.detail.xhr)?.rowKey) readResults();
     });
 
-    window.librenmsSyncDraft = Object.freeze({ navigate, flush, bumpInputEpoch });
+    window.librenmsSyncDraft = Object.freeze({ navigate, flush, bumpInputEpoch, mirrorChecks });
 })();

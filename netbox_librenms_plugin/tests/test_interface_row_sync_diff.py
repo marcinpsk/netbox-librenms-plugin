@@ -487,11 +487,24 @@ class TestThePerRowButtonSyncsOneRow:
         return device
 
     def _post(self, client, device, *, sync_one, select=()):
-        from netbox_librenms_plugin.tests.interface_sync_post_helpers import post_interface_sync
-        from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
+        """Tick *select* in the draft, then press the Sync button of row *sync_one* with the fields its page shows."""
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.tests.interface_sync_post_helpers import select_interface_rows
+        from netbox_librenms_plugin.tests.view_test_helpers import make_superuser, row_action_fields
 
         client.force_login(make_superuser(f"row-sync-{device.pk}"))
-        return post_interface_sync(client, device, select, htmx=False, exclude_columns=(), extra={"sync_one": sync_one})
+        if select:
+            select_interface_rows(client, device, select)
+        fields = row_action_fields(client, device, "interfaces", sync_one, interface_name_field="ifName")
+        url = reverse(
+            "plugins:netbox_librenms_plugin:sync_selected_interfaces",
+            kwargs={"object_type": "device", "object_id": device.pk},
+        )
+        return client.post(
+            f"{url}?interface_name_field=ifName",
+            {"server_key": SERVER_KEY, "sync_one": sync_one, "exclude_columns": [], **fields},
+        )
 
     def test_sync_one_writes_only_its_own_row(self, client, settings):
         device = self._setup("row-sync-one", settings)
@@ -502,16 +515,17 @@ class TestThePerRowButtonSyncsOneRow:
         assert sorted(device.interfaces.values_list("name", flat=True)) == ["Ethernet11"]
 
     def test_the_pressed_row_wins_over_the_tick_boxes(self, client, settings):
-        """The browser submits both, and the user pressed one row, not the selection."""
+        """The draft holds a selection too, and the user pressed one row, not the selection."""
         device = self._setup("row-sync-wins", settings)
 
         self._post(client, device, sync_one="11", select=[10, 12])
 
         assert sorted(device.interfaces.values_list("name", flat=True)) == ["Ethernet11"]
 
-    def test_an_unusable_sync_one_falls_back_to_the_selection(self, client, settings):
-        device = self._setup("row-sync-fallback", settings)
+    def test_an_unusable_sync_one_writes_nothing(self, client, settings):
+        """An unusable sync_one never falls back to the selection of the draft."""
+        device = self._setup("row-sync-unusable", settings)
 
         self._post(client, device, sync_one="", select=[10, 12])
 
-        assert sorted(device.interfaces.values_list("name", flat=True)) == ["Ethernet10", "Ethernet12"]
+        assert not device.interfaces.exists()

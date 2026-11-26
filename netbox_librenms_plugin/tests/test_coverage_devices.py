@@ -1,6 +1,6 @@
-"""Integration tests for device synchronization tables and JSON endpoints."""
+"""Integration tests for device synchronization tables, the row reads and the draft commands."""
 
-import json
+import re
 
 import pytest
 from django.core.cache import cache
@@ -19,25 +19,25 @@ from netbox_librenms_plugin.tests.conftest import (
     make_virtual_chassis_members,
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
-from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_interfaces_snapshot
-from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_user_with_perms
+from netbox_librenms_plugin.tests.source_snapshot_helpers import (
+    port_vlans,
+    seed_interfaces_snapshot,
+    seed_source_snapshot,
+)
+from netbox_librenms_plugin.tests.view_test_helpers import (
+    draft_command,
+    draft_tab,
+    make_request,
+    make_user_with_perms,
+)
 from netbox_librenms_plugin.views.object_sync.devices import (
     DeviceCableTableView,
     DeviceInterfaceTableView,
     DeviceModuleTableView,
-    SaveVlanGroupOverridesView,
 )
 
 
 SERVER_KEY = "default"
-
-
-def _json_post(client, route_name, body):
-    return client.post(
-        reverse(f"plugins:netbox_librenms_plugin:{route_name}"),
-        data=json.dumps(body),
-        content_type="application/json",
-    )
 
 
 def _login(client, username):
@@ -146,259 +146,177 @@ class TestDeviceTables:
         assert table.can_delete_module is False
 
 
+def _row_url(name, device, row_key):
+    """Return the URL of the *name* row read of *device* on the default server."""
+    path = reverse(
+        f"plugins:netbox_librenms_plugin:{name}",
+        kwargs={"object_type": "device", "pk": device.pk, "row_key": row_key},
+    )
+    return f"{path}?server_key={SERVER_KEY}&interface_name_field=ifName"
+
+
+def _cell(row, column):
+    return dict(re.findall(r'<td[^>]*data-col="([^"]+)"[^>]*>(.*?)</td>', row, re.S))[column]
+
+
 @pytest.mark.django_db
-class TestSingleInterfaceVerifyEndpoint:
-    def test_missing_device_id_returns_structured_400(self, client, live_librenms):
-        _login(client, "verify-interface-missing-device-user")
-
-        response = _json_post(
-            client,
-            "verify_interface",
-            {"port_id": 4001, "server_key": SERVER_KEY},
-        )
-
-        assert response.status_code == 400
-        assert response.json() == {"status": "error", "message": "No device ID provided"}
-
+class TestTheInterfaceRowRead:
     def test_a_malformed_snapshot_payload_returns_a_controlled_404(self, client, live_librenms):
         device = make_device("verify-interface-malformed", librenms_cf={SERVER_KEY: {"id": 141}})
         key = source_cache.snapshot_key(device, Resource.INTERFACES, SERVER_KEY)
         cache.set(key, {"ports": "not-a-list"}, timeout=300)
         _login(client, "verify-interface-malformed-user")
 
-        response = _json_post(
-            client,
-            "verify_interface",
-            {"device_id": device.pk, "port_id": 4001, "server_key": SERVER_KEY},
-        )
+        response = client.get(_row_url("interface_row", device, "4001"))
 
         assert response.status_code == 404
-        assert response.json() == {"status": "error", "message": "Interface data not found"}
         # A read never deletes: a refresh can store a new snapshot under the same key.
         assert cache.get(key) == {"ports": "not-a-list"}
 
-    def test_cached_port_returns_a_formatted_real_row(self, client, live_librenms):
+    def test_cached_port_returns_a_rendered_real_row(self, client, live_librenms):
         device = make_device("verify-interface-success", librenms_cf={SERVER_KEY: {"id": 142}})
         interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
         _set_id(interface, 4001)
         seed_interfaces_snapshot(device, [_port()], server_key=SERVER_KEY)
         _login(client, "verify-interface-success-user")
 
-        response = _json_post(
-            client,
-            "verify_interface",
-            {
-                "device_id": device.pk,
-                "port_id": 4001,
-                "server_key": SERVER_KEY,
-                "interface_name_field": "ifName",
-            },
-        )
+        response = client.get(_row_url("interface_row", device, "4001"))
 
         assert response.status_code == 200
-        data = response.json()
-        assert data["status"] == "success"
-        assert "Ethernet1" in data["formatted_row"]["name"]
+        assert "Ethernet1" in _cell(response.content.decode(), "name")
 
-    def test_duplicate_cached_port_id_is_rejected_as_ambiguous(self, client, live_librenms):
+    def test_a_duplicate_cached_port_id_offers_no_selection(self, client, live_librenms):
         device = make_device("verify-interface-duplicate", librenms_cf={SERVER_KEY: {"id": 143}})
         seed_interfaces_snapshot(device, [_port(name="Ethernet1"), _port(name="Ethernet2")], server_key=SERVER_KEY)
         _login(client, "verify-interface-duplicate-user")
 
-        response = _json_post(
-            client,
-            "verify_interface",
-            {"device_id": device.pk, "port_id": 4001, "server_key": SERVER_KEY},
-        )
+        shown = draft_tab(client, device, "interfaces", interface_name_field="ifName")
 
-        assert response.status_code == 404
-        assert response.json()["message"] == "Interface data is ambiguous. Refresh and retry."
+        assert not shown.rows.get("4001", {}).get("data-evidence")
 
     def test_user_without_device_view_permission_is_rejected_before_lookup(self, client, live_librenms):
         client.force_login(make_user_with_perms("verify-interface-denied-user", []))
-
-        response = _json_post(
-            client,
-            "verify_interface",
-            {"device_id": 999_999_999, "port_id": 4001, "server_key": SERVER_KEY},
+        url = reverse(
+            "plugins:netbox_librenms_plugin:interface_row",
+            kwargs={"object_type": "device", "pk": 999_999_999, "row_key": "4001"},
         )
+
+        response = client.get(url, {"server_key": SERVER_KEY})
 
         assert response.status_code == 403
         assert "view_device" in response.json()["error"]
 
-
-@pytest.mark.django_db
-class TestVLANVerifyEndpoints:
-    def test_vlan_sync_verify_reports_global_name_match(self, client):
-        VLAN.objects.create(vid=3201, name="Application", status="active")
-        _login(client, "verify-vlan-global-user")
-
-        response = _json_post(
-            client,
-            "verify_vlan_sync_group",
-            {"vid": 3201, "name": "Application", "vlan_group_id": ""},
-        )
-
-        assert response.status_code == 200
-        assert response.json() == {
-            "status": "success",
-            "exists_in_netbox": True,
-            "name_matches": True,
-            "css_class": "text-success",
-            "netbox_vlan_name": "Application",
-            "status_html": '<span class="text-success"><i class="mdi mdi-check-circle"></i> Synced</span>',
-        }
-
-    def test_vlan_sync_verify_scopes_lookup_to_selected_group(self, client):
-        first = VLANGroup.objects.create(name="First Group", slug="first-group")
-        second = VLANGroup.objects.create(name="Second Group", slug="second-group")
-        VLAN.objects.create(vid=3202, name="Application", group=first, status="active")
-        _login(client, "verify-vlan-group-user")
-
-        response = _json_post(
-            client,
-            "verify_vlan_sync_group",
-            {"vid": 3202, "name": "Application", "vlan_group_id": second.pk},
-        )
-
-        assert response.status_code == 200
-        assert response.json()["exists_in_netbox"] is False
-        assert response.json()["netbox_vlan_name"] is None
-
-    def test_interface_vlan_verify_compares_real_untagged_assignment(self, client):
-        device = make_device("verify-interface-vlan")
-        interface = make_interface(device, "Ethernet1")
-        group = VLANGroup.objects.create(name="Interface Group", slug="interface-group")
+    def test_the_vlans_cell_compares_the_real_untagged_assignment(self, client, live_librenms):
+        device = make_device("verify-interface-vlan", librenms_cf={SERVER_KEY: {"id": 144}})
+        interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
+        _set_id(interface, 4001)
+        group = VLANGroup.objects.create(name="Interface Group", slug="interface-group", scope=device.site)
         vlan = VLAN.objects.create(vid=3203, name="Users", group=group, status="active")
         interface.mode = "access"
         interface.untagged_vlan = vlan
         interface.save(update_fields=["mode", "untagged_vlan"])
+        seed_interfaces_snapshot(device, [{**_port(), **port_vlans("access", 3203)}], server_key=SERVER_KEY)
         _login(client, "verify-interface-vlan-user")
 
-        response = _json_post(
-            client,
-            "verify_vlan_group",
-            {
-                "device_id": device.pk,
-                "interface_name": interface.name,
-                "vid": 3203,
-                "vlan_group_id": group.pk,
-                "vlan_type": "U",
-            },
-        )
+        response = client.get(_row_url("interface_row", device, "4001"))
 
         assert response.status_code == 200
-        data = response.json()
-        assert data["status"] == "success"
-        assert data["is_missing"] is False
-        assert data["css_class"] == "text-success"
-
-    @pytest.mark.parametrize(
-        ("route_name", "body", "message"),
-        [
-            ("verify_vlan_sync_group", {"name": "Missing"}, "No VID provided"),
-            ("verify_vlan_sync_group", {"vid": "not-a-vid"}, "Invalid VID"),
-        ],
-    )
-    def test_invalid_vlan_verify_payloads_return_structured_400(self, client, route_name, body, message):
-        _login(client, f"{route_name}-{message}-user")
-
-        response = _json_post(client, route_name, body)
-
-        assert response.status_code == 400
-        assert response.json() == {"status": "error", "message": message}
-
-    def test_invalid_interface_vlan_group_id_returns_structured_400(self, client):
-        device = make_device("verify-interface-vlan-invalid-group")
-        _login(client, "verify-interface-vlan-invalid-group-user")
-
-        response = _json_post(
-            client,
-            "verify_vlan_group",
-            {"device_id": device.pk, "vid": 3204, "vlan_group_id": "not-an-id"},
-        )
-
-        assert response.status_code == 400
-        assert response.json() == {"status": "error", "message": "Invalid VLAN group ID"}
+        assert '<span class="text-success">3203(U)' in _cell(response.content.decode(), "vlans")
 
 
 @pytest.mark.django_db
-class TestSaveVLANGroupOverridesEndpoint:
-    def test_real_cache_ttl_is_reused_for_saved_overrides(self, client, live_librenms):
-        device = make_device("save-vlan-overrides", librenms_cf={SERVER_KEY: {"id": 151}})
-        view = SaveVlanGroupOverridesView()
-        ports_key = source_cache.snapshot_key(device, Resource.INTERFACES, SERVER_KEY)
-        overrides_key = view.get_vlan_overrides_key(device, SERVER_KEY)
-        seed_interfaces_snapshot(device, [_port()], server_key=SERVER_KEY)
-        _login(client, "save-vlan-overrides-user")
+class TestTheVlanRowRead:
+    @staticmethod
+    def _device(tag, librenms_id, vlans):
+        device = make_device(tag, librenms_cf={SERVER_KEY: {"id": librenms_id}})
+        seed_source_snapshot(device, Resource.VLANS, SERVER_KEY, vlans=vlans)
+        return device
 
-        response = _json_post(
-            client,
-            "save_vlan_group_overrides",
-            {"device_id": device.pk, "server_key": SERVER_KEY, "vid_group_map": {"3205": "17"}},
-        )
+    def test_a_global_vlan_with_the_same_name_reads_synced(self, client, live_librenms):
+        VLAN.objects.create(vid=3201, name="Application", status="active")
+        device = self._device("verify-vlan-global", 145, [{"vlan_vlan": 3201, "vlan_name": "Application"}])
+        _login(client, "verify-vlan-global-user")
+
+        response = client.get(_row_url("vlan_row", device, "3201"))
 
         assert response.status_code == 200
-        assert response.json() == {"status": "success"}
-        assert cache.get(overrides_key) == {"3205": "17"}
-        ports_ttl = cache.ttl(ports_key)
-        overrides_ttl = cache.ttl(overrides_key)
-        assert ports_ttl > 0
-        assert overrides_ttl > 0
-        assert abs(overrides_ttl - ports_ttl) <= 2
+        status = _cell(response.content.decode(), "status")
+        assert "text-success" in status and "sync_one" not in status
 
-    def test_missing_ports_snapshot_returns_400_without_saving(self, client, live_librenms):
-        device = make_device("save-vlan-overrides-miss", librenms_cf={SERVER_KEY: {"id": 152}})
-        view = SaveVlanGroupOverridesView()
-        overrides_key = view.get_vlan_overrides_key(device, SERVER_KEY)
-        _login(client, "save-vlan-overrides-miss-user")
+    def test_a_group_choice_scopes_the_lookup_to_that_group(self, client, live_librenms):
+        first = VLANGroup.objects.create(name="First Group", slug="first-group")
+        second = VLANGroup.objects.create(name="Second Group", slug="second-group")
+        VLAN.objects.create(vid=3202, name="Application", group=first, status="active")
+        device = self._device("verify-vlan-group", 146, [{"vlan_vlan": 3202, "vlan_name": "Application"}])
+        _login(client, "verify-vlan-group-user")
+        shown = draft_tab(client, device, "vlans")
 
-        response = _json_post(
-            client,
-            "save_vlan_group_overrides",
-            {"device_id": device.pk, "server_key": SERVER_KEY, "vid_group_map": {"3206": "18"}},
-        )
+        chosen = draft_command(client, shown, "data-choice-url", row="3202", field="group", value=str(second.pk))
+        response = client.get(_row_url("vlan_row", device, "3202"))
+
+        assert chosen.status_code == 204
+        assert 'name="sync_one" value="3202"' in _cell(response.content.decode(), "status")
+
+    @pytest.mark.parametrize("fields", [{"field": "group", "value": ""}, {"row": "not-a-vid", "field": "group"}])
+    def test_an_invalid_vlan_choice_returns_400(self, client, live_librenms, fields):
+        device = self._device(f"verify-vlan-invalid-{len(fields)}", 147, [{"vlan_vlan": 3204, "vlan_name": "v"}])
+        _login(client, f"verify-vlan-invalid-{fields.get('row', 'none')}-user")
+        shown = draft_tab(client, device, "vlans")
+
+        response = draft_command(client, shown, "data-choice-url", **fields)
 
         assert response.status_code == 400
-        assert response.json()["message"] == "No cached port data; refresh interfaces first"
-        assert cache.get(overrides_key) is None
+        assert draft_tab(client, device, "vlans").table["data-draft-revision"] == "0"
 
-    def test_a_snapshot_whose_binding_no_longer_holds_takes_no_overrides(self, client, live_librenms):
+    def test_an_invalid_interface_vlan_group_id_returns_400(self, client, live_librenms):
+        device = make_device("verify-interface-vlan-invalid-group", librenms_cf={SERVER_KEY: {"id": 148}})
+        seed_interfaces_snapshot(device, [{**_port(), **port_vlans("access", 3204)}], server_key=SERVER_KEY)
+        _login(client, "verify-interface-vlan-invalid-group-user")
+        shown = draft_tab(client, device, "interfaces", interface_name_field="ifName")
+
+        response = draft_command(client, shown, "data-vlan-groups-url", row="4001", group_3204="not-an-id")
+
+        assert response.status_code == 400
+
+
+@pytest.mark.django_db
+class TestTheInterfaceVlanGroupsCommand:
+    @staticmethod
+    def _command_url(device):
+        path = reverse(
+            "plugins:netbox_librenms_plugin:interface_selection_vlan_groups",
+            kwargs={"object_type": "device", "pk": device.pk},
+        )
+        return f"{path}?server_key={SERVER_KEY}&interface_name_field=ifName"
+
+    def test_missing_ports_snapshot_conflicts_without_saving(self, client, live_librenms):
+        device = make_device("save-vlan-overrides-miss", librenms_cf={SERVER_KEY: {"id": 152}})
+        _login(client, "save-vlan-overrides-miss-user")
+
+        response = client.post(
+            self._command_url(device), {"draft_id": "any", "expected_revision": "0", "row": "4001", "group_3206": ""}
+        )
+
+        assert response.status_code == 409
+
+    def test_a_snapshot_whose_binding_no_longer_holds_takes_no_groups(self, client, live_librenms):
         device = make_device("save-vlan-overrides-rebound", librenms_cf={SERVER_KEY: {"id": 153}})
-        view = SaveVlanGroupOverridesView()
-        overrides_key = view.get_vlan_overrides_key(device, SERVER_KEY)
-        seed_interfaces_snapshot(device, [_port()], server_key=SERVER_KEY)
+        seed_interfaces_snapshot(device, [{**_port(), **port_vlans("access", 3207)}], server_key=SERVER_KEY)
+        _login(client, "save-vlan-overrides-rebound-user")
+        shown = draft_tab(client, device, "interfaces", interface_name_field="ifName")
         # The write signals run on commit, which this test never reaches, so only the binding refuses the snapshot.
         seed_stored_mapping(device, {SERVER_KEY: {"id": 153, "oob": {"id": 154, "type": "idrac"}}}, save=True)
         assert cache.ttl(source_cache.snapshot_key(device, Resource.INTERFACES, SERVER_KEY)) > 0
-        _login(client, "save-vlan-overrides-rebound-user")
 
-        response = _json_post(
-            client,
-            "save_vlan_group_overrides",
-            {"device_id": device.pk, "server_key": SERVER_KEY, "vid_group_map": {"3207": "19"}},
-        )
+        response = draft_command(client, shown, "data-vlan-groups-url", row="4001", group_3207="")
 
-        assert response.status_code == 400
-        assert cache.get(overrides_key) is None
+        assert response.status_code == 409
+        assert client.get(_row_url("interface_row", device, "4001")).status_code == 404
 
     def test_a_user_without_plugin_view_is_denied_before_the_view_runs(self, client, live_librenms):
-        """
-        LibreNMSPermissionMixin denies in dispatch(), so the view body never runs.
-
-        make_user_with_perms(plugin_write=False) grants neither plugin view nor plugin
-        change, and the mixin requires plugin view. The view's own
-        require_write_permission_json() gate is therefore NOT what answers here: that gate
-        is covered by test_vlan_verify_endpoints.TestSaveVlanGroupOverridesBranches, whose
-        user holds plugin view but not plugin change.
-        """
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.views.object_sync.devices import SaveVlanGroupOverridesView
-
+        """LibreNMSPermissionMixin denies in dispatch(), so the view body never runs."""
         device = make_device("save-vlan-overrides-denied", librenms_cf={SERVER_KEY: {"id": 153}})
-        overrides_key = SaveVlanGroupOverridesView().get_vlan_overrides_key(device, SERVER_KEY)
-        cache.delete(overrides_key)
+        seed_interfaces_snapshot(device, [{**_port(), **port_vlans("access", 3207)}], server_key=SERVER_KEY)
         client.force_login(
             make_user_with_perms(
                 "save-vlan-overrides-denied-user",
@@ -407,14 +325,11 @@ class TestSaveVLANGroupOverridesEndpoint:
             )
         )
 
-        response = _json_post(
-            client,
-            "save_vlan_group_overrides",
-            {"device_id": device.pk, "server_key": SERVER_KEY, "vid_group_map": {"3207": "19"}},
+        response = client.post(
+            self._command_url(device), {"draft_id": "any", "expected_revision": "0", "row": "4001", "group_3207": ""}
         )
 
         assert response.status_code == 403
-        assert cache.get(overrides_key) is None
 
 
 @pytest.mark.django_db
