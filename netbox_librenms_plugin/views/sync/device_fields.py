@@ -10,6 +10,7 @@ from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse
 from django.utils.html import escape
 from django.views import View
+from utilities.exceptions import PermissionsViolation
 from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.import_utils import _determine_device_name
@@ -58,6 +59,7 @@ from netbox_librenms_plugin.transactions import (
     atomic_with_events,
     classify_conflict,
     run_transaction,
+    saved_in_scope,
     update_existing_row,
 )
 from netbox_librenms_plugin.utils import (
@@ -190,7 +192,7 @@ def _write_device_field(view, request, pk, server_key, field, value, action, *, 
     except _WriteRefused as exc:
         messages.add_message(request, exc.level, str(exc))
         return None, _device_sync_redirect(request, pk, server_key)
-    except (ValidationError, IntegrityError) as e:
+    except (ValidationError, IntegrityError, PermissionsViolation) as e:
         if classify_conflict(e):
             raise
         messages.error(request, write_failure_message(e, action, field, Device, request.user))
@@ -235,7 +237,7 @@ def _write_device_serial(view, request, pk, server_key, incoming):
     except _WriteRefused as exc:
         messages.add_message(request, exc.level, str(exc))
         return None, _device_sync_redirect(request, pk, server_key)
-    except (ValidationError, IntegrityError) as e:
+    except (ValidationError, IntegrityError, PermissionsViolation) as e:
         if classify_conflict(e):
             raise
         messages.error(
@@ -838,7 +840,7 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
             # Scoped like the page device: the member's pk comes from the POST, so the same-VC
             # check alone would let a constrained grant write a serial onto a member it does not cover.
             update_existing_row(self.restricted_queryset(Device, "change").filter(pk=member_id), apply)
-        except (ValidationError, IntegrityError) as e:
+        except (ValidationError, IntegrityError, PermissionsViolation) as e:
             raise _WriteRefused(
                 write_failure_message(e, f"set serial on {locked[0].name}", "serial", Device, self.request.user)
             ) from e
@@ -957,7 +959,7 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
             )
             return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
 
-        with transaction.atomic():
+        with atomic_with_events():
             try:
                 obj_locked = self.restricted_queryset(model, "change").select_for_update(of=("self",)).get(pk=pk)
             except model.DoesNotExist:
@@ -989,6 +991,14 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
                     messages.error(
                         request,
                         f"Validation error removing LibreNMS mapping: {exception_text_for(exc, model, request.user)}",
+                    )
+                    return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
+                if not saved_in_scope(obj_locked, request.user, "change"):
+                    transaction.set_rollback(True)
+                    messages.error(
+                        request,
+                        f"Nothing was changed: the {model._meta.verbose_name} would be outside your change "
+                        "permission constraints.",
                     )
                     return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
                 removed = True
@@ -1034,7 +1044,7 @@ class SetPreferredServerView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
             return self._redirect(object_type, pk, _validated_active_server_key(request), active_sync_tab)
         submitted_active_key = request.POST.get("active_server_key", "").strip() or None
 
-        with transaction.atomic():
+        with atomic_with_events():
             owner = get_object_or_404(
                 self.restricted_queryset(model, "change").select_for_update(of=("self",)),
                 pk=pk,
@@ -1062,6 +1072,14 @@ class SetPreferredServerView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
                 messages.error(
                     request,
                     f"Validation error changing preferred server: {exception_text_for(exc, model, request.user)}",
+                )
+                return self._redirect(object_type, pk, active_server_key, active_sync_tab)
+            if not saved_in_scope(owner, request.user, "change"):
+                transaction.set_rollback(True)
+                messages.error(
+                    request,
+                    f"Nothing was changed: the {model._meta.verbose_name} would be outside your change "
+                    "permission constraints.",
                 )
                 return self._redirect(object_type, pk, active_server_key, active_sync_tab)
 
@@ -1205,7 +1223,7 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                 "cannot convert. Resolve the duplicate assignment first.",
             )
             return self._sync_url(object_type, pk)
-        except ValidationError as exc:
+        except (ValidationError, PermissionsViolation) as exc:
             if classify_conflict(exc):
                 raise
             failure = write_failure_message(exc, "save converted librenms_id", "custom_field_data", model, request.user)

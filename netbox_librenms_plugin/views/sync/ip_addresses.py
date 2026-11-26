@@ -14,6 +14,7 @@ from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.views import View
 from ipam.models import VRF, IPAddress
+from utilities.exceptions import PermissionsViolation
 from virtualization.models import VirtualMachine, VMInterface
 
 from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE, is_supported_interface_name_field
@@ -31,7 +32,13 @@ from netbox_librenms_plugin.sync_cache import (
     schedule_request_cache_mutation,
 )
 from netbox_librenms_plugin.sync_query import page_query_url
-from netbox_librenms_plugin.transactions import classify_conflict, run_transaction, saved_in_scope, update_existing_row
+from netbox_librenms_plugin.transactions import (
+    classify_conflict,
+    row_savepoint,
+    run_transaction,
+    saved_in_scope,
+    update_existing_row,
+)
 from netbox_librenms_plugin.utils import (
     acquire_advisory_transaction_lock,
     build_migrated_context,
@@ -696,7 +703,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
         Raises:
             _PrimaryIPNotEligible: NetBox would refuse *interface* for the owner's primary IP.
-            ValueError: NetBox refuses the owner; the text is safe for the user.
+            ValueError: NetBox refuses the owner, or the write moves the owner out of the change
+                scope; the text is safe for the user.
 
         """
         field = "primary_ip6" if ip_obj.family == 6 else "primary_ip4"
@@ -713,7 +721,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
         try:
             update_existing_row(self.restricted_queryset(type(obj), "change").filter(pk=obj.pk), point_at_ip)
-        except ValidationError as exc:
+        except (ValidationError, PermissionsViolation) as exc:
             raise ValueError(f"Primary IP not set: {exception_text_for(exc, type(obj), self.request.user)}") from None
         return changed
 
@@ -1185,9 +1193,9 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 else None
             )
             try:
-                # Per-IP savepoint so one bad address rolls back only itself and
+                # Per-IP savepoint so one bad address rolls back only itself, with its NetBox events, and
                 # surfaces a real error, instead of poisoning the whole batch.
-                with transaction.atomic():
+                with row_savepoint():
                     row_id = normalize_ip_sync_row_id(selected_ip)
                     if row_id in duplicate_cached_rows:
                         raise ValueError("The cached snapshot contains duplicate rows for this IP address.")

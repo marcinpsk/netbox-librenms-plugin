@@ -62,6 +62,20 @@ def seed_inventory(view, device, inventory, *, librenms_id, server_key="default"
     return key
 
 
+def seed_module_rows(device, inventory, *, librenms_id, bound_ports=()):
+    """Seed the Modules tab of *device*; each ``(entPhysicalIndex, port_id, ifName)`` of *bound_ports* binds a row's port."""
+    from netbox_librenms_plugin.views.mixins import CacheMixin
+
+    bindings = {index: (port_id, name) for index, port_id, name in bound_ports}
+    rows = [
+        {**row, "_librenms_port_id": bindings[index][0], "_librenms_ifname": bindings[index][1]}
+        if (index := row["entPhysicalIndex"]) in bindings
+        else row
+        for row in inventory
+    ]
+    return seed_inventory(CacheMixin(), device, rows, librenms_id=librenms_id)
+
+
 def clear_snapshots(keys):
     """Delete snapshot keys seeded by a test."""
     from django.core.cache import cache

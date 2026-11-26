@@ -83,7 +83,7 @@ ALLOWED = [
     *(
         (path, function, caught, _NOT_LTREE)
         for path, function, caught in (
-            ("views/imports/actions.py", "_save_device", "ValidationError"),
+            ("views/imports/actions.py", "_write_device_row", "ValidationError"),
             ("views/imports/actions.py", "AddAsOOBView.post", "ValidationError"),
             ("views/imports/actions.py", "AddAsOOBView._resolve_oob_interface", "DataError, ValidationError"),
             ("views/settings_views.py", "LibreNMSSettingsView.post", "ValidationError"),
@@ -91,14 +91,18 @@ ALLOWED = [
             (
                 "views/sync/device_fields.py",
                 "AssignVCSerialView._assign_member_serial",
-                "IntegrityError, ValidationError",
+                "IntegrityError, PermissionsViolation, ValidationError",
             ),
             ("views/sync/device_fields.py", "RemoveServerMappingView.post", "ValidationError"),
             ("views/sync/device_fields.py", "SetPreferredServerView.post", "ValidationError"),
             ("views/sync/interfaces.py", "SyncInterfacesView._apply_relationship_edge", "ValidationError"),
             ("views/sync/interfaces.py", "_BaseRelationshipSyncView._link_attempt", "ValidationError"),
             ("views/sync/ip_addresses.py", "CreateVRFFromIPRowView._create_vrf", "IntegrityError, ValidationError"),
-            ("views/sync/ip_addresses.py", "SyncIPAddressesView._set_primary_ip", "ValidationError"),
+            (
+                "views/sync/ip_addresses.py",
+                "SyncIPAddressesView._set_primary_ip",
+                "PermissionsViolation, ValidationError",
+            ),
             ("views/sync/migrate.py", "MoveInterfaceToWinnerView.post", "ValidationError"),
             ("views/sync/migrate.py", "MoveInterfaceToWinnerView.post", "IntegrityError, ValidationError"),
             ("views/sync/modules.py", "AddBayTemplateView._map_existing_bay", "IntegrityError, ValidationError"),
