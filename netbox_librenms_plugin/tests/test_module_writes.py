@@ -240,8 +240,10 @@ def test_component_and_serialless_writers_wait_for_the_owner_before_downstream_l
     elif writer == "interface-types":
         interface.refresh_from_db()
         assert interface.type == "10gbase-x-sfpp"
+    elif writer == "module-bays":
+        assert ModuleBay.objects.filter(device=device, module_id=module.pk, name="Additional Bay").exists()
     else:
-        assert ModuleBay.objects.filter(device=device, name="Additional Bay").exists()
+        assert ModuleBay.objects.filter(device=device, module__isnull=True, name="Additional Bay").exists()
 
 
 @transactional_db_with_all_apps()
