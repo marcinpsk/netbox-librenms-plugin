@@ -863,7 +863,8 @@ class BaseLibreNMSSyncView(
                     'librenms_serial': 'trimmed raw serial, as the dialog posts it',
                     'model': 'model name',
                     'assigned_member': Device object or None (if serial matches existing assignment)
-                    'member_options': the members that the user may change, which the row offers
+                    'holder_visible': whether the user may view the assigned member
+                    'member_options': the members that the user may view and change, which the row offers
                     'selected_member': the assigned member when the user may change it, no other row
                         has it too and the writer can store the serial, else None
                     'shared_holder': whether another row has the same assigned member
@@ -889,8 +890,14 @@ class BaseLibreNMSSyncView(
             .values_list("pk", flat=True)
         )
 
+        # The dialog names only the members that the user may view.
+        viewable = set(
+            self.restricted_queryset(type(obj), "view")
+            .filter(virtual_chassis_id=obj.virtual_chassis_id)
+            .values_list("pk", flat=True)
+        )
         # The writer rolls back the whole post for a member outside the change scope, so the dialog offers none.
-        assignable = [member for member in vc_members if member.pk in changeable]
+        assignable = [member for member in vc_members if member.pk in changeable and member.pk in viewable]
 
         result = []
         # Like admits(), the stack holds when the rules of any member explain it; the dialog shows the LibreNMS text.
@@ -908,6 +915,7 @@ class BaseLibreNMSSyncView(
                     "librenms_serial": display(component["serial"]),
                     "model": component["model"] or "-",
                     "assigned_member": assigned_member,
+                    "holder_visible": assigned_member is not None and assigned_member.pk in viewable,
                     "member_options": assignable,
                 }
             )

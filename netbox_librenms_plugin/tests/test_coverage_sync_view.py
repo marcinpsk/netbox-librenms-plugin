@@ -1049,6 +1049,35 @@ class TestVirtualChassisInventory:
         assert f'href="{holder.get_absolute_url()}"' in held_row
         assert holder.name in held_row
 
+    def test_the_dialog_does_not_name_a_holder_that_the_user_may_not_view(self, client, librenms_server):
+        """The user may view only A and change both, so the row that B holds names no member and offers only A."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms, module_tab_forms
+
+        _vc, (page, holder) = make_virtual_chassis_members("inventory-hidden-holder", count=2)
+        holder.serial = "HIDDEN-B"
+        holder.save()
+        seed_mapping(page, SERVER_KEY, own=6666)
+        inventory = _stack_inventory({"entPhysicalSerialNum": "HIDDEN-A"}, {"entPhysicalSerialNum": "HIDDEN-B"})
+        _register_device(librenms_server, 6666, page.name, inventory=inventory)
+        user = make_user_with_perms("vc-serial-hidden-b", [("view", Device)], constraints={"pk": page.pk})
+        client.force_login(grant(user, "change", Device))
+
+        response = client.get(_sync_url(page))
+
+        shown = [(item["serial"], item["assigned_member"]) for item in response.context["vc_inventory_serials"]]
+        assert shown == [("HIDDEN-A", None), ("HIDDEN-B", holder)]
+        html = response.content.decode()
+        (form,) = [form for form in module_tab_forms(html).forms if "assign-vc-serial" in form["action"]]
+        for row in ("member_id_1", "member_id_2"):
+            assert set(form["selects"][row]["options"]) == {"", str(page.pk)}, form["selects"][row]
+        start = html.index("<code>HIDDEN-B</code>", html.index('id="vc-serials-form"'))
+        held_row = html[start : html.index("</tr>", start)]
+        assert "Another member" in held_row
+        assert holder.name not in held_row
+        assert holder.get_absolute_url() not in held_row
+
     def test_two_rows_that_match_one_holder_select_no_member(self, logged_in_client, librenms_server):
         """Two rows report the serial of A, so neither row selects A and the post of a third row succeeds."""
         _vc, (holder, other) = make_virtual_chassis_members("inventory-shared-holder", count=2)

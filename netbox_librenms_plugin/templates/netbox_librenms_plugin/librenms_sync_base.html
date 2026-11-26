@@ -1199,10 +1199,15 @@ that may well be correct.
                                 <td class="text-break">{{ item.model }}</td>
                                 <td class="text-break"><code>{{ item.serial }}</code></td>
                                 <td class="text-break">
-                                    {% if item.assigned_member %}
+                                    {% if item.assigned_member and item.holder_visible %}
                                         <a href="{{ item.assigned_member.get_absolute_url }}" target="_blank">
                                             {{ item.assigned_member }}
                                         </a>
+                                        <span class="text-success ms-1" title="Already assigned">
+                                            <i class="mdi mdi-check-circle"></i>
+                                        </span>
+                                    {% elif item.assigned_member %}
+                                        Another member
                                         <span class="text-success ms-1" title="Already assigned">
                                             <i class="mdi mdi-check-circle"></i>
                                         </span>
