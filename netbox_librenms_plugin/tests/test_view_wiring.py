@@ -3524,8 +3524,8 @@ class TestModuleWriterOwnership:
                     calls.append((cls._call_name(node), node, parents))
 
             walk(method)
-            # A conditional expression arm or a short-circuited operand can skip a lock, as an if statement can.
-            conditional = (ast.For, ast.AsyncFor, ast.While, ast.If, ast.IfExp, ast.BoolOp)
+            # A conditional expression arm, a short-circuited operand or a match case can skip a lock, as an if can.
+            conditional = (ast.For, ast.AsyncFor, ast.While, ast.If, ast.IfExp, ast.BoolOp, ast.match_case)
             order = {id(node): position for position, (_call, node, _parents) in enumerate(calls)}
             scopes = [(node, parents) for call, node, parents in calls if call == "lock_module_write"]
             if len(scopes) != 1:
@@ -3570,6 +3570,8 @@ class TestModuleWriterOwnership:
             "indexed and lock_module_write(observe_module_write(device_ids=targets))\nModule().save()",
             "Module.objects.filter(pk=pk).update(serial=value)\nlock_module_write(observe_module_write(device_ids=targets))",
             "Module.objects.update(serial=value)\nlock_module_write(observe_module_write(device_ids=targets))",
+            'match action:\n    case "install":\n        lock_module_write(observe_module_write(device_ids=targets))\n'
+            "Module().save()",
         ],
         ids=[
             "missing",
@@ -3581,6 +3583,7 @@ class TestModuleWriterOwnership:
             "owner-in-short-circuit",
             "queryset-update-before-owner",
             "manager-update-before-owner",
+            "owner-in-match-case",
         ],
     )
     def test_guard_rejects_known_omissions(self, body):
@@ -3610,6 +3613,8 @@ class TestModuleWriterOwnership:
             "lock_module_write(observe_module_write(device_ids=targets)).lock_module_types([Module().save()])",
             "lock_module_write(observe_module_write(device_ids=targets))\nscope.lock_module_types(types) if types else None\nModule().save()",
             "lock_module_write(observe_module_write(device_ids=targets))\ntypes or scope.lock_module_types(types)\nModule().save()",
+            "lock_module_write(observe_module_write(device_ids=targets))\n"
+            'match action:\n    case "install":\n        scope.lock_module_types(types)\nModule().save()',
         ],
         ids=[
             "missing-type",
@@ -3618,6 +3623,7 @@ class TestModuleWriterOwnership:
             "write-in-type-argument",
             "types-in-conditional-expression",
             "types-in-short-circuit",
+            "types-in-match-case",
         ],
     )
     def test_guard_rejects_known_type_claim_omissions(self, body):
