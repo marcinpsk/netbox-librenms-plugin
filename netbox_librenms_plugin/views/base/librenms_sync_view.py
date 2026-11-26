@@ -34,7 +34,6 @@ from netbox_librenms_plugin.serial_identity import (
     compare,
     display,
     is_identity,
-    is_serial_value,
     is_sole_holder,
     keeps_stored_serial,
     stored_form_differs,
@@ -104,8 +103,7 @@ class BaseLibreNMSSyncView(
 
     def _legacy_id_serial_confirmed(self, device, incoming) -> bool:
         """Return whether the legacy ID conversion may run: *device* is the one Device that holds the serial."""
-        # A list or an object is no serial, and the resolver can not look it up.
-        if not is_serial_value(incoming) or self._serial_context(device).unavailable:
+        if self._serial_context(device).unavailable:
             return False
         try:
             return is_sole_holder(device, incoming, rules=self.serial_rules)
@@ -576,6 +574,8 @@ class BaseLibreNMSSyncView(
             "librenms_device_location": "-",
             "librenms_device_hardware_match": None,
             "vc_inventory_serials": [],
+            "vc_inventory_unavailable": False,
+            "vc_serial_members": [],
         }
 
         if self.librenms_id is not None:
@@ -637,7 +637,6 @@ class BaseLibreNMSSyncView(
                         else "",
                         # The writer refuses a serial without an identity, so the page offers no sync for it.
                         "serial_admitted": obj._meta.model_name == "device"
-                        and is_serial_value(librenms_serial)
                         and is_identity(librenms_serial, self._serial_context(obj)),
                         # A legacy stored form names the same hardware; the update action writes the LibreNMS text.
                         "serial_stored_form_differs": obj._meta.model_name == "device"
@@ -663,7 +662,12 @@ class BaseLibreNMSSyncView(
 
                 # For Virtual Chassis, fetch inventory
                 if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-                    librenms_device_details["vc_inventory_serials"] = self._get_vc_inventory_serials(obj)
+                    # The dialog names, links and offers only the members that the viewer may view.
+                    viewable = list(obj.virtual_chassis.members.restrict(getattr(request, "user", None), "view"))
+                    serials = self._get_vc_inventory_serials(obj, viewable)
+                    librenms_device_details["vc_serial_members"] = viewable
+                    librenms_device_details["vc_inventory_serials"] = serials or []
+                    librenms_device_details["vc_inventory_unavailable"] = serials is None
 
                 # Device was retrieved successfully via librenms_id — trust the ID
                 found_in_librenms = True
@@ -845,7 +849,7 @@ class BaseLibreNMSSyncView(
         except Exception:
             return None
 
-    def _get_vc_inventory_serials(self, obj):
+    def _get_vc_inventory_serials(self, obj, viewable):
         """
         Fetch inventory serials for Virtual Chassis members.
 
@@ -854,26 +858,27 @@ class BaseLibreNMSSyncView(
 
         Args:
             obj: NetBox device object (VC member)
+            viewable: The chassis members that the viewer may view; only these are named.
 
         Returns:
-            list: [
+            list | None: None if the read failed, or a list of:
                 {
                     'description': 'Member component description',
                     'serial': 'the LibreNMS serial, as the dialog shows it',
                     'librenms_serial': 'trimmed raw serial, as the dialog posts it',
                     'model': 'model name',
-                    'assigned_member': Device object or None (if serial matches existing assignment)
+                    'assigned_member': the viewable member that holds the serial, or None,
+                    'assigned_hidden': whether a member outside *viewable* holds the serial,
                     'selected_member': the assigned member when the user may change it, no other row
                         has it too and the writer can store the serial, else None
                     'shared_holder': whether another row has the same assigned member
                     'fit_refusal': why the writer cannot store the serial, or ""
                 }
-            ]
 
         """
-        success, inventory = self.librenms_api.get_device_inventory(self.librenms_id)
+        success, inventory = self.librenms_api.get_device_inventory(self.librenms_id, missing_is_empty=True)
         if not success:
-            return []
+            return None
 
         # Each member reads its own serial context, so load the rows that decide it with the members.
         vc_members = obj.virtual_chassis.members.select_related("device_type", "virtual_chassis__master__device_type")
@@ -881,8 +886,9 @@ class BaseLibreNMSSyncView(
         # Each member's own Device serial context admits and compares: a masterless member keeps its own rules.
         members_by_serial = MemberSerials(vc_members, self._serial_context)
 
+        viewable_pks = {member.pk for member in viewable}
         # The form posts every preselected member, and the writer refuses a member outside the change scope.
-        changeable = set(
+        changeable = viewable_pks & set(
             self.restricted_queryset(type(obj), "change")
             .filter(virtual_chassis_id=obj.virtual_chassis_id)
             .values_list("pk", flat=True)
@@ -895,7 +901,8 @@ class BaseLibreNMSSyncView(
                 continue
             # A serial that two members share assigns neither.
             holders = members_by_serial.find(component["serial"])
-            assigned_member = holders[0] if len(holders) == 1 else None
+            holder = holders[0] if len(holders) == 1 else None
+            hidden = holder is not None and holder.pk not in viewable_pks
 
             result.append(
                 {
@@ -903,7 +910,8 @@ class BaseLibreNMSSyncView(
                     "serial": display(component["serial"]),
                     "librenms_serial": display(component["serial"]),
                     "model": component["model"] or "-",
-                    "assigned_member": assigned_member,
+                    "assigned_member": None if hidden else holder,
+                    "assigned_hidden": hidden,
                 }
             )
 

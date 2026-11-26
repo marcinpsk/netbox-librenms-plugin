@@ -7,9 +7,10 @@ context's manufacturer, then the global rules, each ordered by priority and pk. 
 extracts: when its pattern fullmatches the current value, the value becomes the one capture group
 that the rule names. So a key is always a contiguous substring of the trimmed value.
 
-A key is Absent when the value is a LibreNMS placeholder (before or after the rules), when a rule
-extracts a group that did not take part in the match or is empty, or when the key has no run of
-three ASCII letters or digits. An Absent key never identifies hardware.
+A key is Absent when the value is not text or a number (a JSON boolean, list or object), when the
+value is a LibreNMS placeholder (before or after the rules), when a rule extracts a group that did
+not take part in the match or is empty, or when the key has no run of three ASCII letters or digits.
+An Absent key never identifies hardware.
 
 Contexts: a Device in a Virtual Chassis uses the manufacturer of the chassis master's DeviceType
 (its own one without a master); a Module uses the manufacturer of the Device that holds it. Before
@@ -46,6 +47,7 @@ TRIM_CHARACTERS = " \t\n\r\v\f"
 _TRIM_LITERAL = "'" + TRIM_CHARACTERS.replace("'", "''") + "'"
 # A key without three consecutive ASCII letters or digits gives a LIKE pattern without a trigram.
 _IDENTITY_RUN = re.compile(r"[A-Za-z0-9]{3}")
+_SURROGATE = re.compile("[\ud800-\udfff]")
 _LOCK_PREFIX = "netbox-librenms-plugin:serial-identity"
 # Stop reading candidate rows when every incoming value has this many confirmed matches.
 _AMBIGUOUS_AT = 2
@@ -141,6 +143,22 @@ def is_serial_value(value) -> bool:
     return value is None or (isinstance(value, (str, int, float)) and not isinstance(value, bool))
 
 
+MALFORMED_SERIAL = "LibreNMS reports a serial that is not text or a number."
+UNSTORABLE_SERIAL = "The LibreNMS serial holds a character that the serial field cannot store."
+
+
+def _storable(text: str) -> bool:
+    """Return whether PostgreSQL text can hold *text*: it has no NUL and it encodes to UTF-8."""
+    if "\x00" in text:
+        return False
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        # An unpaired surrogate from a JSON escape.
+        return False
+    return True
+
+
 def _stored_text(value) -> str:
     """Return the persisted text of a NetBox serial field, untrimmed."""
     return "" if value is None else str(value)
@@ -176,7 +194,13 @@ class SerialContext:
         return hashlib.sha256(json.dumps(parts, separators=(",", ":")).encode()).hexdigest()
 
     def _key(self, value) -> str:
+        # The text of a boolean, a list or an object can equal a stored serial, but the value names no hardware.
+        if not is_serial_value(value):
+            return ""
         text = _text(value)
+        # Text that the database cannot hold has no identity, so no lookup or lock key reads it.
+        if not _storable(text):
+            return ""
         if text in self._keys:
             return self._keys[text]
         key = self._extract(text)
@@ -325,8 +349,32 @@ def keeps_stored_serial(stored, incoming, model) -> bool:
         return False
 
 
+def direct_serial_sync_refusal(device) -> str:
+    """Return why a device-level serial cannot be synced directly, or an empty string."""
+    if device.virtual_chassis_id is not None:
+        return "The LibreNMS device serial cannot identify this virtual chassis member."
+    return ""
+
+
+def lookup_refusal(value) -> str:
+    """Return why no serial lookup can read the LibreNMS *value*, or "": it is not text or a number, or not storable."""
+    if not is_serial_value(value):
+        return MALFORMED_SERIAL
+    if not _storable(display(value)):
+        return UNSTORABLE_SERIAL
+    return ""
+
+
 def stored_form_refusal(value, model) -> str:
-    """Return why a serial writer refuses to store the LibreNMS *value* in ``model.serial``, or "" when it can."""
+    """
+    Return why a serial writer refuses to store the LibreNMS *value* in ``model.serial``, or "" when it can.
+
+    The value is not text or a number, the database cannot hold its text, or its text is longer than
+    the field: the writer refuses rather than store the text of a boolean or a list, fail in the
+    database, or cut the text. Import validation reads the same reason, so a row that the create refuses is never ready.
+    """
+    if refusal := lookup_refusal(value):
+        return refusal
     text = display(value)
     max_length = model._meta.get_field("serial").max_length
     if max_length is not None and len(text) > max_length:
@@ -346,12 +394,17 @@ def display(value) -> str:
     return "" if is_librenms_placeholder(text) else text
 
 
+def page_text(value) -> str:
+    """Return ``display(value)`` with each unpaired surrogate replaced by U+FFFD: a UTF-8 page cannot encode one."""
+    return _SURROGATE.sub("\ufffd", display(value))
+
+
 def stored_form(value, model) -> str:
     """
     Return the text that a plugin writer stores in ``model.serial`` for the LibreNMS *value*.
 
     Raises:
-        ValidationError: The text is longer than the field; the writer refuses rather than cut it.
+        ValidationError: ``stored_form_refusal`` gives a reason.
 
     """
     if refusal := stored_form_refusal(value, model):
@@ -555,11 +608,16 @@ def _resolve(
     *holder_contexts* maps a value to the writer context of its own later write. It changes no
     match: it only adds the rows that store that writer's key of the value to ``uncertain``.
     """
-    values = list(dict.fromkeys(_text(value) for value in values))
+    serial_texts = {}
+    for value in values:
+        text = _text(value)
+        # A text key can name hardware only if an admitted value supplied it.
+        serial_texts[text] = is_serial_value(value) or serial_texts.get(text, False)
+    values = [text for text, admitted in serial_texts.items() if admitted]
     probes = _probe_keys(values, rules)
     by_own_key = _writer_keys(values, probes, writer)
     by_holder_key = _holder_keys(probes, holder_contexts)
-    results = {value: _ABSENT for value, keys in probes.items() if not keys}
+    results = {text: _ABSENT for text in serial_texts if not probes.get(text)}
     open_values = [value for value in values if probes[value]]
     if not open_values:
         return results
@@ -612,7 +670,9 @@ def _resolve(
     return results
 
 
-def resolve_devices(serials: Iterable, *, rules: SerialRules | None = None, exclude_pks=(), lock=False) -> dict:
+def resolve_devices(
+    serials: Iterable, *, rules: SerialRules | None = None, exclude_pks=(), lock=False, contexts_by_pk=None
+) -> dict:
     """
     Return ``{serial_text: Resolution}``: the Devices that hold each incoming serial, in one query.
 
@@ -621,6 +681,7 @@ def resolve_devices(serials: Iterable, *, rules: SerialRules | None = None, excl
         rules: The batch's serial rules; None reads them.
         exclude_pks: Devices to leave out before the count, for example the device that a write changes.
         lock: Lock confirmed matches ``FOR UPDATE`` and check their identity again; the caller holds a transaction.
+        contexts_by_pk: Proposed serial contexts for Devices affected by a pending type change.
 
     """
     from dcim.models import Device
@@ -629,12 +690,24 @@ def resolve_devices(serials: Iterable, *, rules: SerialRules | None = None, excl
     queryset = Device.objects.select_related("device_type", "virtual_chassis__master__device_type")
     if exclude_pks:
         queryset = queryset.exclude(pk__in=list(exclude_pks))
-    return _resolve(queryset, serials, rules=rules, row_context=rules.for_device, lock=lock)
+    row_context = rules.for_device
+    if contexts_by_pk:
+
+        def row_context(row):
+            return contexts_by_pk.get(row.pk) or rules.for_device(row)
+
+    return _resolve(queryset, serials, rules=rules, row_context=row_context, lock=lock)
 
 
-def resolve_device(serial, *, rules: SerialRules | None = None, exclude_pks=(), lock=False) -> Resolution:
+def resolve_device(
+    serial, *, rules: SerialRules | None = None, exclude_pks=(), lock=False, contexts_by_pk=None
+) -> Resolution:
     """Return the Resolution of one incoming serial among Devices; see :func:`resolve_devices`."""
-    return resolve_devices([serial], rules=rules, exclude_pks=exclude_pks, lock=lock)[_text(serial)]
+    if not is_serial_value(serial):
+        return _ABSENT
+    return resolve_devices([serial], rules=rules, exclude_pks=exclude_pks, lock=lock, contexts_by_pk=contexts_by_pk)[
+        _text(serial)
+    ]
 
 
 def resolve_devices_write(
@@ -669,14 +742,16 @@ def resolve_device_write(
     incoming, context: SerialContext, *, rules: SerialRules, exclude_pks=(), master=None
 ) -> Resolution:
     """Return the Devices that a write of *incoming* under *context* would duplicate; see ``resolve_devices_write``."""
+    if not is_serial_value(incoming):
+        return _ABSENT
     return resolve_devices_write([incoming], context, rules=rules, exclude_pks=exclude_pks, master=master)[
         _text(incoming)
     ]
 
 
-def is_sole_holder(device, incoming, *, rules: SerialRules, exclude_pks=()) -> bool:
+def is_sole_holder(device, incoming, *, rules: SerialRules, exclude_pks=(), contexts_by_pk=None) -> bool:
     """Return whether *device* is the one Device, apart from *exclude_pks*, that holds the hardware *incoming* names."""
-    holder = resolve_device(incoming, rules=rules, exclude_pks=exclude_pks).object
+    holder = resolve_device(incoming, rules=rules, exclude_pks=exclude_pks, contexts_by_pk=contexts_by_pk).object
     return holder is not None and holder.pk == device.pk
 
 
@@ -732,6 +807,8 @@ def resolve_module(
     serial, *, rules: SerialRules | None = None, device_ids=None, exclude_pks=(), lock=False, writer=None
 ):
     """Return the Resolution of one incoming serial among Modules; see :func:`resolve_modules`."""
+    if not is_serial_value(serial):
+        return _ABSENT
     return resolve_modules(
         [serial], rules=rules, device_ids=device_ids, exclude_pks=exclude_pks, lock=lock, writer=writer
     )[_text(serial)]
@@ -753,7 +830,7 @@ def assignment_lock(serials: Iterable, *, model, rules: SerialRules) -> None:
 
     label = model._meta.label_lower
     # Text first: the probe map keys on the value, and the JSON numbers 123 and 123.0 are one Python key.
-    texts = [_text(serial) for serial in serials]
+    texts = [_text(serial) for serial in serials if is_serial_value(serial)]
     identities = {f"{_LOCK_PREFIX}:{label}:{key}" for keys in _probe_keys(texts, rules).values() for key in keys}
     for identity in sorted(identities, key=advisory_lock_key):
         acquire_advisory_transaction_lock(identity)

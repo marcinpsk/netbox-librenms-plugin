@@ -204,6 +204,30 @@ class TestKeyAdmission:
 
         assert is_identity(value, SerialRules.load().context(None)) is identity
 
+    @pytest.mark.parametrize(
+        "value", [True, False, ["ABC123"], {"serial": "ABC123"}], ids=["true", "false", "list", "object"]
+    )
+    def test_a_value_that_is_not_text_or_a_number_has_no_identity(self, value):
+        """A JSON boolean, list or object has text that a stored serial can equal, but it names no hardware."""
+        from netbox_librenms_plugin.serial_identity import (
+            Comparison,
+            ResolutionKind,
+            SerialRules,
+            compare,
+            is_identity,
+            resolve_device,
+        )
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        _rules_only()
+        stored = str(value)
+        make_device(f"malformed-serial-{len(stored)}", serial=stored)
+        context = SerialRules.load().context(None)
+
+        assert not is_identity(value, context)
+        assert compare(stored, value, context) is Comparison.ABSENT
+        assert resolve_device(value).kind is ResolutionKind.ABSENT
+
     @pytest.mark.parametrize("stored", ["unknown", "AB", "S/N N/A", "1"])
     def test_a_value_without_an_identity_binds_no_device_and_costs_no_lookup(self, stored):
         from netbox_librenms_plugin.serial_identity import ResolutionKind, SerialRules, resolve_device
@@ -419,6 +443,34 @@ class TestLookup:
             assert resolve_device_write(value, context, rules=rules) == writes[key]
             assert resolve_module(value, rules=rules) == module_reads[key]
 
+    @pytest.mark.parametrize("value", [True, ["ABC123"], {"serial": "ABC123"}], ids=["boolean", "list", "object"])
+    def test_batches_do_not_match_the_string_representation_of_malformed_serials(self, value):
+        from netbox_librenms_plugin.serial_identity import (
+            ResolutionKind,
+            SerialRules,
+            resolve_devices,
+            resolve_devices_write,
+            resolve_modules,
+        )
+        from netbox_librenms_plugin.tests.conftest import install_module, make_device_with_module_bays
+
+        _rules_only()
+        text = str(value)
+        device = make_device_with_module_bays("lookup-malformed", ["Slot 1"], serial=text)
+        module = install_module(device, "Slot 1", "MALFORMED-CARD", serial=text)
+        rules = SerialRules.load()
+        context = rules.for_device(device)
+
+        assert resolve_devices([value], rules=rules)[text].kind is ResolutionKind.ABSENT
+        assert resolve_devices_write([value], context, rules=rules)[text].kind is ResolutionKind.ABSENT
+        assert resolve_modules([value], rules=rules)[text].kind is ResolutionKind.ABSENT
+
+        # A real text serial still matches when it shares the malformed value's result key.
+        for serials in ([value, text], [text, value]):
+            assert resolve_devices(serials, rules=rules)[text].object == device
+            assert resolve_devices_write(serials, context, rules=rules)[text].object == device
+            assert resolve_modules(serials, rules=rules)[text].object == module
+
     @pytest.mark.parametrize("lock", [False, True], ids=["read", "locked"])
     def test_a_large_batch_confirms_each_row_only_against_the_values_of_its_key(self, monkeypatch, lock):
         from dcim.models import Device
@@ -617,6 +669,9 @@ class TestGroupingAndPresentation:
         with pytest.raises(ValidationError) as refused:
             stored_form("S" * 51, Device)
         assert "serial" in refused.value.message_dict
+        with pytest.raises(ValidationError) as malformed:
+            stored_form(True, Device)
+        assert "serial" in malformed.value.message_dict
 
     def test_a_legacy_stored_form_is_same_hardware_in_another_form(self):
         from netbox_librenms_plugin.serial_identity import SerialRules, display, stored_form_differs

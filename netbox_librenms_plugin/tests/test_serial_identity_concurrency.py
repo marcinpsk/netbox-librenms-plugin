@@ -22,7 +22,7 @@ from netbox_librenms_plugin.tests.conftest import (
     run_in_threads,
     transactional_db_with_all_apps,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, stored_mapping_for_test
 from netbox_librenms_plugin.tests.view_test_helpers import (
     messages_on,
     module_tab_forms,
@@ -490,33 +490,31 @@ def test_a_type_change_reads_the_new_type_again_under_its_lock(librenms_server, 
 
 @transactional_db_with_all_apps()
 @pytest.mark.parametrize("concurrent", [True, False])
-def test_a_type_and_serial_update_checks_the_serial_under_the_locked_new_type(librenms_server, concurrent):
+def test_a_forced_link_checks_member_serials_under_the_locked_new_type(librenms_server, concurrent):
     """
-    The old master rule strips "PREFIX-", so the member "PREFIX-ABC123" keys to "ABC123". The new type
-    moves to a maker with the same rule after the match: the master's new "ABC123" then names the
-    member's hardware, although the stale plain type kept the two apart.
+    The new type moves to a maker whose rule strips "PREFIX-" after the match: the master's "ABC123" then
+    names the hardware of the member "PREFIX-ABC123", although the stale plain type kept the two apart.
     """
     from dcim.models import Device, DeviceType, Manufacturer, VirtualChassis
-    from django.utils.html import escape
 
     from netbox_librenms_plugin.librenms_api import LibreNMSAPI
     from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.serial_identity import RETYPE_HELD
     from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
     from netbox_librenms_plugin.tests.lock_conflict_helpers import commit_row_change, second_connection
     from netbox_librenms_plugin.tests.view_test_helpers import make_request
     from netbox_librenms_plugin.tests.view_test_helpers import post as post_view
     from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
 
-    master = make_device("stale-type-master", serial="BEFORE123", librenms_cf={SERVER_KEY: 9816})
+    master = make_device("stale-type-master", serial="ABC123")
     member = make_device("stale-type-member", serial="PREFIX-ABC123")
     chassis = make_virtual_chassis("stale-type-chassis", master, member)
     VirtualChassis.objects.filter(pk=chassis.pk).update(master=master)
     old_type_id = master.device_type_id
     strip_maker = Manufacturer.objects.create(name="Stale type strip", slug="stale-type-strip")
-    for maker in (master.device_type.manufacturer, strip_maker):
-        NormalizationRule.objects.create(
-            scope="serial", match_pattern=r"^PREFIX-(.+)$", replacement=r"\1", manufacturer=maker
-        )
+    NormalizationRule.objects.create(
+        scope="serial", match_pattern=r"^PREFIX-(.+)$", replacement=r"\1", manufacturer=strip_maker
+    )
     new_type = DeviceType.objects.create(
         manufacturer=Manufacturer.objects.create(name="Stale type plain", slug="stale-type-plain"),
         model="Stale type model",
@@ -524,14 +522,14 @@ def test_a_type_and_serial_update_checks_the_serial_under_the_locked_new_type(li
         part_number="STALE-TYPE-HW",
     )
     librenms_server.device_info_response(
-        device_id=9816, hostname=master.name, serial="ABC123", hardware=new_type.part_number
+        device_id=9816, hostname=master.name, serial="CHASSIS-SERIAL", hardware=new_type.part_number
     )
     librenms_server.vc_inventory_callable(9816, [], {})
     view = DeviceConflictActionView()
     view._librenms_api = LibreNMSAPI(server_key=SERVER_KEY)
     request = make_request(
         "post",
-        {"server_key": SERVER_KEY, "action": "update", "existing_device_id": str(master.pk), "force": "on"},
+        {"server_key": SERVER_KEY, "action": "link", "existing_device_id": str(master.pk), "force": "on"},
         user=make_superuser("stale-type-user"),
         HTTP_HX_REQUEST="true",
     )
@@ -551,12 +549,13 @@ def test_a_type_and_serial_update_checks_the_serial_under_the_locked_new_type(li
     assert changed
     stored = Device.objects.values_list("device_type_id", "serial").get(pk=master.pk)
     if concurrent:
-        conflict = f"Serial conflict: 'ABC123' is already assigned to device '{member.name}' (ID: {member.pk})"
-        assert escape(conflict) in response.content.decode()
-        assert stored == (old_type_id, "BEFORE123")
+        assert RETYPE_HELD in response.content.decode()
+        assert stored == (old_type_id, "ABC123")
+        assert stored_mapping_for_test(Device.objects.get(pk=master.pk)) is None
     else:
-        # Without the concurrent edit the same request commits the type and the serial.
+        # Without the concurrent edit the same request links the master and stores the new type.
         assert stored == (new_type.pk, "ABC123")
+        assert stored_mapping_for_test(Device.objects.get(pk=master.pk)) == {SERVER_KEY: 9816}
 
 
 @transactional_db_with_all_apps()
@@ -942,25 +941,35 @@ def _set_master(chassis, device):
 
 
 @transactional_db_with_all_apps()
-def test_a_serial_write_on_a_member_that_becomes_master_waits_and_uses_its_new_role(librenms_server):
-    """As master, D's own rule keys "XABC" to the held "ABC", so the write refuses; as a member it would not."""
-    from dcim.models import Device, VirtualChassis
+def test_a_direct_serial_write_refuses_a_device_that_joins_a_chassis_during_the_request(librenms_server):
+    from dcim.models import Device
     from django.urls import reverse
 
-    chassis, promoted, rule_type = _promoted_member("promote-serial", 9861)
-    promoted.device_type = rule_type
-    promoted.save()
-    librenms_server.device_info_response(device_id=9861, hostname=promoted.name, serial="XABC")
-    url = reverse("plugins:netbox_librenms_plugin:update_device_serial", kwargs={"pk": promoted.pk})
+    from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
+
+    master = make_device("join-serial-master")
+    device = seed_mapping(make_device("join-serial-member", serial="OLD-D1"), SERVER_KEY, own=9861)
+    chassis = make_virtual_chassis("join-serial-chassis", master)
+    librenms_server.device_info_response(device_id=9861, hostname=device.name, serial="NEW-D1")
+    url = reverse("plugins:netbox_librenms_plugin:update_device_serial", kwargs={"pk": device.pk})
 
     status, sqlstates = _write_during_a_chassis_change(
-        make_superuser("promote-serial-user"), url, {"server_key": SERVER_KEY}, [_set_master(chassis, promoted)]
+        make_superuser("join-serial-user"),
+        url,
+        {"server_key": SERVER_KEY},
+        [
+            (
+                f'UPDATE "{Device._meta.db_table}" SET virtual_chassis_id = %s, vc_position = %s WHERE id = %s',
+                [chassis.pk, 2, device.pk],
+            )
+        ],
     )
 
     assert {"40P01", "55P03"}.isdisjoint(sqlstates), sqlstates
     assert status == 302
-    assert VirtualChassis.objects.get(pk=chassis.pk).master_id == promoted.pk
-    assert Device.objects.get(pk=promoted.pk).serial == "OLD-D1"
+    device.refresh_from_db()
+    assert device.virtual_chassis_id == chassis.pk
+    assert device.serial == "OLD-D1"
 
 
 @transactional_db_with_all_apps()

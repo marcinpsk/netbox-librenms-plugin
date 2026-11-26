@@ -84,7 +84,7 @@ from netbox_librenms_plugin.import_validation_helpers import (
 )
 from netbox_librenms_plugin.ip_addressing import parse_host_address
 from netbox_librenms_plugin.ip_rules import ip_rules_for_request
-from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+from netbox_librenms_plugin.librenms_api import LibreNMSAPI, LibreNMSLookupError
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 from netbox_librenms_plugin.models import RuleConfigurationError
 from netbox_librenms_plugin.platform_versions import (
@@ -115,6 +115,7 @@ from netbox_librenms_plugin.serial_identity import (
     assignment_lock,
     compare,
     device_assignment,
+    direct_serial_sync_refusal,
     display,
     is_identity,
     is_sole_holder,
@@ -158,6 +159,7 @@ from netbox_librenms_plugin.utils import (
     coerce_positive_int,
     exception_text_for,
     resolve_naming_preferences,
+    row_identity_matches,
     same_host,
     save_interface_name_preference,
     save_user_pref,
@@ -600,6 +602,15 @@ def _oob_ip_is_reassignable(candidate, interface) -> bool:
 _SERIAL_MATCH_LOST = "The serial no longer identifies this device alone. Refresh the validation and retry."
 
 
+class _LibreNMSDeviceUnavailable(Exception):
+    """A live device read got no answer about the device: LibreNMS failed, or it answered for another device."""
+
+    def __init__(self, error):
+        super().__init__(error.message)
+        self.message = f"{error.message} Try again."
+        self.response = _htmx_error_response(self.message)
+
+
 def _hold_device_row(device_pk) -> None:
     """Lock the Device row *device_pk* ``FOR NO KEY UPDATE`` until the transaction ends; a deleted row locks nothing."""
     from dcim.models import Device
@@ -913,7 +924,7 @@ class DeviceImportHelperMixin:
     """Mixin providing common validation and rendering helpers for device import views."""
 
     def get_validated_device_with_selections(
-        self, device_id: int, request, *, libre_device: dict | None = None
+        self, device_id: int, request, *, libre_device: dict | None = None, live: bool = False
     ) -> tuple[dict | None, dict | None, ImportRowIntent]:
         """
         Get LibreNMS device, validate it, and apply user selections.
@@ -928,15 +939,31 @@ class DeviceImportHelperMixin:
                 promote/merge can pass the device fetched earlier to skip a redundant
                 ``fetch_device_with_cache`` call. The NetBox-side ``validate_device_for_import``
                 is still re-run so the refreshed row reflects the just-committed state.
+            live: Read the device from LibreNMS, not from the row cache. An action whose decision uses the
+                LibreNMS serial passes True, because the cached serial can name replaced hardware.
 
         Returns:
             tuple: The LibreNMS device, validation, and parsed intent. The first two
                 values are None when the device is not found.
 
+        Raises:
+            _LibreNMSDeviceUnavailable: A live read got no answer about the device; its ``response`` says so.
+
         """
-        # Reuse a caller-supplied device, else use cached device data from the table load
-        # (both eliminate redundant API calls).
-        if libre_device is None:
+        # Reuse a caller-supplied device, else read it live or from the row cache of the table load.
+        if libre_device is None and live:
+            cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
+            # The client refuses a row for another device ID, so a row here describes this one.
+            found, libre_device = self.librenms_api.get_device_info(device_id, use_cache=False)
+            if isinstance(libre_device, LibreNMSLookupError):
+                raise _LibreNMSDeviceUnavailable(libre_device)
+            if found:
+                cache.set(cache_key, libre_device, timeout=self.librenms_api.cache_timeout)
+            else:
+                # LibreNMS confirmed that the device is absent, so the row cache must not reopen the old row.
+                cache.delete(cache_key)
+                libre_device = None
+        elif libre_device is None:
             libre_device = fetch_device_with_cache(device_id, self.librenms_api)
 
         if not libre_device:
@@ -2039,7 +2066,15 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
         if error := _invalid_import_intent_response(request, device_id):
             return error
 
-        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
+        # One cache read decides: a row of this device renders, else the live read tells unavailable from absent.
+        cached = cache.get(get_import_device_cache_key(device_id, self.librenms_api.server_key))
+        cached_row = cached if row_identity_matches(cached, device_id) else None
+        try:
+            libre_device, validation, selections = self.get_validated_device_with_selections(
+                device_id, request, libre_device=cached_row, live=cached_row is None
+            )
+        except _LibreNMSDeviceUnavailable as exc:
+            return HttpResponse(f'<div class="alert alert-warning">{escape(exc.message)}</div>', status=200)
 
         if not libre_device:
             # 200, not 404 — HTMX fragment swapped into the validation-details modal; a 4xx makes
@@ -2123,6 +2158,8 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
                 serial_fit_refusal = assignment_fit_refusal(
                     libre_device.get("serial"), type(existing_device), serial_context
                 )
+                if not serial_synced:
+                    serial_unavailable = direct_serial_sync_refusal(existing_device)
 
         # Platform comparison
         platform_assessment = assess_platform(
@@ -2315,7 +2352,12 @@ class DeviceConflictActionView(
         except (existing_model.DoesNotExist, ValueError):
             return _htmx_error_response("Existing device not found")
 
-        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
+        try:
+            libre_device, validation, selections = self.get_validated_device_with_selections(
+                device_id, request, live=True
+            )
+        except _LibreNMSDeviceUnavailable as exc:
+            return exc.response
         if not libre_device:
             return _htmx_error_response("LibreNMS device not found")
 
@@ -2338,11 +2380,8 @@ class DeviceConflictActionView(
         if validation.get("device_type_mismatch") and force:
             librenms_device_type = validation.get("device_type", {}).get("device_type")
 
-        # coerce_librenms_id centralizes the bool/int/str/positive checks (rejects bools,
-        # non-numeric strings, zero/negatives) in one place.
+        # The live read refused a row that does not carry the requested device ID, so this is that ID.
         librenms_id = coerce_librenms_id(libre_device.get("device_id"))
-        if librenms_id is None:
-            return _htmx_error_response("Invalid or missing LibreNMS device_id in payload")
 
         # The confirmation names one proposed host ID; a LibreNMS payload that no longer reports it
         # would replace the mapping with something the user never saw.
@@ -2359,13 +2398,17 @@ class DeviceConflictActionView(
         if action in {"link", "update", "update_serial"}:
             with atomic_with_events():
                 server_key = self.librenms_api.server_key
-                writes_serial = action != "link" and existing_model is Device
+                reported_serial = libre_device.get("serial")
+                incoming_serial = display(reported_serial)
+                updates_serial = existing_model is Device and (
+                    action == "update_serial" or (action == "update" and bool(incoming_serial))
+                )
                 serial_matched = existing_model is Device and validation.get("existing_match_type") == "serial"
                 serial_rules = SerialRules.load()
                 # A forced DeviceType change decides the identity of the stored serials too.
                 retyped = retype_scope(existing_device) if librenms_device_type and existing_model is Device else None
                 # Each Device action reads who holds the serial, also a link that writes none.
-                lock_serials = [libre_device.get("serial")] if existing_model is Device else []
+                lock_serials = [reported_serial] if existing_model is Device else []
                 # The serial identity locks come before the claim and the row lock.
                 if retyped is not None:
                     retype_lock(retyped, rules=serial_rules, serials=lock_serials)
@@ -2380,6 +2423,8 @@ class DeviceConflictActionView(
                 )
                 if lock_error is not None:
                     return lock_error
+                if updates_serial and (refusal := direct_serial_sync_refusal(existing_device)):
+                    return _htmx_error_response(refusal)
                 if retyped is not None:
                     # The serial decision and the retype check both read the new type's maker under its row lock.
                     librenms_device_type = locked_device_type(librenms_device_type)
@@ -2416,36 +2461,43 @@ class DeviceConflictActionView(
                     return _htmx_error_response(str(exc))
 
                 if action == "link":
-                    # Link to LibreNMS and update name from LibreNMS data
-                    hostname = _get_hostname_for_action(request, validation, libre_device)
-                    existing_device.name = hostname
-                    fields = ["name"]
+                    fields = []
+                    if existing_model is not Device or not existing_device.virtual_chassis_id:
+                        existing_device.name = _get_hostname_for_action(request, validation, libre_device)
+                        fields.append("name")
                     if librenms_device_type:
                         existing_device.device_type = librenms_device_type
                         fields.append("device_type")
                     if err := _retype_refusal(existing_device, librenms_device_type, serial_rules, retyped):
                         return err
-                    incoming_serial = libre_device.get("serial")
                     # Without an incoming serial the link compares nothing, so it reads no serial rule.
-                    if existing_model is Device and display(incoming_serial):
+                    if existing_model is Device and incoming_serial:
                         context = locked_context(existing_device, rules=serial_rules)
                         if context.unavailable:
                             # The link cannot tell who holds the serial, so it refuses as the other serial checks do.
                             unavailable = Resolution(ResolutionKind.UNAVAILABLE, reason=context.unavailable)
                             return _htmx_error_response(
-                                serial_conflict_text(unavailable, display(incoming_serial), request.user)
+                                serial_conflict_text(unavailable, incoming_serial, request.user)
                             )
-                        same_serial = compare(existing_device.serial, incoming_serial, context) is Comparison.SAME
+                        same_serial = compare(existing_device.serial, reported_serial, context) is Comparison.SAME
                         # The serial match selected the target, so a forced type must keep it.
                         if serial_matched and not same_serial:
                             return _htmx_error_response(_SERIAL_MATCH_LOST)
                         # A link writes no serial, but another holder of the incoming serial still refuses it.
                         if same_serial and (
-                            conflict := other_device_holder(existing_device, incoming_serial, rules=serial_rules)
+                            conflict := other_device_holder(existing_device, reported_serial, rules=serial_rules)
                         ):
-                            return _htmx_error_response(
-                                serial_conflict_text(conflict, display(incoming_serial), request.user)
-                            )
+                            return _htmx_error_response(serial_conflict_text(conflict, incoming_serial, request.user))
+                    # The other Devices of a retyped chassis compare under the new type too.
+                    if serial_matched and retyped and retyped.devices:
+                        new_context = serial_rules.for_device_type(librenms_device_type)
+                        if not is_sole_holder(
+                            existing_device,
+                            libre_device.get("serial"),
+                            rules=serial_rules,
+                            contexts_by_pk={pk: new_context for pk, _serial in retyped.devices},
+                        ):
+                            return _htmx_error_response(_SERIAL_MATCH_LOST)
                     if err := _save_device(
                         existing_device, update_fields=fields, request=request, mapping=mapping_change
                     ):
@@ -2455,19 +2507,18 @@ class DeviceConflictActionView(
                 elif action == "update":
                     # Update hostname, serial, and link to LibreNMS
                     hostname = _get_hostname_for_action(request, validation, libre_device)
-                    incoming_serial = display(libre_device.get("serial"))
-                    updates_serial = writes_serial and bool(incoming_serial)
                     fields = ["name"]
                     require_serial = updates_serial and is_identity(
-                        incoming_serial, serial_rules.for_device(existing_device)
+                        reported_serial, serial_rules.for_device(existing_device)
                     )
                     # The new type first: the serial is decided under the manufacturer the row will have.
                     if librenms_device_type:
                         existing_device.device_type = librenms_device_type
                         fields.append("device_type")
                     if updates_serial:
+                        # The LibreNMS value, not its text: the text of a boolean or a list is no serial.
                         err, changed = _apply_conflict_checked_serial(
-                            existing_device, incoming_serial, request.user, serial_rules, require_serial=require_serial
+                            existing_device, reported_serial, request.user, serial_rules, require_serial=require_serial
                         )
                         if err:
                             return err
@@ -2487,15 +2538,14 @@ class DeviceConflictActionView(
 
                 elif action == "update_serial":
                     # Update only the serial and link to LibreNMS
-                    incoming_serial = libre_device.get("serial")
                     fields = []
                     # The new type first: the serial is decided under the manufacturer the row will have.
                     if librenms_device_type:
                         existing_device.device_type = librenms_device_type
                         fields.append("device_type")
-                    if writes_serial:
+                    if updates_serial:
                         err, changed = _apply_conflict_checked_serial(
-                            existing_device, incoming_serial, request.user, serial_rules
+                            existing_device, reported_serial, request.user, serial_rules
                         )
                         if err:
                             return err
@@ -2508,7 +2558,7 @@ class DeviceConflictActionView(
                     ):
                         return err
                     logger.info(
-                        f"Updated serial on device '{existing_device.name}' to {display(incoming_serial)}, "
+                        f"Updated serial on device '{existing_device.name}' to {incoming_serial}, "
                         f"linked to LibreNMS ID {librenms_id}"
                     )
 
@@ -2549,6 +2599,8 @@ class DeviceConflictActionView(
                     )
                 except Device.DoesNotExist:
                     return _htmx_error_response("Device no longer exists; it may have been deleted concurrently.")
+                if refusal := direct_serial_sync_refusal(locked_device):
+                    return _htmx_error_response(refusal)
                 if not display(incoming_serial) or not is_identity(
                     incoming_serial, serial_rules.for_device(locked_device)
                 ):
@@ -2915,23 +2967,8 @@ class CreatePlatformFromImportView(
         if err := _rebind_or_htmx_error(self, request):
             return err
 
-        # Re-resolve the matched NetBox object via current validation. This
-        # tells us which model (Device vs VirtualMachine) to assign to and
-        # protects against a stale/spoofed hidden device_pk: we only mutate an
-        # existing object when current validation unambiguously resolves it
-        # (and the supplied device_pk, if any, agrees with that resolution).
-        try:
-            validated_device, validation, _ = self.get_validated_device_with_selections(device_id, request)
-        except Exception:
-            logger.exception(
-                "CreatePlatformFromImportView: failed to resolve assignment target for device_id=%s",
-                device_id,
-            )
-            return _htmx_error_response("Unable to confirm the target object for platform assignment.")
-        if validated_device is None:
-            return _htmx_error_response("Device not found in LibreNMS.")
-        target_model, target_pk = self._assignment_target(request, validation)
-        if error := self._require_create_permissions(request, target_model):
+        # The platform and manufacturer permissions come before the live device read.
+        if error := self._require_create_permissions(request, None):
             return error
         platform_name = (request.POST.get("platform_name") or "").strip()
         if not platform_name:
@@ -2940,17 +2977,24 @@ class CreatePlatformFromImportView(
         if error:
             return error
 
-        # LibreNMS facts are read live after the local checks, as in Create & Sync: the import row is a cache.
+        # The target, the facts and the serial come from one live read: the import row is a cache. Current
+        # validation resolves the target model and protects against a stale or spoofed hidden device_pk.
         cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
-        found, live_device = self.librenms_api.get_device_info(device_id, use_cache=False)
-        if not found:
-            if live_device is None:
-                cache.delete(cache_key)
-            return _htmx_error_response(
-                "Device not found in LibreNMS."
-                if live_device is None
-                else "Failed to retrieve device info from LibreNMS."
+        try:
+            live_device, validation, _ = self.get_validated_device_with_selections(device_id, request, live=True)
+        except _LibreNMSDeviceUnavailable as exc:
+            return exc.response
+        except Exception:
+            logger.exception(
+                "CreatePlatformFromImportView: failed to resolve assignment target for device_id=%s",
+                device_id,
             )
+            return _htmx_error_response("Unable to confirm the target object for platform assignment.")
+        if live_device is None:
+            return _htmx_error_response("Device not found in LibreNMS.")
+        target_model, target_pk = self._assignment_target(request, validation)
+        if error := self._require_create_permissions(request, target_model):
+            return error
         facts = PlatformFacts.from_librenms(live_device.get("os"), live_device.get("version"))
 
         tracking = platform_version_tracking_enabled()
@@ -3100,7 +3144,12 @@ class AddAsOOBView(
         except (Device.DoesNotExist, ValueError):
             return _htmx_error_response("Existing device not found")
 
-        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
+        try:
+            libre_device, validation, selections = self.get_validated_device_with_selections(
+                device_id, request, live=True
+            )
+        except _LibreNMSDeviceUnavailable as exc:
+            return exc.response
         if not libre_device:
             return _htmx_error_response("LibreNMS device not found")
 
@@ -3777,7 +3826,12 @@ class PromoteToHostView(
             except (Platform.DoesNotExist, ValueError, TypeError):
                 return _htmx_error_response("Invalid override_platform_id")
 
-        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
+        try:
+            libre_device, validation, selections = self.get_validated_device_with_selections(
+                device_id, request, live=True
+            )
+        except _LibreNMSDeviceUnavailable as exc:
+            return exc.response
         if not libre_device:
             return _htmx_error_response("LibreNMS device not found")
 
@@ -3971,7 +4025,12 @@ class MergeNetBoxDevicesView(
         except (TypeError, ValueError):
             return _htmx_error_response("Invalid winner_pk")
 
-        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
+        try:
+            libre_device, validation, selections = self.get_validated_device_with_selections(
+                device_id, request, live=True
+            )
+        except _LibreNMSDeviceUnavailable as exc:
+            return exc.response
         if not libre_device:
             return _htmx_error_response("LibreNMS device not found")
 

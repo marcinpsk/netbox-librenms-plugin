@@ -112,6 +112,7 @@ from netbox_librenms_plugin.views.base.modules_view import (
     _normalize_librenms_text,
     _unlinked_optic_refusal,
     built_in_candidate,
+    nameable_modules,
     reusable_built_in_rule,
     all_trees_in_scope,
     movable_modules,
@@ -2868,11 +2869,13 @@ class ModuleMismatchPreviewView(
         except (TypeError, ValueError):
             return HttpResponse("Missing or invalid module_id/ent_index.", status=400)
 
+        # The modal names the installed module's bay, so the bay must be in view scope too.
         installed_module = self.restrict_object_or_404(
             Module,
             select_related=("module_type", "module_bay", "device"),
             pk=module_id,
             device=target_device,
+            pk__in=nameable_modules(self).values("pk"),
         )
 
         # The preview signs the replace and serial actions, so it needs the table's own grant for this row.
@@ -2930,8 +2933,9 @@ class ModuleMismatchPreviewView(
             incoming, serial_context, rules=serial_rules, exclude_pk=installed_module.pk
         )
         if elsewhere.kind is ResolutionKind.UNIQUE:
+            # The modal names the Device and the bay of the holder.
             serial_conflict = (
-                viewable_modules(self)
+                nameable_modules(self)
                 .filter(pk=elsewhere.object.pk)
                 .select_related("module_type", "module_bay", "device")
                 .first()
@@ -3224,7 +3228,10 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 # Read bay/type from locked row to avoid stale snapshot
                 target_bay = installed_module.module_bay
                 old_type_name = installed_module.module_type.model
-                old_bay_name = target_bay.name
+                # The change and delete scopes do not include view scope, so name the bay only when the viewer may see it.
+                old_bay_name = (
+                    target_bay.name if nameable_modules(self).filter(pk=installed_module.pk).exists() else None
+                )
                 serial_context = locked_type_context(target_device, rules=serial_rules)
                 serial = stored_form(incoming, Module)
                 new_module = Module(
@@ -3286,11 +3293,14 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 # Remove the serial-conflicting module from its current location.
                 if conflict_module:
                     c_model = conflict_module.module_type.model
-                    c_bay = conflict_module.module_bay.name
                     conflict_device = conflict_module.device
-                    c_device = conflict_device.name
+                    # The delete scope does not include view scope, so name the place only when the viewer may see it.
+                    if nameable_modules(self).filter(pk=conflict_module.pk).exists():
+                        c_place = f"{conflict_device.name}/{conflict_module.module_bay.name}"
+                        conflict_removed_msg = f"Removed {c_model} from {c_place}."
+                    else:
+                        conflict_removed_msg = f"Removed {c_model} from its other location."
                     conflict_module.delete()
-                    conflict_removed_msg = f"Removed {c_model} from {c_device}/{c_bay}."
 
                 # Delete the currently installed module in the target bay
                 installed_module.delete()
@@ -3328,7 +3338,8 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 messages.info(request, conflict_removed_msg)
             messages.success(
                 request,
-                f"Replaced {old_type_name} with {matched_type.model} in {old_bay_name}"
+                f"Replaced {old_type_name} with {matched_type.model}"
+                + (f" in {old_bay_name}" if old_bay_name is not None else "")
                 + (f" (serial: {serial})" if serial else "")
                 + ".",
             )
@@ -3503,7 +3514,9 @@ class MoveModuleView(
                 occupant_removed_msg = f"Removed {occupant.module_type.model} from {target_bay.name}."
                 occupant.delete()
             _refuse_identity_move(module, target_device, moving, serial_rules, scope)
-            from_device, from_bay = module.device.name, module.module_bay.name
+            from_device = module.device.name
+            # The change scope does not include view scope, so name the source bay only when the viewer may see it.
+            from_bay = module.module_bay.name if nameable_modules(self).filter(pk=module.pk).exists() else None
             module.module_bay = target_bay
             module.device = target_device
 
@@ -3558,7 +3571,9 @@ class MoveModuleView(
             moved_msg = f"Moved {conflict_module.module_type.model}"
             if from_device != target_device.name:
                 moved_msg += f" from {from_device}"
-            moved_msg += f"/{from_bay} to {target_bay.name}."
+            if from_bay is not None:
+                moved_msg += f"/{from_bay}"
+            moved_msg += f" to {target_bay.name}."
             messages.success(request, moved_msg)
             if server_key:
                 _schedule_module_cache_mutation(request, page_device, server_key)

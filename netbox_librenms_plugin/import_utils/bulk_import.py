@@ -34,6 +34,7 @@ from ..serial_identity import (
     compare,
     display,
     fingerprint,
+    is_serial_value,
     is_sole_holder,
     resolve_device,
     resolve_devices,
@@ -505,12 +506,8 @@ def bulk_import_devices_shared(  # noqa: C901
                 # Import decisions (DeviceType match, serial-conflict, hostname) must run against
                 # live LibreNMS data: bypass the short device-info read cache so a value the user
                 # just corrected in LibreNMS isn't read back stale within the cache window.
+                # The client refuses a row for another device ID, so a row here describes this one.
                 success, libre_device = api.get_device_info(device_id, use_cache=False)
-                # Same fail-closed identity rule as the collision pre-check (row_identity_matches):
-                # a payload that isn't a dict carrying the requested device_id must be neither
-                # imported nor written into the shared cache — treat it as a failed retrieval.
-                if success and not row_identity_matches(libre_device, device_id):
-                    success, libre_device = False, None
                 # Backfill the shared cache so the synchronous import's post-import row re-render
                 # (which reads the same dict via fetch_device_with_cache) doesn't issue a second
                 # LibreNMS round-trip per device on a cold cache. The background path passes a
@@ -1545,7 +1542,10 @@ def process_device_filters(  # noqa: C901
 
     @functools.cache
     def serial_discoveries():
-        return resolve_devices((display(row.get("serial")) for row in libre_devices), rules=serial_rules)
+        return resolve_devices(
+            (display(row.get("serial")) for row in libre_devices if is_serial_value(row.get("serial"))),
+            rules=serial_rules,
+        )
 
     # Always pass api so validate_device_for_import can run hardware/chassis lookups.
     # vc_detection_enabled only gates VC-specific paths inside that function.

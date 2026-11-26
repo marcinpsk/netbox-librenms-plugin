@@ -175,6 +175,21 @@ class TestModuleMismatchPreviewView:
         reason = "The LibreNMS serial has 51 characters; the field holds at most 50."
         assert (escape(reason) in html) is (not fits)
 
+    def test_the_preview_of_a_type_mismatch_shows_a_serial_with_an_unpaired_surrogate(self):
+        """UTF-8 cannot encode an unpaired surrogate from a JSON escape, so the dialog shows a replacement character."""
+        reported_type = make_module_type("SURROGATE-REPORTED-TYPE")
+        device, _installed, request, view, inventory = self._setup(
+            "surrogate", librenms_model=reported_type.model, serial="ABC\ud800DEF"
+        )
+        cache_key = _cache_preview(view, device, inventory, request)
+        try:
+            response = view_get(view, request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        assert response.status_code == 200
+        assert "ABC\ufffdDEF" in response.content.decode()
+
     def test_the_recognised_type_icon_is_named(self):
         device, installed, request, view, inventory = self._setup("named-icon")
         cache_key = _cache_preview(view, device, inventory, request)
@@ -311,6 +326,49 @@ class TestModuleMismatchPreviewView:
         html = response.content.decode()
         assert str(conflict.device) in html
         assert "CONFLICT-SERIAL" in html
+
+    def test_a_conflict_on_a_device_the_viewer_cannot_see_is_not_named(self):
+        """A viewer of the Module who cannot view its Device gets the hidden-conflict text, not the Device and bay."""
+        from dcim.models import Device, Module, ModuleBay, ModuleType
+
+        from netbox_librenms_plugin.tests.view_test_helpers import grant
+        from netbox_librenms_plugin.views.sync.modules import ModuleMismatchPreviewView
+
+        device, installed, _request, _view_unused, inventory = self._setup("hidden-device", serial="HIDDEN-SERIAL")
+        other_device = make_device("preview-hidden-device-owner")
+        _module(
+            other_device,
+            make_module_bay(other_device, "Hidden Owner Bay"),
+            make_module_type("HIDDEN-T"),
+            "HIDDEN-SERIAL",
+        )
+        user = make_user_with_perms(
+            "preview-hidden-device",
+            [
+                ("view", Module),
+                ("add", Module),
+                ("change", Module),
+                ("delete", Module),
+                ("view", ModuleBay),
+                ("view", ModuleType),
+            ],
+        )
+        user = grant(user, "view", Device, constraints={"name": device.name})
+        request = make_request(
+            "get", {"module_id": str(installed.pk), "ent_index": "100", "server_key": "default"}, user=user
+        )
+        view = _view(ModuleMismatchPreviewView, request)
+        cache_key = _cache_preview(view, device, inventory, request)
+        try:
+            response = view_get(view, request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        html = response.content.decode()
+        assert response.status_code == 200
+        assert other_device.name not in html
+        assert "Hidden Owner Bay" not in html
+        assert 'name="conflict_module_id"' not in html
 
 
 class TestReplaceModuleView:
@@ -527,7 +585,7 @@ class TestReplaceModuleView:
         assert sibling.serial == held
 
     def test_interface_scope_is_checked_before_the_old_module_is_deleted(self):
-        from dcim.models import Device, Interface, InterfaceTemplate, Module, ModuleType
+        from dcim.models import Device, Interface, InterfaceTemplate, Module, ModuleBay, ModuleType
 
         from netbox_librenms_plugin.tests.view_test_helpers import grant
 
@@ -542,6 +600,7 @@ class TestReplaceModuleView:
             "replace-adoption-scope",
             [
                 ("view", Device),
+                ("view", ModuleBay),
                 ("view", ModuleType),
                 ("view", Module),
                 ("add", Module),

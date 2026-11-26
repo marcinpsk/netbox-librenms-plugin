@@ -787,6 +787,73 @@ def test_placeholder_stack_detection_and_creation_preserve_distinct_members(sett
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("malformed", [True, ["SECOND-CARD"]], ids=["boolean", "list"])
+def test_a_malformed_member_serial_is_never_the_stack_master(malformed):
+    """The device stores the text "True"; a member that reports JSON `true` has that text but no identity."""
+    from netbox_librenms_plugin.import_utils.virtual_chassis import identify_vc_master
+    from netbox_librenms_plugin.serial_identity import SerialRules
+
+    members = [{"serial": malformed, "position": 1}, {"serial": "SECOND-CARD", "position": 2}]
+
+    assert identify_vc_master(members, str(malformed), SerialRules.load().context(None)) is None
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("text_holder", [False, True], ids=["no-holder", "holder-of-the-text"])
+def test_a_malformed_member_serial_refuses_the_stack_whatever_device_stores_its_text(text_holder):
+    """A member that reports JSON `true` has no serial to store, also when a device stores the text "True"."""
+    from dcim.models import Device, VirtualChassis
+    from django.core.exceptions import ValidationError
+
+    from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+
+    _name_pattern()
+    master = make_device("malformed-member-master", serial="MALFORMED-MEMBER-MASTER")
+    if text_holder:
+        make_device("malformed-member-text-holder", serial="True")
+    members = [{"serial": master.serial, "position": 1}, {"serial": True, "position": 2}]
+    prepared, master_member = prepared_stack(master, members)
+
+    with pytest.raises(ValidationError):
+        create_virtual_chassis_with_members(master, prepared, {"device_id": 8020}, master_member=master_member)
+
+    assert not VirtualChassis.objects.exists()
+    assert Device.objects.get(pk=master.pk).virtual_chassis_id is None
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("held", [True, False], ids=["held", "created"])
+def test_only_a_member_that_the_create_writes_refuses_a_serial_that_does_not_fit(held):
+    """The "S/N " rule keys the 51-character serial to a 47-character one; a held member is skipped, not written."""
+    from dcim.models import Device, VirtualChassis
+    from django.core.exceptions import ValidationError
+
+    from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+
+    _seeded_serial_rule()
+    _name_pattern()
+    master = make_device("long-member-master", serial="LONG-MEMBER-MASTER")
+    if held:
+        holder = make_device("long-member-holder", serial="N" * 47)
+    members = [
+        {"serial": master.serial, "position": 1},
+        {"serial": f"S/N {'N' * 47}", "position": 2},
+        {"serial": "LONG-MEMBER-THIRD", "position": 3},
+    ]
+    prepared, master_member = prepared_stack(master, members)
+
+    if not held:
+        with pytest.raises(ValidationError):
+            create_virtual_chassis_with_members(master, prepared, {"device_id": 8021}, master_member=master_member)
+        assert not VirtualChassis.objects.exists()
+        return
+    vc = create_virtual_chassis_with_members(master, prepared, {"device_id": 8021}, master_member=master_member)
+
+    assert sorted(vc.members.values_list("serial", flat=True)) == ["LONG-MEMBER-MASTER", "LONG-MEMBER-THIRD"]
+    assert Device.objects.get(pk=holder.pk).virtual_chassis_id is None
+
+
+@pytest.mark.django_db
 def test_a_serial_shorter_than_three_letters_or_digits_is_no_stack_identity(settings, librenms_server):
     """A one-digit member serial names no master, so the stack imports as one device; the members keep their text."""
     from netbox_librenms_plugin.import_utils.bulk_import import stack_key

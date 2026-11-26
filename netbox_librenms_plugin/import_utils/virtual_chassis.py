@@ -29,7 +29,9 @@ from ..serial_identity import (
     compare,
     display,
     group,
+    lookup_refusal,
     naming_token,
+    page_text,
     plain_context,
     resolve_devices_write,
     stored_form,
@@ -888,8 +890,7 @@ def unnamed_members(members_info, pattern, context) -> list[tuple]:
 
 def unnamed_member_reason(serial, pattern) -> str:
     """Return why *pattern* gives a stack member with *serial* no name."""
-    reported = display(serial)
-    reason = f"its serial '{reported}' has no identity" if reported else "it reports no serial"
+    reason = f"its serial '{page_text(serial)}' has no identity" if display(serial) else "it reports no serial"
     return f"{reason}, so the member name pattern '{pattern}' gives it no name."
 
 
@@ -1177,12 +1178,15 @@ def _create_member_devices(
     """Create a device for each non-master member at its stack position; return how many were created."""
     member_rack = master_device.rack
     member_location = master_device.location or (member_rack.location if member_rack and member_rack.location else None)
-    # Text keys: the JSON numbers 123 and 123.0 are one dict key, but two serials.
     members = [
-        (member, position, display(member.get("serial")))
+        (member, position)
         for member, position in zip(members_info, positions, strict=True)
         if member is not master_member
     ]
+    if unreadable := unreadable_member_serials(members):
+        raise ValidationError({"serial": unreadable[0][2]})
+    # Text keys: the JSON numbers 123 and 123.0 are one dict key, but two serials.
+    members = [(member, position, display(member.get("serial"))) for member, position in members]
     # One lookup for the whole stack, after the serial identity locks. A holder's own rules can admit a serial
     # that the master's rules blank. The master holds its own entry's serial, apart from every other member.
     taken = resolve_devices_write(
@@ -1209,6 +1213,19 @@ def _create_member_devices(
         )
         created += 1
     return created
+
+
+def unreadable_member_serials(members) -> list:
+    """
+    Return ``(member, position, refusal)`` for each ``(member, position)`` whose serial no lookup can read.
+
+    One such serial refuses the whole stack before its lookup, also for a member that an existing Device holds.
+    A serial that is only too long refuses only a member that ``members_to_create`` yields. The chassis create
+    and import validation both apply this rule.
+    """
+    return [
+        (member, position, refusal) for member, position in members if (refusal := lookup_refusal(member.get("serial")))
+    ]
 
 
 def members_to_create(members, taken, context, name_of):
@@ -1238,7 +1255,7 @@ def members_to_create(members, taken, context, name_of):
 def member_serial_unavailable_message(serial) -> str:
     """Return why the member writer refuses a member serial whose lookup is Unavailable; validation reports it too."""
     # The constant, not the lookup's reason: a Device lookup is Unavailable only for a broken master link.
-    return f"Cannot check VC member serial '{display(serial)}': {UNAVAILABLE_MASTER_LINK}"
+    return f"Cannot check VC member serial '{page_text(serial)}': {UNAVAILABLE_MASTER_LINK}"
 
 
 def _member_serial_taken(serial, resolution, created_members) -> bool:

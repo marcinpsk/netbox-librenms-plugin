@@ -1,4 +1,5 @@
 {# Confirmation modal content for bulk imports #}
+{% load librenms_serial %}
 <div class="modal-header">
   <h5 class="modal-title">
     <i class="mdi mdi-download"></i> Confirm Import
@@ -109,9 +110,11 @@
                         {% endif %}
                         </code>
                       </div>
-                      {% if member.serial %}
-                        <span class="text-muted">SN {{ member.serial }}</span>
+                      {% with member_serial=member.serial|page_text %}
+                      {% if member_serial %}
+                        <span class="text-muted">SN {{ member_serial }}</span>
                       {% endif %}
+                      {% endwith %}
                     </li>
                   {% endfor %}
                 </ul>

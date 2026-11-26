@@ -35,8 +35,10 @@ from ..serial_identity import (
     compare,
     display,
     is_identity,
+    is_serial_value,
     keeps_stored_serial,
     other_device_holder,
+    page_text,
     resolve_device,
     resolve_device_write,
     resolve_devices_write,
@@ -57,6 +59,7 @@ from ..platform_versions import (
 )
 from ..utils import (
     cached_row_matches,
+    row_identity_matches,
     exception_text_for,
     find_matching_location,
     find_matching_site,
@@ -83,6 +86,7 @@ from .virtual_chassis import (
     unnamed_member_reason,
     unnamed_members,
     unnumbered_virtual_chassis,
+    unreadable_member_serials,
 )
 from netbox_librenms_plugin.server_mappings import (
     IDENTITY_BUSY_MESSAGE,
@@ -410,6 +414,9 @@ def _determine_device_name(
 
 def _write_conflict(existing_device, incoming_serial, serial_rules) -> Resolution | None:
     """Return the refusing Resolution of the Devices that a serial write of *incoming_serial* on *existing_device* would duplicate."""
+    # A chassis member gets a link only, and a link writes no serial.
+    if existing_device.virtual_chassis_id is not None:
+        return None
     other = resolve_device_write(
         incoming_serial, serial_rules.for_device(existing_device), rules=serial_rules, exclude_pks=[existing_device.pk]
     )
@@ -468,7 +475,7 @@ def check_legacy_id_serial(result, device, incoming_serial, serial_rules) -> Non
 def serial_unavailable_issue(incoming_serial) -> str:
     """Return the blocker of a row whose serial lookup is Unavailable; validation and the refresh both add it."""
     # The constant, not the lookup's reason: the issue text must carry nothing that an unscoped lookup returned.
-    return f"{SERIAL_UNAVAILABLE_ISSUE_START}{display(incoming_serial)}{SERIAL_UNAVAILABLE_ISSUE_END}"
+    return f"{SERIAL_UNAVAILABLE_ISSUE_START}{page_text(incoming_serial)}{SERIAL_UNAVAILABLE_ISSUE_END}"
 
 
 def is_serial_unavailable_issue(issue) -> bool:
@@ -485,7 +492,7 @@ def _serial_taken_message(device_id, incoming_serial, taken) -> str:
     if taken.kind is ResolutionKind.UNAVAILABLE:
         return f"Cannot import device {device_id}: its serial cannot be matched. {taken.reason}"
     return (
-        f"Cannot import device {device_id}: a NetBox device already has serial '{display(incoming_serial)}'. "
+        f"Cannot import device {device_id}: a NetBox device already has serial '{page_text(incoming_serial)}'. "
         "Refresh the import list."
     )
 
@@ -676,7 +683,7 @@ def _detect_serial_match_role(existing_by_serial, existing_link, hostname, seria
             serial_action_value = "link"
         else:
             block_warnings.append(
-                f"A device with serial {serial} already exists in NetBox but its hostname differs "
+                f"A device with serial {page_text(serial)} already exists in NetBox but its hostname differs "
                 f"(LibreNMS: '{hostname}'). Device may have been reinstalled."
             )
             serial_action_value = "hostname_differs"
@@ -692,11 +699,11 @@ def _detect_serial_match_role(existing_by_serial, existing_link, hostname, seria
 
 def _stack_member_label(position, serial) -> str:
     """Return how a stack member issue names a member: its position, or its serial in a stack without numbers."""
-    return f"Stack member {position}" if position is not None else f"Stack member with serial '{display(serial)}'"
+    return f"Stack member {position}" if position is not None else f"Stack member with serial '{page_text(serial)}'"
 
 
 def _stack_member_serial_refusals(result, incoming_serial, serial_rules) -> list:
-    """Return an issue for each stack member that the import creates with a serial that does not fit the field."""
+    """Return an issue for each stack member serial that the chassis create of a new device refuses."""
     vc = result.get("virtual_chassis") or {}
     if not vc.get("is_stack"):
         return []
@@ -715,8 +722,14 @@ def _stack_member_serial_refusals(result, incoming_serial, serial_rules) -> list
         for member in vc["members"]
         if id(member) in unnamed_ids
     ]
-    members = [(member, member.get("position"), display(member.get("serial"))) for member in vc["members"]]
-    members = [entry for entry in members if entry[0] is not master]
+    members = [(member, member.get("position")) for member in vc["members"] if member is not master]
+    # The text comes from the LibreNMS members only: the lookup is unrestricted, so it selects and names nothing.
+    if unreadable := unreadable_member_serials(members):
+        return unnamed + [
+            f"{_stack_member_label(position, member.get('serial'))}: {refusal}"
+            for member, position, refusal in unreadable
+        ]
+    members = [(member, position, display(member.get("serial"))) for member, position in members]
     taken = resolve_devices_write([serial for _member, _position, serial in members], context, rules=serial_rules)
     # The member writer refuses the whole stack for an Unavailable member, so validation blocks it too.
     unavailable = [
@@ -732,7 +745,6 @@ def _stack_member_serial_refusals(result, incoming_serial, serial_rules) -> list
             members, taken, context, lambda member, _position, _serial: member.get("suggested_name")
         )
     }
-    # The text comes from the LibreNMS members only: the lookup is unrestricted, so it selects and names nothing.
     return unnamed + [
         f"{_stack_member_label(position, serial)}: {refusal}"
         for member, position, serial in members
@@ -1139,7 +1151,7 @@ def validate_device_for_import(  # noqa: C901
                         result["serial_action"] = "update_serial"
                         result["warnings"].append(
                             f"Serial number differs from the NetBox record "
-                            f"(LibreNMS: '{display(incoming_serial)}'). Hardware may have been replaced."
+                            f"(LibreNMS: '{page_text(incoming_serial)}'). Hardware may have been replaced."
                         )
 
         # Only check hostname/serial/IP if not already matched by librenms_id.
@@ -1235,7 +1247,7 @@ def validate_device_for_import(  # noqa: C901
                         result["serial_action"] = "update_serial"
                         result["warnings"].append(
                             f"Hostname matches but the serial differs from the NetBox record "
-                            f"(LibreNMS: '{display(incoming_serial)}'). Hardware may have been replaced."
+                            f"(LibreNMS: '{page_text(incoming_serial)}'). Hardware may have been replaced."
                         )
                 elif not same_serial_held:
                     link_note = _describe_link_note(result["existing_librenms_link"])
@@ -1253,7 +1265,8 @@ def validate_device_for_import(  # noqa: C901
                     # random device. Require a unique match before binding, mirroring the
                     # merge-peer [:2] guard (issue #101). The owner counts equivalent rows under
                     # the serial rules, also rows that the user cannot see.
-                    if serial and serial_discoveries is not None:
+                    # The batch keys text, and the text of a boolean or a list can equal a stored serial.
+                    if serial and is_serial_value(incoming_serial) and serial_discoveries is not None:
                         discovery = serial_discoveries()[serial]
                     else:
                         discovery = resolve_device(incoming_serial, rules=serial_rules)
@@ -1273,7 +1286,7 @@ def validate_device_for_import(  # noqa: C901
                         # against, so the sync-serial UI (which needs one existing_device) can't apply.
                         result["serial_duplicate"] = True
                         result["issues"].append(
-                            f"Multiple NetBox devices share serial '{serial}'; resolve the duplicate "
+                            f"Multiple NetBox devices share serial '{page_text(serial)}'; resolve the duplicate "
                             "serial before importing."
                         )
                         existing_by_serial = None
@@ -1296,7 +1309,7 @@ def validate_device_for_import(  # noqa: C901
                         ):
                             result["serial_duplicate"] = True
                             result["issues"].append(
-                                f"Another NetBox device holds serial '{serial}' under the serial rules of the "
+                                f"Another NetBox device holds serial '{page_text(serial)}' under the serial rules of the "
                                 "matched device; resolve the duplicate serial before importing."
                             )
                             existing_by_serial = None
@@ -2124,7 +2137,8 @@ def import_single_device(  # noqa: C901
         with atomic_with_events():
             # The serial identity locks come first; then the lookup sees a concurrent import's committed device.
             serial_rules = serial_rules or SerialRules.load()
-            incoming_serial = display(libre_device.get("serial"))
+            # The LibreNMS value, not its text: the text of a boolean or a list is no serial.
+            incoming_serial = stored_form(libre_device.get("serial"), Device)
             assignment_lock([incoming_serial], model=Device, rules=serial_rules)
             # The insert writes the type row's device count anyway; lock it now, so the context is its manufacturer.
             device_type = DeviceType.objects.select_for_update(no_key=True).get(pk=device_type.pk)
@@ -2189,9 +2203,8 @@ def import_single_device(  # noqa: C901
                 device_data["platform"] = platform_plan.platform
 
             # Persist the trimmed LibreNMS text; serial_identity keys it when it compares.
-            serial = stored_form(incoming_serial, Device)
-            if serial:
-                device_data["serial"] = serial
+            if incoming_serial:
+                device_data["serial"] = incoming_serial
 
             location_name = libre_device.get("location", "")
             parsed_location = parse_location_for_import(location_name)
@@ -2228,6 +2241,7 @@ def import_single_device(  # noqa: C901
             # Create the device with its mapping: the claim and the owner check come before the insert.
             device = Device(**device_data)
             persist_mapping(device, assign_own(device, api.server_key, device_id), write=_validate_and_insert)
+            warnings = import_platform_warnings(f"device {device_id}", platform_plan, text_viewer)
 
         # Sync additional data based on options
         sync_options = sync_options or {}
@@ -2254,7 +2268,7 @@ def import_single_device(  # noqa: C901
             "message": f"Successfully imported device: {device.name}",
             "error": None,
             "synced": synced,
-            "warnings": import_platform_warnings(f"device {device_id}", platform_plan, text_viewer),
+            "warnings": warnings,
         }
 
     except Exception as e:
@@ -2346,7 +2360,8 @@ def fetch_device_with_cache(
     cache_key = get_import_device_cache_key(device_id, server_key or api.server_key)
     libre_device = cache.get(cache_key)
 
-    if not libre_device:
+    # The live read checks the device ID of its row, so a cached row of another device counts as a miss.
+    if not row_identity_matches(libre_device, device_id):
         # Fallback to API fetch. Read LIVE: both this function's caches (the pre-fetched dict and the
         # import Django cache) have already missed, so the fallback must reflect current LibreNMS
         # state — not the separate 60s get_device_info snapshot a sync-tab render may have populated —

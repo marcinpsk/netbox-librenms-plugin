@@ -41,6 +41,7 @@ from netbox_librenms_plugin.serial_identity import (
     compare,
     display,
     is_identity,
+    is_serial_value,
     module_move_serials_admitted,
     plain_context,
     module_subtrees,
@@ -287,6 +288,20 @@ def _own_ignore_action(item, index_map, ignore_contexts, default_rules, default_
         return None
     parent = index_map.get(item.get("entPhysicalContainedIn")) if index_map else None
     return _check_ignore_rules(item, parent, rules, index_map, identity)
+
+
+def _inventory_serial_well_formed(item: dict) -> bool:
+    """Return whether an inventory item's serial is absent, text, or a JSON number."""
+    return is_serial_value(item.get("entPhysicalSerialNum"))
+
+
+def nameable_modules(view):
+    """Return the Modules that *view* may name to its user: the Module, its Device and its bay are in view scope."""
+    from dcim.models import Device, Module, ModuleBay
+
+    return view.restricted_queryset(Module).filter(
+        device__in=view.restricted_queryset(Device), module_bay__in=view.restricted_queryset(ModuleBay)
+    )
 
 
 def _inventory_item_offsettable(item: dict) -> bool:
@@ -1018,6 +1033,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 False,
                 "inventory payload has a negative or non-integer entPhysicalIndex or entPhysicalContainedIn",
             )
+        # A module writer locks and resolves the raw serial, so a list or an object must not reach the snapshot.
+        if success and not all(_inventory_serial_well_formed(item) for item in inventory_data):
+            success, inventory_data = (
+                False,
+                "inventory payload has an entPhysicalSerialNum that is not text or a number",
+            )
 
         # Treat transport errors, invalid containers, and invalid index types as fetch failures.
         if not success:
@@ -1118,7 +1139,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             # get_device_inventory guarantees a list of dicts on success, but not the TYPE of
             # entPhysicalIndex/entPhysicalContainedIn: a numeric string would crash the offset
             # loop below (TypeError on "5" + offset), so fail closed to a host-only snapshot.
-            if oob_success and all(_inventory_item_offsettable(item) for item in oob_inventory):
+            if oob_success and all(
+                _inventory_item_offsettable(item) and _inventory_serial_well_formed(item) for item in oob_inventory
+            ):
                 main_max_idx = max(
                     (idx for item in inventory_data if (idx := item.get("entPhysicalIndex")) is not None),
                     default=0,
@@ -2417,6 +2440,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # is already settled here (see its Returns contract).
         if not transceivers:
             return inventory_data, None
+        # The merge copies this serial into a row, so it must have the shape that the inventory check requires.
+        if not all(is_serial_value(txr.get("serial")) for txr in transceivers):
+            return inventory_data, "transceiver payload has a serial that is not text or a number"
 
         # LibreNMS may return SNMP entity indices as ints on one endpoint and numeric strings on
         # another (e.g. ENTITY-MIB "300" vs the transceiver API's 300). Coerce both sides to int
@@ -4857,8 +4883,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         visible_conflict_pks = set()
         scoped = matched_pks and getattr(self, "request", None) is not None
         if scoped:
-            # A module is named only when the user may view it and its device.
-            visible_conflict_pks = set(viewable_modules(self).filter(pk__in=matched_pks).values_list("pk", flat=True))
+            visible_conflict_pks = set(nameable_modules(self).filter(pk__in=matched_pks).values_list("pk", flat=True))
         bay_ids = {row["module_bay_id"] for row in rows if row.get("module_bay_id")}
         bay_owners = dict(ModuleBay.objects.filter(pk__in=bay_ids).values_list("pk", "module_id")) if bay_ids else {}
         pending_installs = defaultdict(list)

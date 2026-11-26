@@ -762,6 +762,32 @@ class TestValidateDeviceForImport:
         assert result["cluster"]["found"] is True
         assert result["is_ready"] is False
 
+    @pytest.mark.parametrize(
+        "serial", [True, "S" * 51, "ABC\ud800DEF", "ABC\x00DEF"], ids=["boolean", "too-long", "surrogate", "nul"]
+    )
+    def test_a_serial_that_the_create_refuses_keeps_a_new_device_from_being_ready(self, serial):
+        """The create refuses a serial that is not text or a number, that the database cannot hold, or too long."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.import_validation_helpers import apply_role_to_validation
+        from netbox_librenms_plugin.serial_identity import stored_form_refusal
+
+        infrastructure = make_device("refused-serial-infrastructure")
+        payload = _device_payload(
+            5406,
+            hostname="refused-serial-device",
+            sysName="refused-serial-device",
+            location=infrastructure.site.name,
+            hardware=infrastructure.device_type.model,
+            serial=serial,
+        )
+
+        result = self._validate(payload)
+        apply_role_to_validation(result, infrastructure.role)
+
+        assert (result["can_import"], result["is_ready"]) == (False, False)
+        assert stored_form_refusal(serial, Device) in result["issues"]
+
     def test_new_vm_skips_device_fields_and_requires_valid_placement(self):
         cluster = make_cluster("Validation available cluster")
 
@@ -1547,6 +1573,85 @@ class TestValidationWithRealLibreNMS:
         assert result["virtual_chassis"]["is_stack"] is True
         assert result["virtual_chassis"]["member_count"] == 2
         assert [member["position"] for member in result["virtual_chassis"]["members"]] == [1, 2]
+
+    def test_a_member_serial_that_the_chassis_create_refuses_keeps_the_stack_from_being_ready(self, librenms_api):
+        """The chassis create stores each non-master member serial, so a too-long one would roll the row back."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+        from netbox_librenms_plugin.import_validation_helpers import apply_role_to_validation
+        from netbox_librenms_plugin.serial_identity import stored_form_refusal
+
+        api, server = librenms_api
+        infrastructure = make_device("vc-refused-member-infrastructure")
+        payload = _device_payload(
+            5503,
+            hostname="vc-refused-member-master",
+            sysName="vc-refused-member-master",
+            serial="MEMBER-OK",
+            location=infrastructure.site.name,
+            hardware=infrastructure.device_type.model,
+        )
+        server.device_info_response(device_id=5503, hostname=payload["hostname"], serial="MEMBER-OK")
+        long_serial = "M" * 51
+        server.vc_inventory_callable(
+            5503, [_stack_root()], {100: [_chassis(101, "MEMBER-OK", 1), _chassis(102, long_serial, 2)]}
+        )
+
+        result = validate_device_for_import(payload, api=api, include_vc_detection=True)
+        apply_role_to_validation(result, infrastructure.role)
+
+        assert (result["can_import"], result["is_ready"]) == (False, False)
+        assert any(stored_form_refusal(long_serial, Device) in issue for issue in result["issues"])
+
+    @pytest.mark.parametrize("serial", ["ABC\x00DEF", "ABC\ud800DEF"], ids=["nul", "surrogate"])
+    def test_a_member_serial_that_no_lookup_can_read_blocks_the_stack(self, librenms_api, serial):
+        """The database cannot hold the member text, so no lookup can read it and the stack refuses before any lookup."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+        from netbox_librenms_plugin.serial_identity import stored_form_refusal
+
+        api, server = librenms_api
+        infrastructure = make_device("vc-unreadable-member-infrastructure")
+        payload = _device_payload(
+            5504,
+            hostname="vc-unreadable-member-master",
+            sysName="vc-unreadable-member-master",
+            serial="MEMBER-OK",
+            location=infrastructure.site.name,
+            hardware=infrastructure.device_type.model,
+        )
+        server.device_info_response(device_id=5504, hostname=payload["hostname"], serial="MEMBER-OK")
+        server.vc_inventory_callable(
+            5504, [_stack_root()], {100: [_chassis(101, "MEMBER-OK", 1), _chassis(102, serial, 2)]}
+        )
+
+        result = validate_device_for_import(payload, api=api, include_vc_detection=True)
+
+        assert result["can_import"] is False
+        assert f"Stack member 2: {stored_form_refusal(serial, Device)}" in result["issues"]
+
+    @pytest.mark.parametrize("serial", [True, ["SECOND-CARD"]], ids=["boolean", "list"])
+    def test_a_member_serial_that_is_not_text_blocks_the_stack_whatever_device_holds_its_text(self, serial):
+        """A Device stores the text of the value; the value is no serial, so the stack refuses before any lookup."""
+        from netbox_librenms_plugin.import_utils.device_operations import _stack_member_serial_refusals
+        from netbox_librenms_plugin.import_utils.virtual_chassis import unreadable_member_serials
+        from netbox_librenms_plugin.serial_identity import MALFORMED_SERIAL, SerialRules
+
+        infrastructure = make_device("vc-malformed-member-infrastructure")
+        make_device("vc-malformed-member-text-holder", serial=str(serial))
+        members = [{"serial": "MEMBER-OK", "position": 1}, {"serial": serial, "position": 2}]
+        result = {
+            "virtual_chassis": {"is_stack": True, "members": members},
+            "device_type": {"device_type": infrastructure.device_type},
+        }
+
+        unreadable = unreadable_member_serials([(member, member["position"]) for member in members])
+        refusals = _stack_member_serial_refusals(result, "MEMBER-OK", SerialRules.load())
+
+        assert unreadable == [(members[1], 2, MALFORMED_SERIAL)]
+        assert refusals == [f"Stack member 2: {MALFORMED_SERIAL}"]
 
     def test_chassis_inventory_recovers_an_unmatched_hardware_string(self, librenms_api):
         from dcim.models import DeviceType, Manufacturer

@@ -330,6 +330,87 @@ def _importable_row(live_librenms, device_id, tag, *, members=None):
     return prerequisites, row
 
 
+@pytest.mark.django_db
+@pytest.mark.parametrize("kind", ["device", "stack", "vm", "missing-os"])
+def test_a_platform_warning_failure_leaves_the_import_retryable(client, live_librenms, kind, flushed_events):
+    from dcim.models import Device, DeviceRole, DeviceType, Platform, Site, VirtualChassis
+    from virtualization.models import VirtualMachine
+
+    from netbox_librenms_plugin.models import LibreNMSSettings
+    from netbox_librenms_plugin.server_mappings import MappingRole, find_mapping
+    from netbox_librenms_plugin.tests.test_bulk_import_job_control import _chassis
+
+    device_id = 96302
+    tag = f"platform-warning-{kind}"
+    members = None
+    if kind == "stack":
+        members = [_chassis(100, "WARNING-MASTER", position=1), _chassis(200, "WARNING-MEMBER", position=2)]
+    prerequisites, row = _importable_row(live_librenms, device_id, tag, members=members)
+    row.update(os=f"{tag}-os", version="7.2.3")
+    live_librenms.server.register(f"/api/v0/devices/{device_id}", {"status": "ok", "devices": [row]})
+
+    LibreNMSSettings.objects.update_or_create(pk=1, defaults={"platform_version_tracking": True})
+    platform = None
+    slug = f"{tag}-scope"
+    if kind != "missing-os":
+        platform = Platform.objects.create(name=row["os"], slug=slug)
+    user = make_user_with_perms(
+        tag,
+        [
+            ("add", Device),
+            ("change", Device),
+            ("view", Site),
+            ("view", DeviceType),
+            ("view", DeviceRole),
+            ("add", VirtualChassis),
+            ("add", VirtualMachine),
+        ],
+    )
+    client.force_login(grant(user, "view", Platform, constraints={"slug": slug}))
+
+    model = VirtualMachine if kind == "vm" else Device
+    data = {"server_key": "default", "select": [str(device_id)], f"role_{device_id}": prerequisites["device_role_id"]}
+    if kind == "vm":
+        data.update({f"object_type_{device_id}": "virtualmachine", f"vm_placement_{device_id}": "site"})
+    url = reverse("plugins:netbox_librenms_plugin:bulk_import_devices")
+
+    def mapped_object():
+        return find_mapping(model.objects.all(), server="default", identity=device_id, roles=[MappingRole.OWN])
+
+    def is_visibility_check(sql, params):
+        return 'AS "a" FROM "dcim_platform"' in sql and slug in params
+
+    with failing_statement(is_visibility_check, "57014") as failed:
+        response = client.post(url, data)
+
+    assert response.status_code == 302
+    if platform is not None:
+        assert len(failed) == 1
+        assert [level for level, _ in messages_on(response.wsgi_request)] == ["error"]
+        assert mapped_object() is None
+        assert not model.objects.filter(name__startswith=row["hostname"]).exists()
+        if kind == "vm":
+            assert not any(event_model == "virtualmachine" for event_model, _pk in flushed_events)
+        if members:
+            assert not VirtualChassis.objects.filter(master__serial="WARNING-MASTER").exists()
+
+        response = client.post(url, data)
+        assert response.status_code == 302
+        assert [level for level, _ in messages_on(response.wsgi_request)][-2:] == ["success", "warning"]
+    else:
+        assert failed == []
+        assert [level for level, _ in messages_on(response.wsgi_request)] == ["success"]
+
+    imported = mapped_object()
+    assert imported.platform == platform
+    if kind == "vm":
+        assert [pk for event_model, pk in flushed_events if event_model == "virtualmachine"] == [imported.pk]
+    if members:
+        chassis = imported.virtual_chassis
+        assert chassis.master_id == imported.pk
+        assert set(chassis.members.values_list("serial", flat=True)) == {"WARNING-MASTER", "WARNING-MEMBER"}
+
+
 @transactional_db_with_all_apps()
 def test_a_lock_conflict_in_a_device_create_fails_only_that_row_with_the_try_again_text(live_librenms):
     """The device's own transaction rolls back; its row never shows PostgreSQL's text."""
@@ -577,6 +658,46 @@ def test_an_unavailable_member_serial_rolls_back_the_stack_even_with_two_holders
         if record.name == "netbox_librenms_plugin.import_utils.bulk_import"
     )
     assert {model: set(model.objects.values_list("pk", flat=True)) for model in before} == before
+
+
+@pytest.mark.django_db
+def test_a_stack_with_a_nul_in_a_member_serial_is_blocked_at_validation(live_librenms):
+    """PostgreSQL text cannot hold a NUL, so the search shows the stack blocked and the import writes nothing."""
+    from dcim.models import Device, VirtualChassis
+
+    from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared, process_device_filters
+    from netbox_librenms_plugin.serial_identity import stored_form_refusal
+    from netbox_librenms_plugin.tests.test_bulk_import_job_control import _chassis
+
+    nul_serial = "SN-NUL-B\x00X"
+    members = [_chassis(100, "SN-NUL-A", position=1), _chassis(200, nul_serial, position=2)]
+    prerequisites, row = _importable_row(live_librenms, 96321, "stack-nul", members=members)
+    live_librenms.server.register("/api/v0/devices", {"status": "ok", "devices": [row]})
+    refusal = stored_form_refusal(nul_serial, Device)
+    assert refusal
+
+    (validated,) = process_device_filters(
+        live_librenms.api, {}, vc_detection_enabled=True, clear_cache=True, show_disabled=True
+    )
+
+    # The validation itself names the member serial, so the search never offers the stack as ready.
+    validation = validated["_validation"]
+    assert (validation["can_import"], validation["is_ready"]) == (False, False)
+    assert any(refusal in str(issue) for issue in validation["issues"])
+
+    result = bulk_import_devices_shared(
+        [96321],
+        server_key="default",
+        manual_mappings_per_device={96321: prerequisites},
+        libre_devices_cache={96321: row},
+        user=make_superuser("stack-nul-user"),
+    )
+
+    assert result["success"] == []
+    assert [entry["device_id"] for entry in result["failed"]] == [96321]
+    assert refusal in result["failed"][0]["error"]
+    assert not Device.objects.filter(name=row["hostname"]).exists()
+    assert not VirtualChassis.objects.filter(domain="librenms-default-96321").exists()
 
 
 @pytest.mark.django_db

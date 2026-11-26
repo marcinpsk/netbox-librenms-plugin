@@ -313,6 +313,48 @@ class TestUpdateDeviceSerialView:
         assert device.serial == "KEPT-SERIAL"
         assert _messages(response, "error") == ["LibreNMS reports a serial that is not text or a number."]
 
+    def test_a_live_row_for_another_device_id_writes_no_serial(self, logged_in_client, librenms_server):
+        """LibreNMS answers the request for 6516 with device 6517: its serial says nothing about this device."""
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        device = _linked_device("serial-other-device", 6516, serial="KEPT-SERIAL")
+        librenms_server.register(
+            "/api/v0/devices/6516",
+            {"status": "ok", "devices": [{"device_id": 6517, "hostname": device.name, "serial": "OTHER-SERIAL"}]},
+        )
+
+        response = _post(logged_in_client, "update_device_serial", device)
+
+        device.refresh_from_db()
+        assert response.status_code == 302
+        assert device.serial == "KEPT-SERIAL"
+        assert len(_messages(response, "error")) == 1
+        # The client cached nothing for 6516, so a later cached read asks LibreNMS again and gets device 6516.
+        librenms_server.device_info_response(device_id=6516, hostname=device.name, serial="REAL-SERIAL")
+        found, row = LibreNMSAPI(server_key=SERVER_KEY).get_device_info(6516)
+        assert (found, row["device_id"]) == (True, 6516)
+
+    @pytest.mark.parametrize("serial", ["ABC\ud800DEF", "ABC\x00DEF"], ids=["surrogate", "nul"])
+    def test_a_serial_that_the_database_cannot_hold_is_refused_with_a_message(
+        self, logged_in_client, librenms_server, serial
+    ):
+        """PostgreSQL text holds no NUL and no text that UTF-8 cannot encode, so the update refuses it."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.serial_identity import stored_form_refusal
+
+        device = _linked_device(f"serial-unstorable-{len(serial)}-{ord(serial[3])}", 6518, serial="KEPT-SERIAL")
+        librenms_server.device_info_response(device_id=6518, hostname=device.name, serial=serial)
+
+        response = _post(logged_in_client, "update_device_serial", device)
+
+        device.refresh_from_db()
+        assert response.status_code == 302
+        assert device.serial == "KEPT-SERIAL"
+        refusal = stored_form_refusal(serial, Device)
+        assert refusal
+        assert any(refusal in text for text in _messages(response, "error"))
+
     def test_first_serial_uses_the_set_message(self, logged_in_client, librenms_server):
         device = _linked_device("serial-first", 6513)
         librenms_server.device_info_response(device_id=6513, hostname=device.name, serial="FIRST-SERIAL")
