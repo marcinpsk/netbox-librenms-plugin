@@ -739,9 +739,11 @@ class TestCreateVirtualChassisWithMembers:
         so the import refuses the stack.
         """
         from dcim.models import Device, VirtualChassis
-        from django.core.exceptions import ValidationError
 
-        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+        from netbox_librenms_plugin.import_utils.virtual_chassis import (
+            StackRefused,
+            create_virtual_chassis_with_members,
+        )
         from netbox_librenms_plugin.models import NormalizationRule
         from netbox_librenms_plugin.serial_identity import report_rows
 
@@ -759,7 +761,7 @@ class TestCreateVirtualChassisWithMembers:
             vc = create_virtual_chassis_with_members(master, members, {"device_id": 8009}, master_member=members[0])
             assert vc.members.count() == 3
         else:
-            with pytest.raises(ValidationError, match="can be the same member"):
+            with pytest.raises(StackRefused, match="can be the same member"):
                 create_virtual_chassis_with_members(master, members, {"device_id": 8009}, master_member=members[0])
             assert not VirtualChassis.objects.filter(domain="librenms-8009").exists()
         assert Device.objects.filter(serial="XX123").exists() is (earlier == "batch")
@@ -898,9 +900,8 @@ def test_placeholder_members_do_not_match_an_unrelated_device(use_manufacturer_r
 def test_a_member_is_not_created_beside_a_legacy_row_that_stores_its_rule_output(patterns, legacy, incoming):
     """The rules key the legacy row again, so it does not match; it can still be the member, so the stack is refused."""
     from dcim.models import Device
-    from django.core.exceptions import ValidationError
 
-    from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+    from netbox_librenms_plugin.import_utils.virtual_chassis import StackRefused, create_virtual_chassis_with_members
     from netbox_librenms_plugin.models import NormalizationRule
 
     for priority, pattern in enumerate(patterns, start=1):
@@ -909,7 +910,7 @@ def test_a_member_is_not_created_beside_a_legacy_row_that_stores_its_rule_output
     make_device("legacy-output-member", serial=legacy)
     members = [{"serial": master.serial, "position": 1}, {"serial": incoming, "position": 2}]
 
-    with pytest.raises(ValidationError, match="can be the same member"):
+    with pytest.raises(StackRefused, match="can be the same member"):
         create_virtual_chassis_with_members(master, members, {"device_id": 985}, master_member=members[0])
 
     master.refresh_from_db()

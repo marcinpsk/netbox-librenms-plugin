@@ -8,7 +8,6 @@ from typing import List, NamedTuple
 
 from dcim.models import Device, DeviceType, VirtualChassis
 from django.core.cache import cache
-from django.core.exceptions import ValidationError
 from django.db import DatabaseError, connection, transaction
 from redis.exceptions import RedisError
 
@@ -809,6 +808,10 @@ def unnamed_members(members_info, pattern, context) -> list[tuple]:
     ]
 
 
+class StackRefused(ValueError):
+    """The import refuses the whole stack; the text names only LibreNMS data, so every viewer and job log reads it."""
+
+
 def unnamed_member_refusal(position, serial, pattern) -> str:
     """Return the issue of a stack member at *position* that *pattern* gives no name."""
     reported = display(serial)
@@ -966,8 +969,9 @@ def create_virtual_chassis_with_members(
         VirtualChassis: The created virtual chassis instance
 
     Raises:
-        ValueError: If *master_member* is not one of the *members_info* entries, or is not the master
-            under the device type that the locked master row holds
+        ValueError: If *master_member* is not one of the *members_info* entries
+        StackRefused: If *master_member* is not the master under the device type that the locked master
+            row holds, a member gets no name, or a member serial refuses the stack
         IntegrityError: If duplicate serials/names are detected
         Exception: For other creation errors
 
@@ -1009,7 +1013,7 @@ def create_virtual_chassis_with_members(
             member_type = DeviceType.objects.select_for_update(no_key=True).get(pk=locked_master.device_type_id)
             context = serial_rules.for_device_type(member_type)
             if identify_vc_master(members_info, locked_master.serial, context) is not master_member:
-                raise ValueError(
+                raise StackRefused(
                     "The stack master does not match under the current device type; no chassis was created."
                 )
             # Load naming pattern once to avoid a DB query per member
@@ -1018,7 +1022,7 @@ def create_virtual_chassis_with_members(
                 refusals = [
                     unnamed_member_refusal(position, member.get("serial"), vc_pattern) for member, position in unnamed
                 ]
-                raise ValueError(" ".join([*refusals, "No chassis was created."]))
+                raise StackRefused(" ".join([*refusals, "No chassis was created."]))
             master_device.device_type = member_type
             master_device.snapshot()
             # Rename the master device with its own position, from its member entry like every other member
@@ -1184,11 +1188,11 @@ def _member_serial_taken(serial, resolution, created_members) -> bool:
         created_members: The members that this stack created so far, grouped by serial.
 
     Raises:
-        ValidationError: The import cannot create the member safely, so it refuses the whole stack.
+        StackRefused: The import cannot create the member safely, so it refuses the whole stack.
 
     """
     if refusal := member_serial_refusal(serial, resolution):
-        raise ValidationError(refusal)
+        raise StackRefused(refusal)
     if created_members.find(serial) or resolution.kind is ResolutionKind.UNIQUE:
         logger.warning(f"Device with serial '{serial}' already exists, skipping VC member creation")
         return True

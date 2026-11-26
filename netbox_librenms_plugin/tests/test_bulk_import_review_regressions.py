@@ -652,25 +652,54 @@ def test_a_confirmed_member_serial_conflict_skips_only_that_member(live_librenms
     )
 
 
+def _stack_import_viewer(viewer, tag):
+    """Return ``(user, job)`` for a superuser, a non-superuser with the import grants, or a background job."""
+    import logging
+    from types import SimpleNamespace
+
+    from dcim.models import Device, DeviceRole, DeviceType, Interface, Location, Site, VirtualChassis
+
+    if viewer == "superuser":
+        return make_superuser(f"{tag}-user"), None
+    if viewer == "job":
+        # No RQ job has this id, so the job is not cancelled; a job log keeps only text that any viewer may read.
+        return make_superuser(f"{tag}-user"), SimpleNamespace(
+            job=SimpleNamespace(job_id=str(uuid4())), logger=logging.getLogger(f"{__name__}.job")
+        )
+    grants = [(action, Device) for action in ("view", "add", "change")]
+    grants += [("add", VirtualChassis), ("view", VirtualChassis), ("add", Interface), ("view", Interface)]
+    grants += [("view", model) for model in (Site, Location, DeviceType, DeviceRole)]
+    return make_user_with_perms(f"{tag}-user", grants), None
+
+
 @pytest.mark.django_db
-@pytest.mark.parametrize("case", ["ambiguous", "uncertain", "unique-uncertain"])
-def test_a_member_serial_the_import_cannot_create_safely_refuses_the_stack(live_librenms, case):
-    """Two holders, or a holder whose serial can be the same member, refuse the stack; nothing of it is written."""
+@pytest.mark.parametrize("viewer", ["superuser", "user", "job"])
+@pytest.mark.parametrize("case", ["ambiguous", "uncertain", "unique-uncertain", "unnamed"])
+def test_a_member_serial_the_import_cannot_create_safely_refuses_the_stack(live_librenms, case, viewer):
+    """These members refuse the stack, every viewer reads the refusal, and nothing of the stack is written."""
     from dcim.models import Device, VirtualChassis
 
     from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
     from netbox_librenms_plugin.models import NormalizationRule
     from netbox_librenms_plugin.tests.test_bulk_import_job_control import _chassis
+    from netbox_librenms_plugin.tests.test_virtual_chassis_fallbacks import _name_pattern
 
-    device_id = 96317 + ["ambiguous", "uncertain", "unique-uncertain"].index(case)
-    member_serial = "REFUSED-STACK-BBB" if case == "ambiguous" else "REFUSED-STACK-BBB-X-X"
+    cases = ["ambiguous", "uncertain", "unique-uncertain", "unnamed"]
+    device_id = 96320 + cases.index(case) * 3 + ["superuser", "user", "job"].index(viewer)
+    member_serial = {"ambiguous": "REFUSED-STACK-BBB", "unnamed": ""}.get(case, "REFUSED-STACK-BBB-X-X")
     members = [_chassis(100, f"REFUSED-STACK-AAA-{case}", position=1), _chassis(200, member_serial, position=2)]
-    prerequisites, row = _importable_row(live_librenms, device_id, f"stack-refused-{case}", members=members)
+    prerequisites, row = _importable_row(live_librenms, device_id, f"stack-refused-{case}-{viewer}", members=members)
     if case == "ambiguous":
         for index in range(2):
             make_device(f"stack-refused-holder-{index}", serial=member_serial)
         reason = (
             f"Cannot create VC member with serial '{member_serial}': several NetBox devices already hold this serial."
+        )
+    elif case == "unnamed":
+        _name_pattern("-{serial}")
+        reason = (
+            "Stack member 2: it reports no serial, so the member name pattern '-{serial}' gives it no name. "
+            "No chassis was created."
         )
     else:
         # The rule changes its own output, so the holder's "...-X" is the import's key but no match.
@@ -683,6 +712,7 @@ def test_a_member_serial_the_import_cannot_create_safely_refuses_the_stack(live_
             f"Cannot create VC member with serial '{member_serial}': a NetBox device stores a serial that can be "
             "the same member. Check the serials manually."
         )
+    user, job = _stack_import_viewer(viewer, f"stack-refused-{case}-{viewer}")
     before = {model: set(model.objects.values_list("pk", flat=True)) for model in (Device, VirtualChassis)}
 
     result = bulk_import_devices_shared(
@@ -690,7 +720,8 @@ def test_a_member_serial_the_import_cannot_create_safely_refuses_the_stack(live_
         server_key="default",
         manual_mappings_per_device={device_id: prerequisites},
         libre_devices_cache={device_id: row},
-        user=make_superuser(f"stack-refused-{case}-user"),
+        user=user,
+        job=job,
     )
 
     assert result["success"] == []
