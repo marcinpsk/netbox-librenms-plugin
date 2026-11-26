@@ -274,9 +274,16 @@ class TestPrefetchVcData:
                 call()
             return [query for query in queries.captured_queries if table in query["sql"]]
 
-        one_key_set = rule_reads(lambda: SerialRules.load().candidates())
-        for _batch in range(2):
-            assert len(rule_reads(run_batch)) == len(one_key_set)
+        reads = [len(rule_reads(run_batch))]
+        # A rule change between the batches: the next batch must read the new rules.
+        NormalizationRule.objects.create(scope="serial", match_pattern=r"^TAG-(.+)$", replacement=r"\1")
+        reads.append(len(rule_reads(run_batch)))
+
+        assert reads == [1, 1]
+        new_rules = SerialRules.load()
+        assert new_rules.digest != current_rules.digest
+        # The second batch cached each detection under the digest of the new rules.
+        assert all(cache.get(vc_module._vc_cache_key(api, device_id, new_rules)) for device_id in device_ids)
         assert all(vc_module.get_virtual_chassis_data(api, device_id)["is_stack"] for device_id in device_ids)
 
     @pytest.mark.parametrize("entry", ["confirm", "bulk-import", "filters"])
