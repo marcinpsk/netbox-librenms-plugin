@@ -3500,6 +3500,18 @@ class TestModuleWriterOwnership:
             return "queryset.update"
         return name
 
+    @staticmethod
+    def _evaluation_order(node):
+        """Return the child nodes of *node* in the order that Python evaluates them."""
+        import ast
+
+        # Python evaluates an assignment value before its targets; an AugAssign evaluates its target first.
+        if isinstance(node, ast.Assign):
+            return [node.value, *node.targets]
+        if isinstance(node, ast.AnnAssign) and node.value is not None:
+            return [node.value, node.target, node.annotation]
+        return ast.iter_child_nodes(node)
+
     @classmethod
     def _violations(cls, tree, writers):
         import ast
@@ -3517,9 +3529,7 @@ class TestModuleWriterOwnership:
                 # A move's mutation callback executes through update_existing_row.
                 if node is not method and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
                     return
-                # Python evaluates an assignment value before its targets.
-                children = [node.value, *node.targets] if isinstance(node, ast.Assign) else ast.iter_child_nodes(node)
-                for child in children:
+                for child in cls._evaluation_order(node):
                     walk(child, (*parents, node))
                 # After its receiver and arguments, so the list is in call order.
                 if isinstance(node, ast.Call):
@@ -3575,6 +3585,7 @@ class TestModuleWriterOwnership:
             'match action:\n    case "install":\n        lock_module_write(observe_module_write(device_ids=targets))\n'
             "Module().save()",
             "target[lock_module_write(observe_module_write(device_ids=targets))] = Module().save()",
+            "target[lock_module_write(observe_module_write(device_ids=targets))]: object = Module().save()",
         ],
         ids=[
             "missing",
@@ -3588,6 +3599,7 @@ class TestModuleWriterOwnership:
             "manager-update-before-owner",
             "owner-in-match-case",
             "write-in-assignment-value",
+            "write-in-annotated-assignment-value",
         ],
     )
     def test_guard_rejects_known_omissions(self, body):
