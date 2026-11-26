@@ -69,6 +69,7 @@ from ..utils import (
 from .cache import get_import_device_cache_key
 from .naming import _name_candidates, _resolve_device_name
 from .virtual_chassis import (
+    VCNumberingError,
     _existing_member_name,
     _load_vc_member_name_pattern,
     empty_virtual_chassis_data,
@@ -77,9 +78,11 @@ from .virtual_chassis import (
     identify_vc_master,
     member_serial_unavailable_message,
     members_to_create,
-    unnamed_member_refusal,
+    numbering_refusal_text,
+    prepare_virtual_chassis,
+    unnamed_member_reason,
     unnamed_members,
-    update_vc_member_suggested_names,
+    unnumbered_virtual_chassis,
 )
 from netbox_librenms_plugin.server_mappings import (
     IDENTITY_BUSY_MESSAGE,
@@ -687,6 +690,11 @@ def _detect_serial_match_role(existing_by_serial, existing_link, hostname, seria
     }
 
 
+def _stack_member_label(position, serial) -> str:
+    """Return how a stack member issue names a member: its position, or its serial in a stack without numbers."""
+    return f"Stack member {position}" if position is not None else f"Stack member with serial '{display(serial)}'"
+
+
 def _stack_member_serial_refusals(result, incoming_serial, serial_rules) -> list:
     """Return an issue for each stack member that the import creates with a serial that does not fit the field."""
     vc = result.get("virtual_chassis") or {}
@@ -702,7 +710,8 @@ def _stack_member_serial_refusals(result, incoming_serial, serial_rules) -> list
     pattern = _load_vc_member_name_pattern()
     unnamed_ids = {id(member) for member, _position in unnamed_members(vc["members"], pattern, context)}
     unnamed = [
-        unnamed_member_refusal(member.get("position"), member.get("serial"), pattern)
+        f"{_stack_member_label(member.get('position'), member.get('serial'))}: "
+        f"{unnamed_member_reason(member.get('serial'), pattern)}"
         for member in vc["members"]
         if id(member) in unnamed_ids
     ]
@@ -711,7 +720,7 @@ def _stack_member_serial_refusals(result, incoming_serial, serial_rules) -> list
     taken = resolve_devices_write([serial for _member, _position, serial in members], context, rules=serial_rules)
     # The member writer refuses the whole stack for an Unavailable member, so validation blocks it too.
     unavailable = [
-        f"Stack member {position}: {member_serial_unavailable_message(serial)}"
+        f"{_stack_member_label(position, serial)}: {member_serial_unavailable_message(serial)}"
         for _member, position, serial in members
         if taken[serial].kind is ResolutionKind.UNAVAILABLE
     ]
@@ -725,7 +734,7 @@ def _stack_member_serial_refusals(result, incoming_serial, serial_rules) -> list
     }
     # The text comes from the LibreNMS members only: the lookup is unrestricted, so it selects and names nothing.
     return unnamed + [
-        f"Stack member {position}: {refusal}"
+        f"{_stack_member_label(position, serial)}: {refusal}"
         for member, position, serial in members
         if id(member) in created and (refusal := stored_form_refusal(serial, Device))
     ]
@@ -745,6 +754,7 @@ def validate_device_for_import(  # noqa: C901
     preloaded_device_type_rules: dict | None = None,
     serial_rules: SerialRules | None = None,
     serial_discoveries: Callable[[], dict[str, Resolution]] | None = None,
+    numbering_rules: tuple | None = None,
 ) -> dict:
     """
     Validate if a LibreNMS device can be imported to NetBox.
@@ -771,6 +781,7 @@ def validate_device_for_import(  # noqa: C901
         preloaded_device_type_rules: Optional device-type normalization rules keyed for lookup.
         serial_rules: The batch's :class:`SerialRules`; None reads them once for this device.
         serial_discoveries: Optional lazy batch of serial lookup results for search fallback.
+        numbering_rules: The batch's VC member numbering rules; None reads them for a stack.
 
     Returns:
         dict: Validation result with structure (the key set is pinned by
@@ -806,7 +817,7 @@ def validate_device_for_import(  # noqa: C901
                 'member_name_refusal': str,  # Why a linked stack member gets no name, or ""
                 'device_type_mismatch': bool,  # Existing device's type differs from LibreNMS (devices only)
                 'naming_criteria': dict or None,  # How resolved_name was derived (use_sysname/strip_domain)
-                'virtual_chassis': dict,  # VC detection state, empty_virtual_chassis_data() shape
+                'virtual_chassis': dict,  # VC state, prepare_virtual_chassis() for the matched DeviceType
                 'issues': List[str],  # Blocking issues
                 'warnings': List[str],  # Non-blocking warnings
                 'site': {  # Device site or VM matched-site placement
@@ -1805,10 +1816,20 @@ def validate_device_for_import(  # noqa: C901
                                 f"Virtual chassis CONFIRMED for device {hostname}: "
                                 f"{vc_detection['member_count']} members"
                             )
-                            device_type = effective_import_device_type(result["device_type"].get("device_type"))
-                            result["virtual_chassis"] = update_vc_member_suggested_names(
-                                vc_detection, hostname, serial_rules=serial_rules, device_type=device_type
-                            )
+                            try:
+                                result["virtual_chassis"] = prepare_virtual_chassis(
+                                    vc_detection,
+                                    device_type=effective_import_device_type(result["device_type"].get("device_type")),
+                                    master_name=hostname,
+                                    device_serial=incoming_serial,
+                                    serial_rules=serial_rules,
+                                    numbering_rules=numbering_rules,
+                                )
+                            except (VCNumberingError, RuleConfigurationError) as exc:
+                                # The import numbers the stack again for its final DeviceType.
+                                refusal = numbering_refusal_text(exc)
+                                result["virtual_chassis"] = unnumbered_virtual_chassis(vc_detection, refusal)
+                                result["issues"].append(refusal)
                 except Exception as e:
                     logger.exception("Exception during VC detection for device %s: %s", hostname, e)
                     # The validation result has no viewer: it is cached and shown to any import user.
