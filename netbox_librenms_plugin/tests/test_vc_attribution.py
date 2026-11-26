@@ -400,10 +400,12 @@ class TestRecognizedStack:
             assert {owner[index] for index in (202, 204, 205)} == {(None, UNATTRIBUTED_SOURCE)}
         elif reverse:
             # Row order gives Switch 2 position 1, whose member Switch 1 owns by serial.
-            assert owner[202] == (None, UNATTRIBUTED_SOURCE)
+            assert {owner[index] for index in (202, 204, 205)} == {(None, UNATTRIBUTED_SOURCE)}
         else:
             # A blank serial keeps the row-order position, as before.
             assert owner[202] == (last, "position")
+            # The stack names its member rows, so the card's "12" names no member.
+            assert (owner[204], owner[205]) == ((last, "parent-context"), (last, "parent-context"))
 
     @pytest.mark.parametrize(
         ("serial", "position"), [("NEW123", 3), ("", 3), ("100052", 3)], ids=["new", "blank", "owned"]
