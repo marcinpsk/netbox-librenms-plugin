@@ -605,7 +605,7 @@ class _Attribution:
         # A descendant's parentRelPos is its hardware slot, so it inherits its parent's member.
         inherits, member, source = self._inherited(row, resolving)
         if inherits:
-            if source == UNATTRIBUTED_SOURCE or (member is not None and self._has_serial_without_identity(row)):
+            if source == UNATTRIBUTED_SOURCE or (member is not None and crossed):
                 return None, UNATTRIBUTED_SOURCE
             return member, "parent-context"
         # This shape has no member rows, so any row's position or name hint from 1 names a member.

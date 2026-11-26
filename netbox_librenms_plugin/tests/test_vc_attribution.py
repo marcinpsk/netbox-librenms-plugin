@@ -706,6 +706,24 @@ class TestRecognizedStack:
             # A blank FPC serial gives no link, so the rows resolve as develop does: by parent context, on the page.
             assert {owner[index] for index in (2, 4, 30, 120, 121, 1210)} == {(None, "parent-context")}
 
+    @pytest.mark.parametrize("serial", ["12", "CHASSIS999"], ids=["short", "identity"])
+    def test_no_member_is_inherited_across_a_short_serial_row_that_has_a_position(self, serial):
+        """Outside a recognized stack, a chassis at position 2 that reports "12" gives its child no member."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import UNATTRIBUTED_SOURCE
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
+        first, second = _vc_members(["100081", "100082"])
+        inventory = [
+            _row(240, "chassis", 0, position=2, entPhysicalSerialNum=serial),
+            _row(241, "module", 240, entPhysicalModelName="CARD"),
+        ]
+
+        owners = attribute_inventory(inventory, [first, second], SerialRules.load().for_device(first))
+
+        owner = {row["entPhysicalIndex"]: found for row, found in zip(inventory, owners, strict=True)}
+        assert owner[240] == (second, "position")
+        assert owner[241] == ((None, UNATTRIBUTED_SOURCE) if serial == "12" else (second, "parent-context"))
+
     @pytest.mark.parametrize("serial", ["12", "BAY140X"], ids=["short", "identity"])
     def test_no_member_is_inherited_across_a_short_serial_fpc_link(self, serial):
         """Outside a recognized stack, a bay that names FPC 0 and reports "12" gives its child no member."""
