@@ -2636,12 +2636,25 @@ FLAG_WITHHOLDS = {"member_unattributed": WRITE_ACTIONS | PAGE_DEVICE_ACTIONS, "u
 
 
 def _flag_guard_records():
-    """Return rows that together offer every write control of the table."""
-    from netbox_librenms_plugin.tests.conftest import install_module, make_device_with_module_bays
+    """Return a VC member page device and rows that together offer every write control and the VC report."""
+    from dcim.models import InterfaceTemplate
+
+    from netbox_librenms_plugin.tests.conftest import (
+        install_module,
+        make_device_with_module_bays,
+        make_module_bay,
+        make_module_type_with_bays,
+        make_virtual_chassis_members,
+    )
 
     source = make_device_with_module_bays("flag-guard-move-source", ["Slot 1"])
     conflict = install_module(source, "Slot 1", "FLAG-GUARD-TYPE", serial="FLAG-GUARD-SERIAL")
-    return [
+    _chassis, (page, _member) = make_virtual_chassis_members("flag-guard-page")
+    make_module_bay(page, "VC Slot")
+    # A template name without a member position gives the VC naming diagnostic.
+    InterfaceTemplate.objects.create(module_type=make_module_type_with_bays("FLAG-GUARD-VC"), name="mgmt", type="other")
+    vc_module = install_module(page, "VC Slot", "FLAG-GUARD-VC")
+    return page, [
         {
             "can_install": True,
             "module_bay_id": 5,
@@ -2692,17 +2705,17 @@ def _flag_guard_records():
             "ent_physical_index": 50,
             "built_in": {"records_part_number": False, "part_number": "", "rule_id": None, "device_type_id": 1},
         },
+        {"status": "Installed", "installed_module_id": vc_module.pk, "module_bay_id": vc_module.module_bay_id},
     ]
 
 
-def _rendered_actions(records, **flags):
-    """Return each data-action that the actions and status cells of *records* render with *flags* set."""
+def _rendered_actions(page, records, **flags):
+    """Return each data-action that the actions and status cells of *records* render on *page* with *flags* set."""
     from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
-    from netbox_librenms_plugin.tests.conftest import make_device
 
     table = LibreNMSModuleTable(
-        [],
-        device=make_device(f"flag-guard-page-{'-'.join(flags) or 'none'}"),
+        records,
+        device=page,
         server_key=SERVER_KEY,
         **{
             name: True
@@ -2754,11 +2767,11 @@ def test_a_flagged_row_renders_none_of_the_write_controls_its_flag_withholds(fla
     """The rows offer every write control without a flag; the flag withholds its class and keeps the others."""
     from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
 
-    records = _flag_guard_records()
-    offered = _rendered_actions(records)
-    flagged = _rendered_actions(records, **{flag: True})
+    page, records = _flag_guard_records()
+    offered = _rendered_actions(page, records)
+    flagged = _rendered_actions(page, records, **{flag: True})
 
-    expected = WRITE_ACTIONS | PAGE_DEVICE_ACTIONS
+    expected = WRITE_ACTIONS | PAGE_DEVICE_ACTIONS | {"report-vc-issue"}
     if not netbox_relocates_module_subtree():
         # Move is offered only where NetBox relocates the module subtree.
         expected -= {"move"}
