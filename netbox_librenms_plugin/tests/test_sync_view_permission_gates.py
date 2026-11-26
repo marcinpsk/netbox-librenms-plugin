@@ -1,12 +1,115 @@
-"""Runtime sync POST gates. Mixin contract tests live in test_permissions.py."""
+"""Runtime sync POST gates and the confirmation inventory. Mixin contract tests live in test_permissions.py."""
 
 import pytest
 
+# Views that apply no assessed change carry no confirmation intent (section 4 of the #177 design).
+EXEMPT_VIEWS = {
+    "SetPreferredServerView": "the operator names the server",
+    "AddDeviceToLibreNMSView": "writes LibreNMS, outside NetBox reconciliation",
+    "UpdateDeviceLocationView": "writes LibreNMS, outside NetBox reconciliation",
+    "SyncSiteLocationView": "writes LibreNMS, outside NetBox reconciliation",
+    "AddBayTemplateView": "an operator-authored command: it materializes the operator's own input",
+    "_BaseRelationshipSyncView": "a base without an operation of its own; each subclass is covered",
+    "BulkImportConfirmView": "read-only: it renders the import confirmation and writes nothing",
+    "DeviceImportPlanUpdateView": "read-only: it revalidates one import row and renders it",
+    "SaveUserPrefView": "an operator preference: it stores the operator's own toggle value",
+    "AddDeviceTypeMappingView": "an operator-authored mapping: the operator picks the device type for the string",
+    "AddPlatformMappingView": "an operator-authored mapping: the operator picks the platform for the OS string",
+}
 
-def pytest_generate_tests(metafunc):
-    if "sync_case" not in metafunc.fixturenames:
-        return
+# The class of a confirmation-required view that the design has no resource for yet; it needs a design decision.
+NO_RESOURCE_YET = "no resource yet"
 
+# Confirmation-required views that a later increment migrates to the confirmation intent module.
+MIGRATION_INVENTORY = {
+    "SyncCablesView": "cable",
+    "CableRemoteCreateView": "cable",
+    "UpdateDeviceNameView": "device_field",
+    "UpdateDeviceSerialView": "device_field",
+    "UpdateDeviceTypeView": "device_field",
+    "UpdateDevicePlatformView": "device_field",
+    "UpdateVMPlatformView": "device_field",
+    "CreateAndAssignPlatformView": "device_field",
+    "CreateAndAssignVMPlatformView": "device_field",
+    "AssignVCSerialView": "device_field",
+    "RemoveServerMappingView": "mapping_lifecycle",
+    "ConvertLegacyLibreNMSIdView": "mapping_lifecycle",
+    "SyncInterfacesView": "interface",
+    "SyncInterfaceLagView": "interface",
+    "SyncInterfaceParentView": "interface",
+    "SyncInterfaceBridgeView": "interface",
+    "RebindInterfacePortView": "interface",
+    "DeleteNetBoxInterfacesView": "interface",
+    "SyncIPAddressesView": "ip_address",
+    "CreateVRFFromIPRowView": "ip_address",
+    "MoveInterfaceToWinnerView": "migration",
+    "MoveIPAddressToWinnerView": "migration",
+    "TransferDeviceIPView": "migration",
+    "InstallModuleView": "module",
+    "InstallBranchView": "module",
+    "InstallSelectedView": "module",
+    "UpdateModuleSerialView": "module",
+    "UpdateModuleInterfaceView": "module",
+    "ApplyModuleInterfaceTypesView": "module",
+    "ReplaceModuleView": "module",
+    "MoveModuleView": "module",
+    "MarkBuiltInView": "module",
+    "DeviceConflictActionView": "import_identity_replacement",
+    "PromoteToHostView": "import_identity_replacement",
+    "AddAsOOBView": "mapping_lifecycle",
+    "CreatePlatformFromImportView": "device_field",
+    "MergeNetBoxDevicesView": "migration",
+    # It creates objects from the shown import plan, and the design names no import-create resource.
+    "BulkImportDevicesView": NO_RESOURCE_YET,
+}
+
+# The inventory may only shrink: a new confirmation-required view declares its actions instead.
+_INVENTORY_CEILING = frozenset(
+    {
+        "SyncCablesView",
+        "CableRemoteCreateView",
+        "UpdateDeviceNameView",
+        "UpdateDeviceSerialView",
+        "UpdateDeviceTypeView",
+        "UpdateDevicePlatformView",
+        "UpdateVMPlatformView",
+        "CreateAndAssignPlatformView",
+        "CreateAndAssignVMPlatformView",
+        "AssignVCSerialView",
+        "RemoveServerMappingView",
+        "ConvertLegacyLibreNMSIdView",
+        "SyncInterfacesView",
+        "SyncInterfaceLagView",
+        "SyncInterfaceParentView",
+        "SyncInterfaceBridgeView",
+        "RebindInterfacePortView",
+        "DeleteNetBoxInterfacesView",
+        "SyncIPAddressesView",
+        "CreateVRFFromIPRowView",
+        "MoveInterfaceToWinnerView",
+        "MoveIPAddressToWinnerView",
+        "TransferDeviceIPView",
+        "InstallModuleView",
+        "InstallBranchView",
+        "InstallSelectedView",
+        "UpdateModuleSerialView",
+        "UpdateModuleInterfaceView",
+        "ApplyModuleInterfaceTypesView",
+        "ReplaceModuleView",
+        "MoveModuleView",
+        "MarkBuiltInView",
+        "DeviceConflictActionView",
+        "PromoteToHostView",
+        "AddAsOOBView",
+        "CreatePlatformFromImportView",
+        "MergeNetBoxDevicesView",
+        "BulkImportDevicesView",
+    }
+)
+
+
+def _discovered_post_views(package=None):
+    """Return ``(module name, class name, class)`` for every view class of *package* (views/sync) that handles POST."""
     import importlib
     import inspect
     import pkgutil
@@ -15,72 +118,67 @@ def pytest_generate_tests(metafunc):
 
     from netbox_librenms_plugin.views import sync
 
-    cases = []
-    for module_info in pkgutil.walk_packages(sync.__path__, prefix=f"{sync.__name__}."):
+    package = package or sync
+    views = []
+    for module_info in pkgutil.walk_packages(package.__path__, prefix=f"{package.__name__}."):
         module = importlib.import_module(module_info.name)
         for name, cls in inspect.getmembers(module, inspect.isclass):
-            if cls.__module__ != module.__name__ or not issubclass(cls, View) or not hasattr(cls, "post"):
-                continue
-            # The relationship base can deny before it needs subclass attributes. Cover it too.
-            variants = [("device", {})]
-            if name in {
-                "SyncInterfacesView",
-                "RebindInterfacePortView",
-                "DeleteNetBoxInterfacesView",
-                "SyncInterfaceParentView",
-                "SyncIPAddressesView",
-                "CreateVRFFromIPRowView",
-                "AddDeviceToLibreNMSView",
-                "RemoveServerMappingView",
-                "SetPreferredServerView",
-                "ConvertLegacyLibreNMSIdView",
-            }:
-                variants.append(("virtualmachine", {}))
-            if name == "AddBayTemplateView":
-                variants = [
-                    ("device", {"target_kind": "device_type"}),
-                    ("device", {"target_kind": "module_type"}),
-                    ("device", {"mode": "map_existing"}),
-                ]
-            if name == "CreateAndAssignPlatformView":
-                variants.append(("device", {"platform_name": "Existing platform", "manufacturer": "existing"}))
-            if name == "SyncVLANsView":
-                variants.append(("device", {"select": ["100"], "vlan_group_100": "existing"}))
-            for object_type, data in variants:
-                suffix = "-".join(f"{key}={value}" for key, value in data.items())
-                cases.append(
-                    pytest.param(
-                        (cls, object_type, data),
-                        id=f"{module_info.name.rsplit('.', 1)[-1]}.{name}-{object_type}-{suffix}",
-                    )
-                )
+            # hasattr, not __dict__: a view that inherits its handler is still a POST view.
+            if cls.__module__ == module.__name__ and issubclass(cls, View) and hasattr(cls, "post"):
+                views.append((module_info.name.rsplit(".", 1)[-1], name, cls))
+    return views
+
+
+def pytest_generate_tests(metafunc):
+    if "sync_case" not in metafunc.fixturenames:
+        return
+
+    cases = []
+    for module_name, name, cls in _discovered_post_views():
+        # The relationship base can deny before it needs subclass attributes. Cover it too.
+        variants = [("device", {})]
+        if name in {
+            "SyncInterfacesView",
+            "RebindInterfacePortView",
+            "DeleteNetBoxInterfacesView",
+            "SyncInterfaceParentView",
+            "SyncIPAddressesView",
+            "CreateVRFFromIPRowView",
+            "AddDeviceToLibreNMSView",
+            "RemoveServerMappingView",
+            "SetPreferredServerView",
+            "ConvertLegacyLibreNMSIdView",
+        }:
+            variants.append(("virtualmachine", {}))
+        if name == "AddBayTemplateView":
+            variants = [
+                ("device", {"target_kind": "device_type"}),
+                ("device", {"target_kind": "module_type"}),
+                ("device", {"mode": "map_existing"}),
+            ]
+        if name == "CreateAndAssignPlatformView":
+            variants.append(("device", {"platform_name": "Existing platform", "manufacturer": "existing"}))
+        if name == "SyncVLANsView":
+            variants.append(("device", {"confirmation_intent": "grouped"}))
+        for object_type, data in variants:
+            suffix = "-".join(f"{key}={value}" for key, value in data.items())
+            cases.append(pytest.param((cls, object_type, data), id=f"{module_name}.{name}-{object_type}-{suffix}"))
     assert cases, "No sync POST views discovered"
     metafunc.parametrize("sync_case", cases)
-
-
-def _domain_state():
-    from django.apps import apps
-
-    labels = {"dcim", "ipam", "virtualization", "netbox_librenms_plugin", "extras", "core"}
-    return {
-        model._meta.label: list(model._base_manager.order_by("pk").values())
-        for model in apps.get_models(include_auto_created=True)
-        if model._meta.app_label in labels and model._meta.managed and not model._meta.proxy
-    }
 
 
 def _post_without_writes(view, request, **kwargs):
     from django.db import connection
     from django.test.utils import CaptureQueriesContext
 
-    from netbox_librenms_plugin.tests.view_test_helpers import post
+    from netbox_librenms_plugin.tests.view_test_helpers import domain_state, post
 
-    before = _domain_state()
+    before = domain_state()
     with CaptureQueriesContext(connection) as queries:
         try:
             response = post(view, request, **kwargs)
         finally:
-            after = _domain_state()
+            after = domain_state()
             changed = [table for table in before if before[table] != after[table]]
             assert changed == [], f"Denied POST changed tables: {changed}"
     writes = [
@@ -90,6 +188,26 @@ def _post_without_writes(view, request, **kwargs):
     ]
     assert writes == [], "Denied POST issued write SQL"
     return response
+
+
+def _grouped_vlan_token(device):
+    """Return an authentic VLAN token that names a VLAN group, so the VLAN route also requires VLANGroup view."""
+    from ipam.models import VLANGroup
+
+    from netbox_librenms_plugin import confirmation_intent as intent
+    from netbox_librenms_plugin.assessment.vlans import (
+        VLANAssumptions,
+        VLANChoices,
+        VLANCreate,
+        VLANCreateEffects,
+        VLANIdentity,
+    )
+
+    group = VLANGroup.objects.create(name="Permission VLAN group", slug="permission-vlans").pk
+    operation = VLANCreate(
+        VLANIdentity(100), VLANChoices(group), VLANAssumptions(None), VLANCreateEffects(100, group, "users", "active")
+    )
+    return intent.offer(operation, intent.IntentContext(1, (device._meta.label_lower, device.pk), "default")).token
 
 
 def _assert_object_denial(view, request, response, *, htmx, expected_missing=None):
@@ -127,7 +245,6 @@ class TestSyncPostPermissionGates:
         import inspect
 
         from dcim.models import Platform
-        from ipam.models import VLANGroup
         from utilities.permissions import get_permission_for_model
 
         from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN
@@ -145,10 +262,8 @@ class TestSyncPostPermissionGates:
         if data.get("manufacturer") == "existing":
             Platform.objects.create(name=data["platform_name"], slug="existing-platform")
             data["manufacturer"] = str(device.device_type.manufacturer_id)
-        if data.get("vlan_group_100") == "existing":
-            data["vlan_group_100"] = str(
-                VLANGroup.objects.create(name="Permission VLAN group", slug="permission-vlans").pk
-            )
+        if data.get("confirmation_intent") == "grouped":
+            data["confirmation_intent"] = _grouped_vlan_token(device)
         pk = owner.pk
         if view_class.__name__ == "MoveInterfaceToWinnerView":
             pk = interface.pk
@@ -234,3 +349,64 @@ class TestSyncPostPermissionGates:
             device.refresh_from_db()
             assert device.platform_id is None
             assert librenms_server.requests == []
+
+
+def _confirmation_views():
+    """Return every discovered POST view of views/sync and views/imports, inherited handlers included."""
+    from netbox_librenms_plugin.views import imports, sync
+
+    return {name: cls for package in (sync, imports) for _module, name, cls in _discovered_post_views(package)}
+
+
+class TestConfirmationInventory:
+    """Every POST view declares its confirmation actions, a named exemption, or a migration inventory entry."""
+
+    def test_every_post_view_has_exactly_one_confirmation_class(self):
+        from netbox_librenms_plugin import confirmation_intent as intent
+
+        unclassified = []
+        for name, cls in _confirmation_views().items():
+            classes = [
+                isinstance(getattr(cls, "confirmation_policy", None), intent.RoutePolicy),
+                name in EXEMPT_VIEWS,
+                name in MIGRATION_INVENTORY,
+            ]
+            if classes.count(True) != 1:
+                unclassified.append(name)
+        assert unclassified == []
+
+    def test_the_lists_name_only_discovered_views(self):
+        from netbox_librenms_plugin import confirmation_intent as intent
+
+        views = _confirmation_views()
+        assert set(EXEMPT_VIEWS) - set(views) == set()
+        assert set(MIGRATION_INVENTORY) - set(views) == set()
+        assert all(
+            resource in set(intent.Resource) or resource == NO_RESOURCE_YET for resource in MIGRATION_INVENTORY.values()
+        )
+
+    def test_the_views_without_a_resource_are_deferred_for_a_design_decision(self):
+        # The last increment's empty inventory forces the decision on each of them.
+        deferred = {name for name, resource in MIGRATION_INVENTORY.items() if resource == NO_RESOURCE_YET}
+        assert deferred == {"BulkImportDevicesView"}
+
+    def test_the_migration_inventory_only_shrinks(self):
+        assert set(MIGRATION_INVENTORY) - _INVENTORY_CEILING == set()
+
+    def test_every_declared_action_is_registered_and_has_a_contract_scenario(self):
+        from netbox_librenms_plugin import confirmation_intent as intent
+        from netbox_librenms_plugin.tests.test_confirmation_intent_contract import SCENARIOS
+
+        declared = {
+            (resource, action)
+            for cls in _confirmation_views().values()
+            if isinstance(policy := getattr(cls, "confirmation_policy", None), intent.RoutePolicy)
+            for resource, action, _role in policy.entries
+        }
+        assert declared
+        assert declared <= intent.registered_actions()
+        assert declared <= set(SCENARIOS)
+        # A resource with a registered action has no view left in the inventory.
+        assert {resource for resource, _action in intent.registered_actions()} & set(
+            MIGRATION_INVENTORY.values()
+        ) == set()
