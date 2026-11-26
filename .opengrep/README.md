@@ -79,7 +79,7 @@ unchecked until that review.
 | `rule-error-message-needs-projection` | error | A `str()`, `repr()`, f-string or `format()` conversion, or an `args` read, of the rule error bound by the module-context walrus check, or the exception parameter in `RuleConfigurationErrorMiddleware.process_exception`. These paths use `public_message`. Other aliases and handlers are outside this check. |
 | `sync-tab-url-through-sync-query` | error | A hand-built `?tab=`, `&tab=` or `&amp;tab=` query string, or a `?{% ... %}tab=` one, in package Python or a template, outside `sync_query.py`. |
 | `post-write-scope-through-helper` | error | An inline `restrict(user, "add"/"change")` or `restricted_queryset(model, "add"/"change")` existence check of a row that the same block saved or created before. Call `transactions.saved_in_scope()`. |
-| `change-scope-write-needs-read-back` | error | A function saves a row that it read through `restricted_queryset(model, "change")` or `restrict(user, "change")`, and does not check the saved row with `saved_in_scope()` (or `_refuse_rows_outside_change_scope()`). |
+| `change-scope-write-needs-read-back` | error | A function saves a row (`row.save()` or `persist_mapping(row, ...)`) that it read through `restricted_queryset(model, "change")` or `restrict(user, "change")`, and does not check the saved row with `saved_in_scope()` (or `_refuse_rows_outside_change_scope()`). |
 | `sync-script-reads-page-server-key` | error | A package script calls `document.querySelector`, `querySelectorAll` or `getElementsByName` for `server_key`. A lookup inside one form is allowed. Vendored and minified files are excluded. |
 | `oob-controller-flag-has-one-writer` | error | A write of `row_is_oob_controller` outside `classify_oob_controller()`. Only a subscript assignment of the key is checked. |
 | `primary-ip-through-helper` | error | A `.primary_ip` attribute read or a `getattr(obj, "primary_ip", ...)` call outside tests. NetBox returns `primary_ip6` there when both families are set, unless `PREFER_IPV4` is on. Read both rows with `ip_addressing.primary_ips()`, or name `primary_ip4` or `primary_ip6`. A `getattr` with a computed name is not followed. |
@@ -305,7 +305,7 @@ A check through a restricted queryset that a variable or a parameter holds is no
 because the rule cannot tell that queryset from an unrestricted one.
 
 `change-scope-write-needs-read-back` reads one function. It reports `row = <change scope>...` followed
-by `row.save(...)` when no `if` statement in the same function calls `saved_in_scope` or
+by `row.save(...)` or `persist_mapping(row, ...)` when no `if` statement in the same function calls `saved_in_scope` or
 `_refuse_rows_outside_change_scope`. It does not see a row that a loop, a parameter or a queryset
 variable holds, a write through a helper, or a check in a caller. A new read-back helper must be
 added to the rule. `update_existing_row` and `write_interface_row` read their rows back themselves.

@@ -2,13 +2,11 @@
 Server-key scoping for the device-field update views, driven by real plugin settings.
 
 ``UpdateDeviceNameView.post`` rebinds the LibreNMS client to the POSTed ``server_key``
-before resolving the Virtual-Chassis sync device. The sync-device resolution must be
-scoped to that same server, otherwise a multi-server VC whose viewed member has no own
-``librenms_id`` is renamed from the WRONG LibreNMS device (the server-agnostic
-"any member with any id" fallback picks a sibling linked to a different server).
+before it reads the ID of the Virtual-Chassis master. The ID must come from that same
+server, otherwise a multi-server VC member is renamed from the WRONG LibreNMS device.
 
-These tests drive the real ``get_librenms_sync_device`` against a real DB Virtual Chassis,
-the real ``settings.PLUGINS_CONFIG`` path, and a loopback LibreNMS server.
+These tests drive the real owner rule against a real DB Virtual Chassis, the real
+``settings.PLUGINS_CONFIG`` path, and a loopback LibreNMS server.
 """
 
 import copy
@@ -48,42 +46,31 @@ def _plugins_config_with_servers(servers):
 
 @pytest.mark.django_db
 class TestUpdateDeviceNameServerScoping:
-    def test_vc_sync_device_resolved_for_posted_server(self, librenms_server):
+    def test_vc_master_mapping_resolved_for_posted_server(self, librenms_server):
         """
-        A POST scoped to ``siteB`` must resolve the siteB-linked sibling, not the default one.
+        A POST scoped to ``siteB`` must read the siteB ID of the chassis master, not its default ID.
 
-        VC layout (viewed member has no own librenms_id):
-          * sib_default -> {"default": {"id": 10}}  (host id only on the default server)
-          * sib_siteB   -> {"siteB": {"id": 20}}    (host id only on siteB)
-
-        With the bug (no server_key passed), ``get_librenms_sync_device`` runs its
-        server-agnostic "any member with any id" order and returns ``sib_default``. Scoped to
-        siteB it must return ``sib_siteB``. We record the device handed to ``get_librenms_id``.
+        VC layout (the viewed member has no own librenms_id):
+          * master -> {"default": 10, "siteB": 20}
         """
         from dcim.models import VirtualChassis
 
         from netbox_librenms_plugin.views.sync.device_fields import UpdateDeviceNameView
 
         vc = VirtualChassis.objects.create(name="vcscope")
-
-        # Names/positions chosen so the default-linked sibling iterates first — that is the
-        # member the buggy (server-agnostic) resolution would wrongly pick.
-        sib_default = make_device("vcscope-a-default")
-        sib_default.virtual_chassis = vc
-        sib_default.vc_position = 1
-        sib_default.save()
-        map_device_to_librenms(sib_default, 10, server_key="default")
-
-        sib_siteB = make_device("vcscope-b-siteb")
-        sib_siteB.virtual_chassis = vc
-        sib_siteB.vc_position = 2
-        sib_siteB.save()
-        map_device_to_librenms(sib_siteB, 20, server_key="siteB")
+        master = make_device("vcscope-a-master")
+        master.virtual_chassis = vc
+        master.vc_position = 1
+        master.save()
+        map_device_to_librenms(master, 10, server_key="default")
+        map_device_to_librenms(master, 20, server_key="siteB")
+        vc.master = master
+        vc.save()
 
         viewed = make_device("vcscope-c-viewed")
         viewed.virtual_chassis = vc
         viewed.vc_position = 3
-        viewed.save()  # no librenms_id -> delegates to the VC sync device
+        viewed.save()  # no librenms_id -> takes the name from the chassis master
 
         servers = {key: {"librenms_url": librenms_server.url, "api_token": "test-token"} for key in TWO_SERVERS}
         librenms_server.device_info_response(device_id=20, hostname="siteb-source", serial="SITEB20")

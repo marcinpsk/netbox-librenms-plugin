@@ -12,6 +12,12 @@ from netbox.plugins import get_plugin_config
 
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 from netbox_librenms_plugin.ip_addressing import primary_ips
+from netbox_librenms_plugin.mapping_owner import (
+    ensure_locked_mapping_owner,
+    ensure_mapping_owner,
+    lock_owner_chassis,
+    mapping_ownership,
+)
 from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
     assign_own,
@@ -69,13 +75,18 @@ def stored_librenms_id(obj, server_key):
         server_key (str): The LibreNMS server key.
 
     Returns:
-        int | None: The normalized stored or cached ID, or None.
+        int | None: The normalized stored or cached ID, or None. A virtual chassis member that
+            does not hold the chassis mappings gets no cached ID.
 
     """
     librenms_id = read_mapping(obj).own_id(server_key)
     if librenms_id is not None:
         return librenms_id
-    return coerce_librenms_id(cache.get(librenms_id_cache_key(obj, server_key)))
+    cached = coerce_librenms_id(cache.get(librenms_id_cache_key(obj, server_key)))
+    # A chassis member that does not hold the chassis mappings reads no ID cached before it joined.
+    if cached is not None and getattr(obj, "virtual_chassis_id", None) is not None:
+        return cached if mapping_ownership(obj).owner is obj else None
+    return cached
 
 
 def _validate_api_url(url):
@@ -501,6 +512,8 @@ class LibreNMSAPI:
         Raises:
             LibreNMSIDConflictError: The primary IP addresses, or their DNS names, name different
                 LibreNMS devices, or another object owns the discovered ID.
+            MappingOwnerError: Discovery found an ID for a virtual chassis member that does not hold
+                the chassis mappings, so the ID is not stored.
 
         """
         librenms_id = self.get_stored_librenms_id(obj)
@@ -590,6 +603,7 @@ class LibreNMSAPI:
         """
         if can_store_device_mapping(obj):
             with transaction.atomic():
+                chassis_id = lock_owner_chassis(type(obj), obj.pk)
                 try:
                     locked_obj, conflict = lock_librenms_id_assignment(
                         librenms_id,
@@ -621,6 +635,8 @@ class LibreNMSAPI:
                             f"LibreNMS ID {librenms_id} is already assigned to {object_label} '{conflict.name}'"
                         ),
                     )
+                # Only the mapping owner stores an ID: a second member with an ID splits the chassis mapping.
+                ensure_locked_mapping_owner(locked_obj, chassis_id)
                 locked_obj.snapshot()
                 persist_mapping(
                     locked_obj,
@@ -631,7 +647,9 @@ class LibreNMSAPI:
             # would discard every custom-field edit the caller has not saved yet.
             copy_persisted_mapping(locked_obj, obj)
         else:
-            # Use cache as fallback
+            # A chassis member that is not the owner has no LibreNMS identity of its own, so nothing is cached.
+            if getattr(obj, "virtual_chassis_id", None) is not None:
+                ensure_mapping_owner(obj)
             cache_key = self._get_cache_key(obj)
             cache.set(cache_key, librenms_id, timeout=self.cache_timeout)
 

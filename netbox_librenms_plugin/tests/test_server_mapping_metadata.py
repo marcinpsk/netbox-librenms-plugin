@@ -12,7 +12,7 @@ from netbox_librenms_plugin.server_mappings import (
     mapped_device_servers,
     read_mapping,
 )
-from netbox_librenms_plugin.server_selection import get_librenms_sync_device
+from netbox_librenms_plugin.mapping_owner import OwnerProblem, mapping_ownership
 from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis_members
 from netbox_librenms_plugin.tests.mapping_fixtures import mapping_summary, seed_mapping
 
@@ -74,10 +74,13 @@ def test_identity_reader_and_writer_reject_reserved_metadata_key():
 
 
 @pytest.mark.django_db
-def test_numeric_preference_metadata_cannot_become_vc_mapping_owner():
-    """VC owner discovery ignores metadata even when its malformed value looks like an ID."""
-    _chassis, (metadata_member, mapping_owner) = make_virtual_chassis_members("reserved-owner", count=2)
+def test_numeric_preference_metadata_on_another_member_is_misplaced_mapping_data():
+    """A preference whose value looks like an ID never makes a member the owner: it is misplaced mapping data."""
+    _chassis, (master, metadata_member) = make_virtual_chassis_members("reserved-owner", count=2)
+    seed_mapping(master, "primary", own=13523)
     seed_mapping(metadata_member, "13522", preferred=True)
-    seed_mapping(mapping_owner, "primary", own=13523)
 
-    assert get_librenms_sync_device(metadata_member, server_key=None) == mapping_owner
+    ownership = mapping_ownership(master)
+
+    assert ownership.problem is OwnerProblem.MISPLACED
+    assert (ownership.master, ownership.holders) == (master, (metadata_member,))

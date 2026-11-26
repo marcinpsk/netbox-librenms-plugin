@@ -625,9 +625,10 @@ def test_committed_interface_sync_invalidates_only_mapped_page_and_shared_snapsh
     _configure_servers(settings)
     settings.PLUGINS_CONFIG["netbox_librenms_plugin"]["servers"]["primary"]["cache_timeout"] = 60
     settings.PLUGINS_CONFIG["netbox_librenms_plugin"]["servers"]["secondary"]["cache_timeout"] = 600
-    _chassis, (page_device, secondary_owner, sibling) = make_virtual_chassis_members("cache-scope", count=3)
-    seed_mapping(page_device, "primary", own=41)
-    seed_mapping(secondary_owner, "secondary", own=42)
+    _chassis, (page_device, _member, sibling) = make_virtual_chassis_members("cache-scope", count=3)
+    # The master holds the mapping of the chassis on every server.
+    seed_mapping(page_device, "primary", own=41, save=False)
+    seed_mapping(page_device, "secondary", own=42)
 
     source = seed_interfaces_snapshot(
         page_device,
@@ -649,12 +650,11 @@ def test_committed_interface_sync_invalidates_only_mapped_page_and_shared_snapsh
     seed_ip_snapshot(page_device, [], server_key="primary")
 
     for data_type in ("ports", "links", "inventory"):
-        _seed_snapshot(data_type, secondary_owner, "secondary")
         _seed_snapshot(data_type, page_device, "secondary")
     for subject in (page_device, sibling):
         _seed_snapshot("vlans", subject, "secondary")
         seed_ip_snapshot(subject, [], server_key="secondary", source_id=42)
-    cache.set(_vlan_overrides_key(secondary_owner, "secondary"), {"200": "2"}, timeout=300)
+    cache.set(_vlan_overrides_key(page_device, "secondary"), {"200": "2"}, timeout=300)
 
     for data_type in ("ports", "inventory", "vlans"):
         _seed_snapshot(data_type, page_device, "unmapped")
@@ -683,8 +683,8 @@ def test_committed_interface_sync_invalidates_only_mapped_page_and_shared_snapsh
         assert cache.get(_cache_key(data_type, page_device, "primary")) is None
 
     for data_type in ("ports", "links", "inventory"):
-        assert cache.get(_cache_key(data_type, secondary_owner, "secondary")) is None
         assert cache.get(_cache_key(data_type, page_device, "secondary")) is None
+    assert cache.get(_vlan_overrides_key(page_device, "secondary")) is None
     for data_type in ("ip_addresses", "vlans"):
         assert cache.get(_cache_key(data_type, page_device, "secondary")) is None
         assert cache.get(_cache_key(data_type, sibling, "secondary")) is not None
@@ -2990,7 +2990,7 @@ def test_cache_mutation_resolves_the_shared_owner_once_per_server(
     monkeypatch,
     django_capture_on_commit_callbacks,
 ):
-    """The post-commit cleanup must not re-resolve the chassis owner for every tab."""
+    """The post-commit cleanup must not re-resolve the chassis owner for every tab or server."""
     _configure_servers(settings)
     _chassis, (page_device, _sibling) = make_virtual_chassis_members("cache-owner-resolution", count=2)
     seed_mapping(page_device, "primary", own=61)
@@ -3020,14 +3020,21 @@ def test_cache_mutation_resolves_the_shared_owner_once_per_server(
 
     from netbox_librenms_plugin import sync_cache
 
-    resolved_server_keys = []
-    real_get_sync_device = sync_cache.get_librenms_sync_device
+    resolutions = []
+    coordinators = []
+    real_ownership = sync_cache.mapping_ownership
+    real_init = sync_cache.SyncCacheConsistency.__init__
 
-    def counting_get_sync_device(device, server_key=None):
-        resolved_server_keys.append(server_key)
-        return real_get_sync_device(device, server_key=server_key)
+    def counting_ownership(subject):
+        resolutions.append(subject.pk)
+        return real_ownership(subject)
 
-    monkeypatch.setattr(sync_cache, "get_librenms_sync_device", counting_get_sync_device)
+    def counting_init(coordinator, subject):
+        coordinators.append(subject.pk)
+        real_init(coordinator, subject)
+
+    monkeypatch.setattr(sync_cache, "mapping_ownership", counting_ownership)
+    monkeypatch.setattr(sync_cache.SyncCacheConsistency, "__init__", counting_init)
     with django_capture_on_commit_callbacks(execute=True):
         response = client.post(
             sync_url,
@@ -3040,8 +3047,9 @@ def test_cache_mutation_resolves_the_shared_owner_once_per_server(
         )
 
     assert response.status_code == 302
-    assert resolved_server_keys, "the shared owner must still be resolved for the mapped server"
-    assert len(resolved_server_keys) == len(set(resolved_server_keys)), resolved_server_keys
+    assert resolutions, "the shared owner must still be resolved for the mapped server"
+    # Each coordinator resolves the chassis owner at most once, whatever its tabs and servers.
+    assert len(resolutions) <= len(coordinators), (resolutions, coordinators)
 
 
 @pytest.mark.django_db

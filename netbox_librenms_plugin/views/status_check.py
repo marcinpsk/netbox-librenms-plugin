@@ -11,8 +11,8 @@ from netbox_librenms_plugin.forms import (
     DeviceStatusFilterForm,
     VirtualMachineStatusFilterForm,
 )
+from netbox_librenms_plugin.mapping_owner import chassis_ownerships
 from netbox_librenms_plugin.server_mappings import prefetch_mappings
-from netbox_librenms_plugin.server_selection import chassis_sync_devices
 from netbox_librenms_plugin.tables.device_status import DeviceStatusTable
 from netbox_librenms_plugin.tables.VM_status import VMStatusTable
 from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE, TransactionConflict, classify_conflict
@@ -54,7 +54,7 @@ class DeviceStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gen
 
     def get_queryset(self, request):
         """Override get_queryset to return filtered devices and check LibreNMS status."""
-        self.sync_by_chassis = {}
+        self.ownerships = {}
         # Only get devices if filters are applied
         if self.request.GET:
             queryset = (
@@ -77,7 +77,13 @@ class DeviceStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gen
 
             # Check LibreNMS status for each device
             devices = prefetch_mappings(queryset)
+            # One member query serves every listed chassis.
+            self.ownerships = chassis_ownerships(devices)
             for device in devices:
+                ownership = self.ownerships.get(device.virtual_chassis_id)
+                if ownership is not None and (ownership.owner is None or ownership.owner.pk != device.pk):
+                    # The row shows the chassis outcome; discovery runs only on the mapping owner.
+                    continue
                 try:
                     librenms_id, lookup_error = self.resolve_librenms_id(device)
                     if lookup_error is not None:
@@ -105,8 +111,6 @@ class DeviceStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gen
             for device_id, status in device_status_map.items():
                 case_when.append(When(pk=device_id, then=Value(status)))
 
-            # A chassis row links to its sync member; one member query serves every listed chassis.
-            self.sync_by_chassis = chassis_sync_devices(devices)
             queryset = queryset.annotate(
                 librenms_status=Case(*case_when, default=Value(None), output_field=BooleanField())
             )
@@ -116,9 +120,14 @@ class DeviceStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gen
         return Device.objects.none()
 
     def get_table(self, data, request, bulk_actions=True):
-        """Return the status table with the sync member of each listed chassis."""
+        """Return the status table with the mapping ownership of each listed chassis."""
         table = super().get_table(data, request, bulk_actions)
-        table.sync_by_chassis = self.sync_by_chassis
+        table.ownerships = self.ownerships
+        owner_pks = {ownership.owner.pk for ownership in self.ownerships.values() if ownership.owner is not None}
+        # A row names the chassis master only when the user may view it.
+        table.visible_owner_pks = frozenset(
+            Device.objects.restrict(request.user, "view").filter(pk__in=owner_pks).values_list("pk", flat=True)
+        )
         return table
 
 

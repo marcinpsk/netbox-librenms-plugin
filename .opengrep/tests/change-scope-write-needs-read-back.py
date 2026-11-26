@@ -43,3 +43,19 @@ def ok_refusal_helper(self, Device, pk, transaction):
         device.save()
         if refusal := self._refuse_rows_outside_change_scope(self.request, [device]):
             return refusal
+
+
+def bad_mapping_write(self, Device, pk, change, save_mapping_fields):
+    # ruleid: change-scope-write-needs-read-back
+    owner = ensure_mapping_owner(get_object_or_404(self.restricted_queryset(Device, "change"), pk=pk))
+    if change.changed:
+        persist_mapping(owner, change, write=save_mapping_fields)
+
+
+def ok_mapping_read_back(self, Device, pk, change, save_mapping_fields):
+    # ok: change-scope-write-needs-read-back
+    owner = ensure_mapping_owner(get_object_or_404(self.restricted_queryset(Device, "change"), pk=pk))
+    if change.changed:
+        persist_mapping(owner, change, write=save_mapping_fields)
+        if not saved_in_scope(owner, self.request.user, "change"):
+            raise PermissionError

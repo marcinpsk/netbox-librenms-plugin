@@ -23,6 +23,7 @@ class LibreNMSSyncConfig(PluginConfig):
     middleware = [
         "netbox_librenms_plugin.middleware.LockConflictMiddleware",
         "netbox_librenms_plugin.middleware.RuleConfigurationErrorMiddleware",
+        "netbox_librenms_plugin.middleware.MappingOwnerMiddleware",
     ]
     default_settings = {
         "verify_ssl": True,

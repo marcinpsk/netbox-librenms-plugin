@@ -585,18 +585,18 @@ def test_capture_view_denies_device_outside_users_object_scope(recording_server)
 
 @pytest.mark.django_db
 def test_capture_view_denies_a_hidden_virtual_chassis_sync_owner(recording_server, configure_librenms):
-    """A visible VC member must not expose capture data owned by a hidden member."""
+    """A visible VC member must not expose capture data owned by its hidden master."""
     from core.models import ObjectType
     from dcim.models import Device
-    from django.http import Http404
     from users.models import ObjectPermission
 
+    from netbox_librenms_plugin.mapping_owner import MappingOwnerError
     from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
 
     server, api = recording_server(load_recording("cisco-stackwise-3member"))
     visible = make_device("capture-visible-member")
     hidden = seed_mapping(make_device("capture-hidden-owner"), "test", own=_STACK_RECORDING_ID, oob=1001)
-    make_virtual_chassis("capture-scoped-vc", visible, hidden)
+    make_virtual_chassis("capture-scoped-vc", hidden, visible)
     user = get_user_model().objects.create_user(username="capture-vc-viewer", password="x")
     permission = ObjectPermission.objects.create(
         name="view-capture-page-member",
@@ -619,7 +619,8 @@ def test_capture_view_denies_a_hidden_virtual_chassis_sync_owner(recording_serve
         }
     )
 
-    with pytest.raises(Http404):
+    # A member that is not the master is refused before any read of the master or of LibreNMS.
+    with pytest.raises(MappingOwnerError):
         _view_with_api(api).get(request, device_id=visible.pk)
 
 
@@ -785,10 +786,11 @@ def test_a_capture_without_a_serial_does_not_need_its_serial_rules(recording_ser
 
 
 @pytest.mark.django_db
-def test_a_capture_under_a_master_outside_the_chassis_renders_the_unavailable_reason(recording_server):
+def test_a_capture_under_a_master_outside_the_chassis_is_refused(recording_server):
+    """A master outside the chassis is no mapping owner, so the capture reads nothing."""
     from dcim.models import VirtualChassis
 
-    from netbox_librenms_plugin.serial_identity import UNAVAILABLE_MASTER_LINK
+    from netbox_librenms_plugin.mapping_owner import MappingOwnerError
 
     recording = load_recording("iosxe-c8300")
     server, api = recording_server(recording)
@@ -799,21 +801,18 @@ def test_a_capture_under_a_master_outside_the_chassis_renders_the_unavailable_re
     device.save()
     VirtualChassis.objects.filter(pk=chassis.pk).update(master=make_device("capture-outside-master-other"))
 
-    response = _run_capture(_view_with_api(api), server, device)
-
-    html = unescape(response.content.decode())
-    assert response.status_code == 200
-    assert UNAVAILABLE_MASTER_LINK in html
-    assert "Anonymized recording" not in html
+    with pytest.raises(MappingOwnerError):
+        _run_capture(_view_with_api(api), server, device)
+    assert server.requests == []
 
 
 @pytest.mark.django_db
 def test_a_capture_never_reads_a_linked_master_outside_the_chassis(recording_server):
-    """No member holds a mapping, and the chassis names a linked master outside it: the owner stays a member."""
+    """No member holds a mapping, and the chassis names a linked master outside it: the chassis has no owner."""
     from dcim.models import Device, VirtualChassis
     from ipam.models import IPAddress
 
-    from netbox_librenms_plugin.server_selection import get_librenms_sync_device
+    from netbox_librenms_plugin.mapping_owner import MappingOwnerError, OwnerProblem, mapping_ownership
 
     recording = load_recording("iosxe-c8300")
     server, api = recording_server(recording)
@@ -827,21 +826,22 @@ def test_a_capture_never_reads_a_linked_master_outside_the_chassis(recording_ser
     Device.objects.filter(pk=outsider.pk).update(primary_ip4=address)
     VirtualChassis.objects.filter(pk=chassis.pk).update(master=outsider)
     device.refresh_from_db()
-    assert get_librenms_sync_device(device, server_key="test") == device
+    assert mapping_ownership(device).problem is OwnerProblem.NO_MASTER
 
-    response = _run_capture(_view_with_api(api), server, device)
-
-    assert response.status_code == 200
-    assert "Anonymized recording" not in response.content.decode()
+    # The capture refuses a chassis without a mapping owner before it reads LibreNMS.
+    with pytest.raises(MappingOwnerError):
+        _run_capture(_view_with_api(api), server, device)
+    assert server.requests == []
 
 
 @pytest.mark.django_db
-def test_a_junos_stack_under_a_master_outside_the_chassis_renders_the_unavailable_reason(recording_server):
-    """Another serial context can explain the FPC stack, but the device's own context is Unavailable."""
+def test_a_junos_stack_under_a_master_outside_the_chassis_is_refused(recording_server):
+    """Another serial context can explain the FPC stack, but a master outside the chassis is no mapping owner."""
     from dcim.models import VirtualChassis
 
     from netbox_librenms_plugin.data_shapes.signature import compute_shape_signature
-    from netbox_librenms_plugin.serial_identity import UNAVAILABLE_MASTER_LINK, plain_context
+    from netbox_librenms_plugin.mapping_owner import MappingOwnerError
+    from netbox_librenms_plugin.serial_identity import plain_context
 
     recording = deepcopy(load_recording("juniper-ex4400-vc-2member"))
     assert compute_shape_signature(recording, serial_context=plain_context())["virtual_chassis"]["present"]
@@ -858,12 +858,9 @@ def test_a_junos_stack_under_a_master_outside_the_chassis_renders_the_unavailabl
     device.save()
     VirtualChassis.objects.filter(pk=chassis.pk).update(master=make_device("capture-junos-outside-master-other"))
 
-    response = _run_capture(_view_with_api(api), server, device)
-
-    html = unescape(response.content.decode())
-    assert response.status_code == 200
-    assert UNAVAILABLE_MASTER_LINK in html
-    assert "Anonymized recording" not in html
+    with pytest.raises(MappingOwnerError):
+        _run_capture(_view_with_api(api), server, device)
+    assert server.requests == []
 
 
 @pytest.mark.django_db

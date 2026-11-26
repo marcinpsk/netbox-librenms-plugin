@@ -23,6 +23,7 @@ from ipam.models import IPAddress, VRF
 
 from netbox_librenms_plugin import source_cache
 from netbox_librenms_plugin.acquisition.registry import Resource
+from netbox_librenms_plugin.mapping_owner import MISPLACED_MESSAGE
 from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab
 from netbox_librenms_plugin.tests.conftest import (
@@ -1575,8 +1576,8 @@ def test_create_missing_interfaces_does_not_adopt_a_hidden_existing_interface(cl
     [
         # The migration releases the page's LibreNMS ID, so its earlier snapshot no longer binds.
         ("page", "Cache has expired. Please refresh the IP data."),
-        # The page keeps its snapshot; the writer refuses the migrated member that owns the interface.
-        ("member", "read-only because it was migrated"),
+        # A marker on a member that is not the master is misplaced mapping data, so the writer refuses the chassis.
+        ("member", MISPLACED_MESSAGE),
     ],
 )
 def test_direct_ip_sync_post_does_not_mutate_a_migrated_donor(client, settings, migrated, refusal):

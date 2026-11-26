@@ -61,7 +61,7 @@ def _key(owner, resource, server_key):
 
 def snapshot_key(subject, resource, server_key):
     """Return the cache key of the resource's snapshot on one server."""
-    return _key(resource_owner(subject, resource, server_key), resource, server_key)
+    return _key(resource_owner(subject, resource), resource, server_key)
 
 
 def can_view_serial_ports(user, owner):
@@ -192,7 +192,7 @@ def store(subject, resource, snapshot):
     current = type(subject).objects.filter(pk=subject.pk).first()
     if current is None:
         return False
-    owner = resource_owner(current, resource, snapshot.server_key)
+    owner = resource_owner(current, resource)
     key = _key(owner, resource, snapshot.server_key)
     if not _binding_holds(snapshot, resource, owner):
         return False
@@ -225,7 +225,7 @@ def read(subject, resource, server_key, *, user=None):
     current = type(subject).objects.filter(pk=subject.pk).first()
     if current is None:
         return None
-    owner = resource_owner(current, resource, server_key)
+    owner = resource_owner(current, resource)
     snapshot = SourceSnapshot.from_payload(cache.get(_key(owner, resource, server_key)))
     if snapshot is None or resource not in snapshot.resources or not _binding_holds(snapshot, resource, owner):
         return None
@@ -255,7 +255,7 @@ def receipt_owner(subject, resource, server_key, snapshot, *, user=None):
     current = type(subject).objects.filter(pk=subject.pk).first()
     if current is None:
         return None
-    owner = resource_owner(current, resource, server_key)
+    owner = resource_owner(current, resource)
     if not _binding_holds(snapshot, resource, owner):
         return None
     if user is not None and not snapshot_visible(user, snapshot, resource):

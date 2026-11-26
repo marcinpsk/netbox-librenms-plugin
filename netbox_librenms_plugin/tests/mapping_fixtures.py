@@ -248,3 +248,31 @@ def custom_fields_without_mapping(custom_fields):
     rest = copy.deepcopy(custom_fields)
     rest.pop(_MAPPING_KEY, None)
     return rest
+
+
+def mapped_on_server_constraint(server):
+    """Return an object permission constraint that admits only objects with an entry on *server*, as an operator can write one."""
+    return {f"{_STORAGE_FIELD}__{_MAPPING_KEY}__{server}__isnull": False}
+
+
+def seed_legacy(obj, legacy_id, *, save=True):
+    """Seed the bare legacy value *legacy_id* on *obj*, which resolves on every server; return *obj*."""
+    fields = _put_stored_value(obj, legacy_id)
+    if read_mapping(obj).container is not ContainerStatus.LEGACY:
+        raise AssertionError("The legacy seed must read as a legacy mapping.")
+    if save:
+        _save(obj, fields)
+    return obj
+
+
+def seed_malformed_entry(obj, server, entry, *, save=True):
+    """Seed the hand-edited *entry* on *server*, which no builder writes; the other servers stay. Return *obj*."""
+    stored = copy.deepcopy(_stored_value(obj))
+    stored = {} if stored is None else stored
+    if not isinstance(stored, dict):
+        raise ValueError(f"Cannot store an entry on a {read_mapping(obj).container} mapping.")
+    stored[server] = copy.deepcopy(entry)
+    fields = _put_stored_value(obj, stored)
+    if save:
+        _save(obj, fields)
+    return obj

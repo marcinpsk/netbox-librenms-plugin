@@ -283,8 +283,9 @@ class TestBuildAllServerMappings:
 
 
 class TestVirtualChassisLookup:
-    def test_explicit_server_mapping_on_another_member_wins_over_legacy_id(self):
-        from netbox_librenms_plugin.server_selection import get_librenms_sync_device
+    def test_a_server_mapping_on_another_member_beside_a_legacy_master_id_is_misplaced(self):
+        """No member wins: the master holds a legacy ID, so a mapping on another member is misplaced."""
+        from netbox_librenms_plugin.mapping_owner import OwnerProblem, mapping_ownership
 
         viewed = _netbox_device("vc-viewed")
         sync_member = _netbox_device("vc-sync")
@@ -292,11 +293,14 @@ class TestVirtualChassisLookup:
         seed_stored_mapping(viewed, 41, save=True)
         seed_mapping(sync_member, "default", own=42)
 
-        assert get_librenms_sync_device(viewed, server_key="default") == sync_member
+        ownership = mapping_ownership(viewed)
+
+        assert ownership.problem is OwnerProblem.MISPLACED
+        assert (ownership.master, ownership.holders) == (viewed, (sync_member,))
 
     def test_non_vc_device_is_its_own_lookup_device(self):
-        from netbox_librenms_plugin.server_selection import get_librenms_sync_device
+        from netbox_librenms_plugin.mapping_owner import mapping_owner
 
         device = _netbox_device("standalone")
 
-        assert get_librenms_sync_device(device, server_key="default") == device
+        assert mapping_owner(device) is device

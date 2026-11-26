@@ -30,7 +30,7 @@
 - IP assessment receives the actor and interface-name option. The web adapter adds URLs. IP GET requests do not store interface bindings. VLAN assessment owns source indexing and comparison.
 - Snapshots and tab state use the same object, server, plugin-version and NetBox-release namespace.
 - Source refresh requires the request. Cable reads check serial visibility for the current actor. Cable actions use stored port evidence and require a refresh when that evidence is absent.
-- Cable rows use stable port bindings to select a Virtual Chassis member, then `get_virtual_chassis_member()` when no binding exists. `get_librenms_sync_device()` selects the resource owner by VC priority.
+- Cable rows use stable port bindings to select a Virtual Chassis member, then `get_virtual_chassis_member()` when no binding exists. `mapping_owner()` returns the chassis master, the one owner of the LibreNMS mappings of a Virtual Chassis.
 
 ## Developer Workflow
 - Prefer the devcontainer commands (`netbox-run`, `netbox-run-bg`, `netbox-reload`, `netbox-logs`) described in `.devcontainer/README.md`. They manage NetBox + plugin reloading.

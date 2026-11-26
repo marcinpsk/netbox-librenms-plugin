@@ -1,0 +1,38 @@
+{# A virtual chassis with no mapping owner: no sync, discovery or link action runs until the problem is fixed. #}
+<div class="alert alert-danger d-flex align-items-start" role="alert" id="librenms-chassis-owner-problem"
+     data-owner-problem="{{ problem.problem }}">
+    <i class="mdi mdi-alert-octagon me-2 fs-3" aria-hidden="true"></i>
+    <div class="flex-grow-1">
+        {% if problem.problem == "no_master" %}
+        <strong>This virtual chassis has no master.</strong>
+        The master holds the LibreNMS mappings of the chassis, so sync is disabled for every member.
+        Set the master of the
+        {% if problem.chassis_url %}<a href="{{ problem.chassis_url }}" class="alert-link">virtual chassis</a>{% else %}virtual chassis{% endif %},
+        then reload this page.
+        {% else %}
+        <strong>LibreNMS mappings are stored on a member that is not the master.</strong>
+        The master
+        {% if problem.master %}<a href="{{ problem.master.url }}" class="alert-link">{{ problem.master.name }}</a>{% endif %}
+        holds the LibreNMS mappings of the chassis. Sync and discovery are disabled for every member until
+        the mapping data is on the master.
+        <div class="mt-1">
+            Members that hold mapping data:
+            {% for holder in problem.holders %}<a href="{{ holder.url }}" class="alert-link">{{ holder.name }}</a>{% if not forloop.last %}, {% endif %}{% endfor %}{% if problem.hidden_holders %}{% if problem.holders %}, {% endif %}{{ problem.hidden_holders }} outside your view scope{% endif %}.
+        </div>
+        {% if problem.can_move %}
+        <form method="post" action="{{ problem.move_url }}" id="librenms-move-to-master" class="mt-2">
+            {% csrf_token %}
+            <input type="hidden" name="tab" value="{{ active_sync_tab|default:'' }}">
+            <button type="submit" class="btn btn-sm btn-warning"
+                    data-confirm="Move the LibreNMS mapping data of each member to the master?">
+                <i class="mdi mdi-arrow-collapse-up" aria-hidden="true"></i> Move to master
+            </button>
+        </form>
+        {% else %}
+        <div class="text-muted small mt-1">
+            To move the data, you need change permission on the master and on each member that holds mapping data.
+        </div>
+        {% endif %}
+        {% endif %}
+    </div>
+</div>
