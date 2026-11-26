@@ -11,7 +11,7 @@ All four sync resources (interfaces, cables, IP addresses, VLANs) follow the sam
 1. **Base views** (`views/base/`) — abstract classes that define the data pipeline:
    - `BaseLibreNMSSyncView` — tabbed sync page, orchestrates all tabs via abstract `get_*_context()` methods.
    - `BaseInterfaceTableView`: acquire the interfaces snapshot → assess it (`assessment.interfaces.assess_interfaces`) → compare with NetBox interfaces → render table.
-   - `BaseCableTableView` — fetch links → match remote devices → check cable status → render table.
+   - `BaseCableTableView`: acquire the cables snapshot → assess it (`assessment.cables.assess`) → match remote devices → check cable status → render table.
    - `BaseIPAddressTableView` — acquire the IP snapshot → assess it for the user (`assess_snapshot`) → render table.
    - `BaseVLANTableView` — acquire the VLAN snapshot → compare with NetBox VLANs → auto-select groups → render table.
 
@@ -25,13 +25,13 @@ All four sync resources (interfaces, cables, IP addresses, VLANs) follow the sam
    - Cable sync returns `_cable_sync_content.html` for HTMX so the response matches `#cable-sync-content`. Other actions can use `HX-Redirect` when they require full navigation.
 
 ## Data Pipeline (Base Views)
-The interfaces, IP and VLAN tabs follow: **acquire → store → assess → render**.
+The interfaces, cables, IP and VLAN tabs follow: **acquire → store → assess → render**.
 
 - **Acquire:** `acquisition.coordinator.acquire(subject, server_key=..., resources=[...])` obtains the
   LibreNMS responses with no request or user, reads the mapping and writes nothing. It returns a
   `SourceSnapshot`: each response with its outcome. `snapshot.value(resource, part)` raises
   `IncompleteSource` for a part that was not obtained; never read a failed part as an empty list.
-- **Store:** `source_cache.refresh()` runs after discovery and stores the snapshot under the
+- **Store:** `source_cache.refresh(request, subject, resource, server_key)` runs after discovery and stores the snapshot under the
   `CacheMixin` key; `source_cache.read()` is the one reader for the tab, the verify views and the sync.
 - **Assess:** derive the rows at read time, for the current user. The snapshot holds source facts only.
   The snapshot's `finished_at` is the tab's "last updated" time.
@@ -39,7 +39,17 @@ The interfaces, IP and VLAN tabs follow: **acquire → store → assess → rend
   needs the ports, the port_stack and, when port_stack has pairs, a device OS. A linked OOB controller
   is its own mapping: its failure blocks only the OOB rows.
 
-The cables and modules tabs still follow **fetch → cache → compare → render**:
+- **Cables:** host and OOB rows each need their own links and ports. A failed neighbour ports request
+  blocks only that neighbour's rows. The 15-second neighbour budget records omitted requests as failed.
+  `source_cache.refresh()` checks ConsoleServerPort visibility before it enables serial acquisition.
+  Each read checks the actor's visibility again. Serial rows need obtained sensors and a valid
+  projection. Unrequested sensors do not produce a warning. A refresh never carries old serial rows
+  forward. Names, aliases, port records and row IDs are assessed on each read.
+  The tab, verify, sync, picker and far-end creation read through `source_cache.read()`.
+  Sync and far-end creation use the stored port evidence. Missing evidence requires a refresh.
+  Manual picks bind to `snapshot_id` and use the owner's snapshot key. An expired picker asks for a refresh.
+
+The modules tab still follows **fetch → cache → compare → render**:
 
 - **Fetch:** Call LibreNMS API (e.g., `get_ports()`).
 - **Cache:** Store results via `CacheMixin` keys: `librenms_{data_type}_{model_name}_{pk}_{server_key}`. Every key needs a configured server key; a blank key raises `ValueError`.

@@ -91,6 +91,16 @@ def test_the_netbox_only_delete_posts_the_server_key_of_the_sync_page(page):
     assert "primary" not in (info.value.post_data or "")
 
 
+def test_cable_verify_posts_the_interface_name_option_from_the_page(page):
+    _load(page)
+    page.locator('input[name="interface_name_field"]').evaluate("input => input.value = 'ifDescr'")
+
+    with page.expect_request(CABLE_VERIFY_URL) as info:
+        page.evaluate("handleCableChange(document.getElementById('cable-select'), '2')")
+
+    assert info.value.post_data_json["interface_name_field"] == "ifDescr"
+
+
 def test_the_selection_store_is_scoped_to_the_server_of_the_sync_page(page):
     _load(page)
     key = page.evaluate("_selectionStorageKey(document.getElementById('librenms-interface-table'))")

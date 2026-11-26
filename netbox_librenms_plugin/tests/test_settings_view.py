@@ -5,6 +5,7 @@ from django.urls import reverse
 
 from netbox_librenms_plugin.models import LibreNMSSettings
 from netbox_librenms_plugin.tests.conftest import cable_together, make_serial_device, make_superuser
+from netbox_librenms_plugin.tests.source_snapshot_helpers import sensor_row, seed_cables_snapshot
 
 
 @pytest.mark.django_db
@@ -486,20 +487,17 @@ class TestCableSyncSettingsTab:
         local, (csp,), _ = make_serial_device("settings-tag-local", csp_names=["ttyS1"])
         remote, _, (cp,) = make_serial_device("settings-tag-remote", cp_names=["console"])
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        row = {
-            "local_port": csp.name,
-            "local_port_id": f"serial:{csp.pk}",
-            "_source": "serial",
-            "device_id": local.pk,
-            "remote_device": remote.name,
-            "sensor_id": csp.pk,
-            "sensor_index_int": 1,
-            "is_configured": True,
-        }
-        cache_key = object.__new__(SyncCablesView).get_cache_key(local, "links", server_key)
-        cache.set(cache_key, {"links": [row]}, timeout=300)
+        from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
-        row_id = row["local_port_id"]
+        seed_mapping(local, server_key, own=403)
+        cache_key = object.__new__(SyncCablesView).get_cache_key(local, "links", server_key)
+        seed_cables_snapshot(
+            local,
+            sensors=[sensor_row(1001, 1, device_id=403, sensor_descr=f"{remote.name} Status")],
+            server_key=server_key,
+        )
+
+        row_id = "serial:1001"
         try:
             synced = client.post(
                 reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[local.pk]),

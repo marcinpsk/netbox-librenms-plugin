@@ -24,12 +24,14 @@ ports_url, initial_devices (label-matched device prefill, may be empty).
 </div>
 {% else %}
 <form hx-post="{{ post_url }}" hx-target="#cable-sync-content" hx-swap="innerHTML"
+      hx-on::response-error="var error = this.querySelector('[data-picker-error]'); error.textContent = event.detail.xhr.responseText || 'Could not select the remote port. Please try again.'; error.hidden = false"
       hx-disabled-elt="find button[type=submit]">
   {% csrf_token %}
   <input type="hidden" name="row_id" value="{{ row.row_id }}">
   {% if server_key %}<input type="hidden" name="server_key" value="{{ server_key }}">{% endif %}
   <div class="modal-body" hx-sync="#remote-picker-ports:replace"
        hx-on::before-request="document.getElementById('remote-picker-ports').replaceChildren(); document.getElementById('remote-picker-save').disabled = true">
+    <div class="alert alert-danger" data-picker-error role="alert" hidden></div>
     <p class="small text-muted mb-2">
       LibreNMS reports the remote end as “<strong>{{ row.remote_device|default:"unknown" }}</strong>”{% if row.remote_port %}
       port “{{ row.remote_port }}”{% endif %}. Name matching is only a hint — pick the actual NetBox endpoint below.

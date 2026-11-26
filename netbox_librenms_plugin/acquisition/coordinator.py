@@ -8,7 +8,12 @@ from django.utils import timezone
 from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.acquisition.registry import RESOURCE_SPECS, OwnerPolicy, Resource
-from netbox_librenms_plugin.acquisition.resources import ACQUIRERS, OOB_ACQUIRERS
+from netbox_librenms_plugin.acquisition.resources import (
+    ACQUIRERS,
+    OOB_ACQUIRERS,
+    NEIGHBOUR_PORTS_PREFIX,
+    fetch_cable_ports,
+)
 from netbox_librenms_plugin.acquisition.snapshot import (
     MappingLink,
     MappingSource,
@@ -19,7 +24,12 @@ from netbox_librenms_plugin.acquisition.snapshot import (
     ResponseRecord,
     SourceSnapshot,
 )
-from netbox_librenms_plugin.librenms_api import build_librenms_api, stored_librenms_id
+from netbox_librenms_plugin.librenms_api import (
+    DEFAULT_API_TIMEOUT,
+    EXTENDED_API_TIMEOUT,
+    build_librenms_api,
+    stored_librenms_id,
+)
 from netbox_librenms_plugin.server_mappings import MappingRole, read_mapping, require_server_key
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
@@ -41,12 +51,18 @@ class _Fetch:
 
     def __init__(self, api):
         self._api = api
+        self.server_key = api.server_key
         self.responses = {}
+        self.neighbour_deadline = None
 
-    def __call__(self, endpoint):
+    def __call__(self, endpoint, *, timeout=None):
         key = endpoint.request.key
-        if key not in self.responses:
-            status, body = self._api.get_response(endpoint.request.path, dict(endpoint.request.params))
+        if key not in self.responses or self.responses[key].received_at is None:
+            # A budget omission is still available to a resource that requires this request.
+            options = {"timeout": EXTENDED_API_TIMEOUT} if endpoint.extended_timeout else {}
+            if timeout is not None:
+                options["timeout"] = min(options.get("timeout", DEFAULT_API_TIMEOUT), timeout)
+            status, body = self._api.get_response(endpoint.request.path, dict(endpoint.request.params), **options)
             decoded = endpoint.decode(status, body)
             self.responses[key] = ResponseRecord(
                 request=endpoint.request,
@@ -67,7 +83,7 @@ class _Fetch:
 
 
 class _Refused:
-    """Record each request of a mapping as failed without making it, because the mapping names no device."""
+    """Record requests not made because a mapping has no usable device."""
 
     def __init__(self, fetch, reason):
         self._fetch = fetch
@@ -120,22 +136,27 @@ def oob_source(fetch, resource, mapping, server_key):
     )
 
 
-def _resource_source(fetch, resource, owner, server_key):
+def _resource_source(fetch, resource, owner, server_key, *, include_serial=False):
     """Acquire one resource from the owner's own mapping and, when it links one, its OOB controller."""
     mapping = read_mapping(owner)
     librenms_id = stored_librenms_id(owner, server_key)
-    if librenms_id is None:
+    spec = RESOURCE_SPECS[resource]
+    oob_only = spec.permits_oob_only and librenms_id is None and mapping.has_oob(server_key)
+    if librenms_id is None and not oob_only:
         raise SubjectNotMapped(owner, server_key)
-    parts = ACQUIRERS[resource](fetch, librenms_id)
-    return ResourceSource(
-        resource=resource,
-        owner=ObjectRef.of(owner),
-        host=MappingSource(
+    host = None
+    if librenms_id is not None:
+        parts = ACQUIRERS[resource](fetch, librenms_id, **spec.acquisition_options(include_serial=include_serial))
+        host = MappingSource(
             role=MappingRole.OWN,
             librenms_id=librenms_id,
             state=MappingState.RESOLVED,
             parts=_part_keys(parts),
-        ),
+        )
+    return ResourceSource(
+        resource=resource,
+        owner=ObjectRef.of(owner),
+        host=host,
         oob=oob_source(fetch, resource, mapping, server_key),
     )
 
@@ -153,6 +174,19 @@ def _server_api(server_key):
     if api is None or api.server_key != server_key:
         raise ValueError(f"LibreNMS server {server_key!r} is not configured.")
     return api
+
+
+class CablePortAcquisition:
+    """One manual action's port requests, response records and neighbour deadline."""
+
+    def __init__(self, server_key):
+        self._fetch = _Fetch(_server_api(server_key))
+
+    def acquire(self, owner_ids):
+        """Return each owner's port response, reusing all earlier outcomes and the action budget."""
+        owner_ids = tuple(dict.fromkeys(owner_ids))
+        parts = fetch_cable_ports(self._fetch, owner_ids)
+        return {owner_id: parts[f"{NEIGHBOUR_PORTS_PREFIX}{owner_id}"] for owner_id in owner_ids}
 
 
 @dataclass(frozen=True)
@@ -186,7 +220,7 @@ def plan_acquisition(subject, *, server_key, resources):
     )
 
 
-def acquire(plan):
+def acquire(plan, *, include_serial=False):
     """
     Acquire the planned owners' current stored or cached identities from one configured server.
 
@@ -203,7 +237,7 @@ def acquire(plan):
         owner = type(planned_owner).objects.filter(pk=planned_owner.pk).first()
         if owner is None:
             raise SubjectNotMapped(planned_owner, plan.server_key)
-        sources[resource] = _resource_source(fetch, resource, owner, plan.server_key)
+        sources[resource] = _resource_source(fetch, resource, owner, plan.server_key, include_serial=include_serial)
     return SourceSnapshot(
         snapshot_id=uuid4().hex,
         server_key=plan.server_key,
