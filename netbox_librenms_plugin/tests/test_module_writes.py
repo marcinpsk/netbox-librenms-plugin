@@ -861,3 +861,50 @@ def test_a_batch_claims_each_json_number_serial_by_its_text():
                 free.append(cursor.fetchone()[0])
 
     assert free == [False, False]
+
+
+@transactional_db_with_all_apps()
+def test_a_page_observes_its_complete_chassis_and_external_module_owners_before_claims():
+    from django.db import connection, transaction
+    from django.test.utils import CaptureQueriesContext
+
+    from netbox_librenms_plugin.module_writes import lock_module_write, observe_module_write
+    from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+    from netbox_librenms_plugin.views.sync.modules import _validate_module_destinations
+
+    _chassis, members = make_virtual_chassis_members("module-page-cohort", count=3)
+    page, target, _hidden_member = members
+    external = make_device_with_module_bays("module-external-owner", ["Slot 1"])
+    module = install_module(external, "Slot 1", "MODULE-EXTERNAL", serial="EXTERNAL-SERIAL")
+    observed = observe_module_write(page_device=page, device_ids=[target.pk], subtree_roots=[module.pk])
+
+    assert observed.chassis_members == tuple(sorted(member.pk for member in members))
+    assert observed.device_ids == tuple(sorted([external.pk, *(member.pk for member in members)]))
+    with transaction.atomic():
+        scope = lock_module_write(observed)
+        with CaptureQueriesContext(connection) as captured:
+            _validate_module_destinations(page, {target.pk}, scope)
+        assert len(captured) == 0, "Membership must use only the already locked Devices."
+
+
+@transactional_db_with_all_apps()
+@pytest.mark.parametrize("moved", ["page", "member"])
+def test_membership_validation_refuses_a_preobserved_member_that_left_without_expanding_locks(moved):
+    from dcim.models import Device
+    from django.db import connection, transaction
+    from django.test.utils import CaptureQueriesContext
+
+    from netbox_librenms_plugin.module_grants import GrantRefused
+    from netbox_librenms_plugin.module_writes import lock_module_write, observe_module_write
+    from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+    from netbox_librenms_plugin.views.sync.modules import _validate_module_destinations
+
+    _chassis, (page, member) = make_virtual_chassis_members(f"module-left-cohort-{moved}")
+    observed = observe_module_write(page_device=page)
+    leaving = page if moved == "page" else member
+    Device.objects.filter(pk=leaving.pk).update(virtual_chassis=None, vc_position=None)
+    with transaction.atomic():
+        scope = lock_module_write(observed)
+        with CaptureQueriesContext(connection) as captured, pytest.raises(GrantRefused):
+            _validate_module_destinations(page, set(), scope)
+        assert len(captured) == 0

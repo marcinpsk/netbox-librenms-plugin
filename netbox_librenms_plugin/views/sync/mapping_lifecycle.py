@@ -1,4 +1,4 @@
-"""Apply the confirmed mapping lifecycle operations of a NetBox device or VM: link, relink and change_oob."""
+"""Apply the confirmed mapping lifecycle operations of a NetBox device or VM: link, unlink, relink and change_oob."""
 
 from functools import partial
 from urllib.parse import urlencode, urlsplit, urlunsplit
@@ -21,6 +21,8 @@ from netbox_librenms_plugin.assessment.mapping_lifecycle import (
     HostChangeState,
     Link,
     Relink,
+    Unlink,
+    UnlinkChoices,
     build_host_change,
     build_link,
     read_host_change_assessment,
@@ -73,7 +75,7 @@ _STATUS_LISTS = {"device": "device_status_list", "virtualmachine": "vm_status_li
 _SYNC_PAGES = {"device": "device_librenms_sync", "virtualmachine": "vm_librenms_sync"}
 _INVALID_CONFIRMATION = "The confirmation is invalid or has expired. Refresh the page and try again."
 # The noun of each operation in an outcome line.
-_NOUNS = {"link": "link", "relink": "LibreNMS ID change", "change_oob": "OOB controller change"}
+_NOUNS = {"link": "link", "unlink": "unlink", "relink": "LibreNMS ID change", "change_oob": "OOB controller change"}
 
 
 def _server_name(server_key):
@@ -150,6 +152,7 @@ def render_host_change(request, obj, server_key, action, choices, *, tab=None, r
             "server_key": server_key,
             "server_name": _server_name(server_key),
             "before": entry,
+            # An unlink leaves no entry: both IDs show as removed.
             "after": HOST_CHANGES[action].target(entry, choices) or ServerState(server_key),
             "interfaces": [
                 {"name": row.interface.name, "parent": row.interface.parent_object.name}
@@ -363,6 +366,8 @@ class _LifecycleWriter(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Lib
 def _entry_change(operation, row):
     """Return the change of the object's mapping that a verified host change writes."""
     server = operation.identity.server
+    if isinstance(operation, Unlink):
+        return release_server(row, server, clear_preference=False)
     entry = read_mapping(row).server(server)
     if isinstance(operation, Relink):
         own_id, oob_id, oob_type = operation.effects.own_id, entry.oob_id, entry.oob_type
@@ -382,6 +387,10 @@ def _entry_change(operation, row):
 def _success_text(operation, row, cleared, server_name):
     before = operation.assumptions.entry
     ports = f"the {server_name} port IDs of {cleared} interfaces"
+    if isinstance(operation, Unlink):
+        removed = [f"LibreNMS ID {before.own_id}"] if before.own_id is not None else []
+        removed += [f"OOB ID {before.oob_id}"] if before.oob_id is not None else []
+        return f"Unlinked '{row.name}' from {server_name}: removed {', '.join(removed)} and {ports}."
     if isinstance(operation, Relink):
         new_id, old_id, label = operation.effects.own_id, before.own_id, "LibreNMS ID"
     else:
@@ -397,9 +406,36 @@ def posted_tab(data):
 
 
 class MappingLifecycleView(_LifecycleWriter):
-    """Apply the confirmed lifecycle token of one device or VM."""
+    """Show the unlink confirmation of one device or VM, and apply its one confirmed lifecycle token."""
 
     confirmation_policy = LIFECYCLE_POLICY
+
+    def get(self, request, object_type, pk):
+        """Render the unlink confirmation of the object on the server that the query names; it writes nothing."""
+        model = self._model(object_type)
+        if error := self.require_all_permissions("GET"):
+            return error
+        obj = ensure_mapping_owner(self.restrict_object_or_404(model, "change", pk=pk))
+        if request.GET.get("action") != Unlink.ACTION:
+            raise Http404("Unknown mapping lifecycle action.")
+        try:
+            server_key = require_server_key(request.GET.get("server_key", ""))
+        except ValueError:
+            messages.error(request, "Select the LibreNMS server to unlink.")
+            return redirect(sync_page_url(obj))
+        try:
+            return_server_key = require_server_key(request.GET.get("active_server_key", ""))
+        except ValueError:
+            return_server_key = None
+        return render_host_change(
+            request,
+            obj,
+            server_key,
+            Unlink.ACTION,
+            UnlinkChoices(),
+            tab=posted_tab(request.GET),
+            return_server_key=return_server_key,
+        )
 
     def post(self, request, object_type, pk):
         """Apply the one submitted lifecycle token of the object, and return to its sync page."""
@@ -427,6 +463,7 @@ class MappingLifecycleView(_LifecycleWriter):
             model=model,
             server_key=server_key,
         )
+        # After an unlink the page opens on the server that the selection resolves.
         row = self.restricted_queryset(model).filter(pk=obj.pk).first()
         mapped = row is not None and host_entry(row, server_key).display_id is not None
         configured = server_key in LibreNMSAPI.get_available_servers()

@@ -7,7 +7,10 @@ from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 # Views that apply no assessed change carry no confirmation intent (section 4 of the #177 design).
 EXEMPT_VIEWS = {
     "SetPreferredServerView": "the operator names the server",
-    "EditServerMappingView": "the operator names the server and its IDs",
+    "EditServerMappingView": (
+        "the operator names the server and its IDs; a replacement or a clear only renders the "
+        "MappingLifecycleView confirmation and writes nothing"
+    ),
     "MoveChassisMappingsView": "a repair of the chassis owner rule: it adds each stored value to the master and "
     "refuses a value that differs, so it replaces no value",
     "AddDeviceToLibreNMSView": "writes LibreNMS, outside NetBox reconciliation",
@@ -37,7 +40,6 @@ MIGRATION_INVENTORY = {
     "CreateAndAssignPlatformView": "device_field",
     "CreateAndAssignVMPlatformView": "device_field",
     "AssignVCSerialView": "device_field",
-    "RemoveServerMappingView": "mapping_lifecycle",
     "ConvertLegacyLibreNMSIdView": "mapping_lifecycle",
     "SyncInterfacesView": "interface",
     "SyncInterfaceLagView": "interface",
@@ -81,7 +83,6 @@ _INVENTORY_CEILING = frozenset(
         "CreateAndAssignPlatformView",
         "CreateAndAssignVMPlatformView",
         "AssignVCSerialView",
-        "RemoveServerMappingView",
         "ConvertLegacyLibreNMSIdView",
         "SyncInterfacesView",
         "SyncInterfaceLagView",
@@ -150,7 +151,6 @@ def pytest_generate_tests(metafunc):
             "SyncIPAddressesView",
             "CreateVRFFromIPRowView",
             "AddDeviceToLibreNMSView",
-            "RemoveServerMappingView",
             "SetPreferredServerView",
             "EditServerMappingView",
             "ConvertLegacyLibreNMSIdView",
@@ -429,4 +429,4 @@ class TestConfirmationInventory:
         legacy = {
             name for name, resource in MIGRATION_INVENTORY.items() if resource == intent.Resource.MAPPING_LIFECYCLE
         }
-        assert legacy == {"RemoveServerMappingView", "AddAsOOBView", "ConvertLegacyLibreNMSIdView"}
+        assert legacy == {"AddAsOOBView", "ConvertLegacyLibreNMSIdView"}

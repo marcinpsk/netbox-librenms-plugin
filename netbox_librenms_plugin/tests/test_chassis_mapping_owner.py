@@ -381,9 +381,9 @@ def test_split_mappings_move_to_the_master_and_the_member_page_then_works_on_the
     assert {mapping.server_key for mapping in page.context["all_server_mappings"]} == {PRIMARY, SECONDARY, RETIRED}
     html = page.content.decode()
     preferred_url = reverse("plugins:netbox_librenms_plugin:set_preferred_server", args=[master.pk])
-    remove_url = reverse("plugins:netbox_librenms_plugin:remove_server_mapping", args=[master.pk])
+    unlink_url = reverse("plugins:netbox_librenms_plugin:mapping_lifecycle", args=["device", master.pk])
     assert f'action="{preferred_url}"' in html
-    assert f'action="{remove_url}"' in html
+    assert f'href="{unlink_url}?action=unlink&amp;server_key={RETIRED}&amp;active_server_key={SECONDARY}"' in html
     forms = _editor_forms(client, member, server_key=SECONDARY)
     edit_url = reverse("plugins:netbox_librenms_plugin:edit_server_mapping", args=[master.pk])
     assert {action for action, _fields in forms.values()} == {edit_url}
@@ -398,8 +398,10 @@ def test_split_mappings_move_to_the_master_and_the_member_page_then_works_on_the
     from netbox_librenms_plugin.confirmation_intent import FIELD
 
     client.post(context["action_url"], {"server_key": context["server_key"], FIELD: [context["token"]]})
-    # The Remove control unlinks the stale server from the master.
-    client.post(remove_url, {"server_key": RETIRED, "object_type": "device"})
+    # The Unlink control unlinks the stale server from the master, through its confirmation.
+    unlink = client.get(unlink_url, {"action": "unlink", "server_key": RETIRED})
+    assert unlink.status_code == 200, message_texts(unlink)
+    client.post(unlink.context["action_url"], {"server_key": RETIRED, FIELD: [unlink.context["token"]]})
     client.post(preferred_url, {"server_key": SECONDARY, "object_type": "device"})
 
     assert mapping_summary(_fresh(master)) == {
@@ -588,15 +590,15 @@ def test_an_oob_link_refuses_a_member_that_left_the_chassis_after_the_chassis_lo
         ip="",
     )
     servers.primary.vc_inventory_callable(7135, [], {})
-    lock = actions.lock_owner_chassis
+    lock = actions.lock_host_change_owner
 
-    def lock_then_move_the_member(model, pk):
-        chassis_id = lock(model, pk)
-        # The member leaves the chassis after its chassis is read and before the owner checks.
+    def lock_then_move_the_member(model, pk, **options):
+        locked = lock(model, pk, **options)
+        # The member leaves the chassis after its host scope is read and before the owner checks.
         Device.objects.filter(pk=member.pk).update(virtual_chassis=None, vc_position=None)
-        return chassis_id
+        return locked
 
-    monkeypatch.setattr(actions, "lock_owner_chassis", lock_then_move_the_member)
+    monkeypatch.setattr(actions, "lock_host_change_owner", lock_then_move_the_member)
     client.force_login(make_superuser("owner-oob-member-left"))
 
     response = client.post(
@@ -723,7 +725,6 @@ def test_a_legacy_conversion_refuses_a_master_that_lost_the_master_role_during_t
 
 
 _WAITING_WRITERS = {
-    "remove": ("remove_server_mapping", {"server_key": RETIRED, "object_type": "device"}),
     "preferred": ("set_preferred_server", {"server_key": SECONDARY, "object_type": "device"}),
     "edit": (
         "edit_server_mapping",

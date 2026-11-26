@@ -9,7 +9,7 @@ from urllib.parse import quote_plus, urlsplit
 
 from django.contrib import messages
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError, models, transaction
+from django.db import IntegrityError, models
 from django.http import HttpResponse, QueryDict
 from django.shortcuts import redirect, render
 from django.urls import reverse
@@ -46,6 +46,7 @@ from netbox_librenms_plugin.server_mappings import (
     persist_mapping,
     prefetch_mappings,
     read_mapping,
+    save_mapping_fields,
 )
 from netbox_librenms_plugin.serial_identity import (
     RELOCATION_HELD,
@@ -307,7 +308,8 @@ def _resolve_destination(page_device, selected_device_id, devices):
     """
     Return the posted target: the page device, or a member of its Virtual Chassis in *devices*.
 
-    Every module view refuses an invalid target instead of falling back to the page device.
+    Every module view refuses an invalid target instead of falling back to the page device. A
+    writer checks the target again under lock with ``_validate_module_destinations``.
 
     Args:
         page_device (Device): The device whose Modules page posted the action.
@@ -332,6 +334,18 @@ def _resolve_destination(page_device, selected_device_id, devices):
         .select_related("device_type__manufacturer")
         .first()
     )
+
+
+def _validate_module_destinations(page_device, target_ids, scope):
+    """Refuse changed membership using only the complete Device set already locked by the writer."""
+    cohort = {page_device.pk, *target_ids, *scope.observation.chassis_members}
+    scope.require_devices(cohort)
+    chassis_id = page_device.virtual_chassis_id
+    if scope.devices[page_device.pk].virtual_chassis_id != chassis_id:
+        raise GrantRefused(GrantRefusal.DESTINATION)
+    for target_id in cohort - {page_device.pk}:
+        if chassis_id is None or scope.devices[target_id].virtual_chassis_id != chassis_id:
+            raise GrantRefused(GrantRefusal.DESTINATION)
 
 
 @dataclass(frozen=True)
@@ -887,6 +901,19 @@ def _module_may_own_interface(device, module_pk, name):
     return get_module_adoptable_interface_names(device, module).may_move(name)
 
 
+def _lock_module_on_device(module_pk, device_id):
+    """Lock the module row and return whether the module is still on *device_id*."""
+    from dcim.models import Module
+
+    return (
+        Module.objects.select_for_update(of=("self",))
+        .filter(pk=module_pk, device_id=device_id)
+        .values_list("pk", flat=True)
+        .first()
+        is not None
+    )
+
+
 def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces):
     """
     Bind LibreNMS ``port_id`` to the best matching NetBox interface.
@@ -907,6 +934,8 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
 
     Raises:
         LibreNMSPortBindingBusy: Another open transaction holds the claim on the port.
+        _ModuleActionRefused: The module is no longer on the device, so the whole action rolls back.
+        ValidationError: A field that the bind writes is not valid.
 
     """
     try:
@@ -915,7 +944,7 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
         return {"status": "skipped", "reason": str(exc)}
 
 
-# Its own savepoint: callers catch a non-conflict error and keep their transaction.
+# Its own savepoint: callers keep their transaction for a non-conflict error, but not for a refusal.
 @row_savepoint()
 def _bind_interface_librenms_id_in_savepoint(device, item, module_pk, server_key, interfaces):
     """Bind the port as ``_bind_interface_librenms_id`` describes; a bind out of the change scope raises."""
@@ -975,7 +1004,13 @@ def _bind_interface_librenms_id_in_savepoint(device, item, module_pk, server_key
         update_fields.append("module")
 
     def save(row, mapping_fields=frozenset()):
-        row.save(update_fields=[*update_fields, *mapping_fields, "last_updated"])
+        # NetBox does not check that the module is on the interface's device; the lock waits for a move.
+        if set_module and not _lock_module_on_device(module_pk, row.device_id):
+            raise _ModuleActionRefused(
+                f"Nothing was changed: the module is no longer on the device of {row.name}. Refresh and try again."
+            )
+        # A ValidationError reaches the caller's handler, which shows the text that the user may read.
+        save_mapping_fields(row, [*update_fields, *mapping_fields])
 
     if bind_port:
         persist_mapping(candidate, assign_own(candidate, server_key, port_id), write=save)
@@ -1150,8 +1185,11 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                     serial = stored_form(incoming, Module)
                     serial_rules = granted.policy.serial_identity_rules
                 scope = lock_module_write(
-                    observe_module_write(device_ids=[target_device.pk]), incoming=[incoming], rules=serial_rules
+                    observe_module_write(device_ids=[target_device.pk], page_device=page_device),
+                    incoming=[incoming],
+                    rules=serial_rules,
                 )
+                _validate_module_destinations(page_device, {target_device.pk}, scope)
                 target_device = scope.devices[target_device.pk]
                 scope = scope.lock_module_types([module_type.pk])
                 if indexed:
@@ -1206,6 +1244,8 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                             server_key,
                             changeable_interfaces,
                         )
+                    except _ModuleActionRefused:
+                        raise
                     except Exception as exc:
                         if classify_conflict(exc):
                             raise
@@ -1368,11 +1408,12 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             return
 
         scope = lock_module_write(
-            observe_module_write(device_ids=targets),
+            observe_module_write(device_ids=targets, page_device=page_device),
             incoming=[item.get("entPhysicalSerialNum") for item, _target_id in entries],
             rules=granted.policy.serial_identity_rules,
         )
-        targets = scope.devices
+        _validate_module_destinations(page_device, set(targets), scope)
+        targets = {pk: scope.devices[pk] for pk in targets}
 
         # The parent-module walk keeps a row's whole attributed subtree, hidden holders too.
         member_index_maps = self._ancestry_maps(granted, set(targets))
@@ -1457,6 +1498,9 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                             changeable_interfaces,
                         )
                         bound_any = _record_bind_outcome(bind_result, result, skipped) or bound_any
+        except _ModuleActionRefused as exc:
+            exc.report(request)
+            return
         except (AbortRequest, ValidationError, IntegrityError) as e:
             if classify_conflict(e):
                 raise
@@ -2108,10 +2152,13 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 granted.grant.require(device_id=page_device.pk)
                 plan = self._granted_selection(request, granted, selected_list, page_device, server_key)
                 scope = lock_module_write(
-                    observe_module_write(device_ids=[target.pk for _item, target, _pinned in plan]),
+                    observe_module_write(
+                        device_ids=[target.pk for _item, target, _pinned in plan], page_device=page_device
+                    ),
                     incoming=[item.get("entPhysicalSerialNum") for item, _target, _pinned in plan],
                     rules=granted.policy.serial_identity_rules,
                 )
+                _validate_module_destinations(page_device, {target.pk for _item, target, _pinned in plan}, scope)
                 plan = [(item, scope.devices[target.pk], pinned) for item, target, pinned in plan]
                 scope = scope.lock_module_types(
                     matched.pk
@@ -2321,10 +2368,13 @@ class UpdateModuleSerialView(
                     self.restricted_queryset(Module, "change").filter(pk=module_id, device=target_device)
                 )
                 scope = lock_module_write(
-                    observe_module_write(device_ids=[target_device.pk], module_ids=[module_id]),
+                    observe_module_write(
+                        device_ids=[target_device.pk], module_ids=[module_id], page_device=page_device
+                    ),
                     incoming=[incoming],
                     rules=serial_rules,
                 )
+                _validate_module_destinations(page_device, {target_device.pk}, scope)
                 granted = _authorize_module_grant(
                     page_device,
                     server_key,
@@ -2416,8 +2466,8 @@ class UpdateModuleInterfaceView(
         bind_result = None
         adoption_warning = None
         try:
-            # One transaction: a lock conflict in the bind or the adoption rolls back both.
-            with transaction.atomic():
+            # One transaction: a lock conflict in the bind or the adoption rolls back both, and their events.
+            with atomic_with_events():
                 granted = _authorize_module_grant(
                     page_device,
                     server_key,
@@ -2427,9 +2477,12 @@ class UpdateModuleInterfaceView(
                 )
                 granted.grant.require(device_id=target_device.pk, ent_index=request.POST.get("ent_index", ""))
                 scope = lock_module_write(
-                    observe_module_write(device_ids=[target_device.pk], observed_ids=[module.pk]),
+                    observe_module_write(
+                        device_ids=[target_device.pk], observed_ids=[module.pk], page_device=page_device
+                    ),
                     rules=granted.policy.serial_identity_rules,
                 )
+                _validate_module_destinations(page_device, {target_device.pk}, scope)
                 granted = _authorize_module_grant(
                     page_device,
                     server_key,
@@ -2503,6 +2556,8 @@ class UpdateModuleInterfaceView(
                 server_key,
                 changeable_interfaces,
             )
+        except _ModuleActionRefused:
+            raise
         except Exception as exc:
             if classify_conflict(exc):
                 raise
@@ -2525,7 +2580,7 @@ class UpdateModuleInterfaceView(
             # A hard conflict/skip is left untouched so we don't mutate past an unresolved issue.
             if bind_result is None or bind_result.get("status") == "bound":
                 try:
-                    with transaction.atomic():
+                    with atomic_with_events():
                         adopt_result = _adopt_existing_template_interfaces(
                             target_device,
                             module,
@@ -2735,18 +2790,25 @@ class ApplyModuleInterfaceTypesView(
         validation_failures = []
         try:
             with atomic_with_events():
-                scope = lock_module_write(observe_module_write(device_ids=[target_device.pk], observed_ids=[module.pk]))
+                scope = lock_module_write(
+                    observe_module_write(
+                        device_ids=[target_device.pk], observed_ids=[module.pk], page_device=page_device
+                    )
+                )
+                _validate_module_destinations(page_device, {target_device.pk}, scope)
                 target_device = scope.devices[target_device.pk]
                 module.refresh_from_db()
                 if module.device_id != target_device.pk:
                     raise ValidationError("The module changed devices. Refresh Modules and try again.")
                 template_types = _module_interface_type_targets(target_device, module)
-                interfaces = list(
+                # The host change cascade locks interfaces in pk order too; the messages list them by name.
+                locked = (
                     self.restricted_queryset(Interface, "change")
                     .select_for_update(of=("self",))
                     .filter(module=module, pk__in=interface_ids)
-                    .order_by("name", "pk")
+                    .order_by("pk")
                 )
+                interfaces = sorted(locked, key=lambda interface: (interface.name, interface.pk))
                 unavailable_count = len(interface_ids) - len(interfaces)
                 for interface in interfaces:
                     template_type = template_types.get(interface.name)
@@ -2767,6 +2829,9 @@ class ApplyModuleInterfaceTypesView(
             # The formatter masks database details through exception_text_for.
             # nosemgrep: caught-error-text  # noqa: ERA001
             messages.error(request, _module_write_failure(exc, Module, request.user))
+            return _modules_action_response(request, page_device, server_key)
+        except GrantRefused as exc:
+            messages.error(request, exc.refusal.message)
             return _modules_action_response(request, page_device, server_key)
         except _InterfaceChangeScopeViolation as exc:
             messages.error(
@@ -3241,10 +3306,13 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                     if visible and subtree_owns_bay(removals[previous.pk], installed_module.module_bay.module_id):
                         raise _ModuleActionRefused(HOLDER_OWNS_BAY.format(serial=display(incoming)))
                 scope = lock_module_write(
-                    observe_module_write(device_ids=[target_device.pk], subtree_roots=removals),
+                    observe_module_write(
+                        device_ids=[target_device.pk], subtree_roots=removals, page_device=page_device
+                    ),
                     incoming=[incoming],
                     rules=serial_rules,
                 )
+                _validate_module_destinations(page_device, {target_device.pk}, scope)
                 target_device = scope.devices[target_device.pk]
                 manufacturer = target_device.device_type.manufacturer
                 matched_type = resolve_module_type(
@@ -3381,6 +3449,8 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                             server_key,
                             changeable_interfaces,
                         )
+                    except _ModuleActionRefused:
+                        raise
                     except Exception as exc:
                         if classify_conflict(exc):
                             raise
@@ -3593,9 +3663,11 @@ class MoveModuleView(
                         device_ids=[target_device.pk],
                         subtree_roots=[occupant_id] if same_device_move else [conflict_module_id, occupant_id],
                         observed_ids=[conflict_module_id] if same_device_move else [],
+                        page_device=page_device,
                     ),
                     rules=serial_rules,
                 )
+                _validate_module_destinations(page_device, {target_device.pk}, scope)
                 target_device = scope.devices[target_device.pk]
                 # Lock target bay to prevent concurrent modifications
                 target_bay = (
@@ -3636,6 +3708,8 @@ class MoveModuleView(
                 _schedule_module_cache_mutation(request, page_device, server_key)
         except _ModuleActionRefused as exc:
             exc.report(request)
+        except GrantRefused as exc:
+            messages.error(request, exc.refusal.message)
         except (AbortRequest, ValidationError, IntegrityError) as e:
             if classify_conflict(e):
                 raise
@@ -3928,7 +4002,7 @@ class AddBayTemplateView(
                 manufacturer=manufacturer,
             )
             try:
-                with transaction.atomic():
+                with atomic_with_events():
                     mapping.full_clean()
                     mapping.save()
             except (ValidationError, IntegrityError) as exc:
@@ -4155,11 +4229,16 @@ class AddBayTemplateView(
 
                 if target_kind == "device_type":
                     instances = list(Device.objects.filter(device_type=target).order_by("pk"))
-                    observation = observe_module_write(device_ids=[instance.pk for instance in instances])
+                    observation = observe_module_write(
+                        device_ids=[instance.pk for instance in instances], page_device=device
+                    )
                 else:
                     instances = list(Module.objects.filter(module_type=target).order_by("pk"))
-                    observation = observe_module_write(observed_ids=[instance.pk for instance in instances])
+                    observation = observe_module_write(
+                        observed_ids=[instance.pk for instance in instances], page_device=device
+                    )
                 scope = lock_module_write(observation)
+                _validate_module_destinations(device, set(), scope)
                 scope = scope.lock_template_type(target_kind, target.pk)
                 if target_kind == "device_type":
                     current = list(Device.objects.filter(device_type=target).order_by("pk"))
@@ -4213,6 +4292,8 @@ class AddBayTemplateView(
                 messages.success(request, f"Added bay template '{name}' to {target}.{instantiate_note}")
             if server_key:
                 _schedule_module_cache_mutation(request, device, server_key)
+        except GrantRefused as exc:
+            messages.error(request, exc.refusal.message)
         except (ValidationError, IntegrityError) as e:
             if classify_conflict(e):
                 raise

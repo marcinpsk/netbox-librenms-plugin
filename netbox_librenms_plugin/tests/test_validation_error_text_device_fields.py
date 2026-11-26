@@ -8,6 +8,7 @@ or the model, and a superuser gets the message.
 """
 
 from copy import deepcopy
+from functools import partial
 
 import pytest
 from django.db.models.signals import pre_save
@@ -219,22 +220,29 @@ class TestADeviceFieldSyncShowsNetBoxsMessageOnlyToASuperuser:
         _assert_shown(response, hidden, superuser, "the custom_field_data field")
 
     @pytest.mark.parametrize(
-        "view_name, data, key",
-        [
-            ("remove_server_mapping", {"object_type": "device", "server_key": "retired"}, None),
-            ("set_preferred_server", {"object_type": "device", "server_key": SECONDARY_KEY}, "custom_field_data"),
-        ],
+        "view_name, key", [("mapping_lifecycle", None), ("set_preferred_server", "custom_field_data")]
     )
-    def test_the_server_mapping_edits(self, client, librenms_server, superuser, view_name, data, key):
+    def test_the_server_mapping_edits(self, client, librenms_server, superuser, view_name, key):
         """These views call no clean(), so another plugin's pre_save receiver refuses the write."""
         from dcim.models import Device
         from django.core.exceptions import ValidationError
+
+        from netbox_librenms_plugin.confirmation_intent import FIELD
 
         tag = f"vetext-{view_name}-{int(superuser)}"
         device, hidden = make_device(tag), make_device(f"{tag}-hidden")
         for server, own in ((SERVER_KEY, 7106), (SECONDARY_KEY, 7107), ("retired", 7108)):
             seed_mapping(device, server, own=own)
         client.force_login(_viewer(tag, superuser, device))
+        if view_name == "mapping_lifecycle":
+            # The unlink confirmation offers the token, and the lifecycle route applies it.
+            url = reverse(
+                f"plugins:netbox_librenms_plugin:{view_name}", kwargs={"object_type": "device", "pk": device.pk}
+            )
+            token = client.get(url, {"action": "unlink", "server_key": "retired"}).context["token"]
+            submit = partial(client.post, url, {"server_key": "retired", FIELD: [token]})
+        else:
+            submit = partial(_post, client, view_name, device, {"object_type": "device", "server_key": SECONDARY_KEY})
 
         def refuse(sender, instance, **kwargs):
             if instance.pk == device.pk:
@@ -242,7 +250,7 @@ class TestADeviceFieldSyncShowsNetBoxsMessageOnlyToASuperuser:
 
         pre_save.connect(refuse, sender=Device, weak=False)
         try:
-            response = _post(client, view_name, device, data)
+            response = submit()
         finally:
             pre_save.disconnect(refuse, sender=Device)
 

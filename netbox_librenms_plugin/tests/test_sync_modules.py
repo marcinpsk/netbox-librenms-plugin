@@ -1896,6 +1896,388 @@ class TestModuleBindLockConflicts:
         assert (primary.module_id, standalone.module_id) == (None, None)
         assert read_mapping(primary).own_id("default") is None
 
+    @transactional_db_with_all_apps()
+    def test_an_unlink_cascade_waits_for_a_bind_and_adopt_that_holds_the_device(
+        self, client, live_librenms, flushed_events
+    ):
+        """
+        The cascade locks the interfaces by pk; the module action adopts a lower pk after the primary.
+
+        Both lock the Device row before an interface, so the cascade waits for the module action at
+        the Device row and no cycle forms. The bind commits; the unlink then finds its cascade stale.
+        """
+        from queue import Queue
+
+        from dcim.models import InterfaceTemplate
+        from django.db import connection
+        from django.test import Client
+
+        from netbox_librenms_plugin import confirmation_intent as intent
+        from netbox_librenms_plugin.tests.link_intent_helpers import lifecycle_url, offered_token, unlink_page
+        from netbox_librenms_plugin.tests.lock_conflict_helpers import backend_pid, raised_sqlstates, wait_for_lock_wait
+        from netbox_librenms_plugin.tests.view_test_helpers import messages_on
+
+        device = seed_mapping(make_device("cascade-contract"), "default", own=85)
+        bay = make_module_bay(device, "Contract Bay")
+        module = install_module(device, bay.name, "CONTRACT-CARD")
+        InterfaceTemplate.objects.create(module_type=module.module_type, name="c2/1", type="other")
+        standalone = make_interface(device, "c2/1")
+        primary = make_interface(device, "Ethernet85")
+        assert standalone.pk < primary.pk
+        item = _inventory_item(850, module.module_type.model, bay.name)
+        seed_inventory(
+            device,
+            [item],
+            librenms_id=85,
+            ports=[{"port_id": 8501, "ifName": primary.name}],
+            transceivers=[transceiver_row(850, port_id=8501, model=module.module_type.model)],
+        )
+        user = make_superuser("cascade-contract-user")
+        action, fields = rendered_module_form(render_module_tab(device, user=user), "update-module-interface", 850)
+        client.force_login(user)
+        token = offered_token(unlink_page(client, device))
+        pids, unlinks = Queue(), []
+
+        def unlink():
+            unlink_client = Client()
+            unlink_client.force_login(user)
+            pids.put(backend_pid(connection))
+            with raised_sqlstates() as sqlstates:
+                response = unlink_client.post(lifecycle_url(device), {"server_key": "default", intent.FIELD: [token]})
+            return response.status_code, messages_on(response.wsgi_request), sqlstates
+
+        with bounded_executor(max_workers=1) as executor:
+
+            def start_the_unlink_once_the_primary_is_locked(execute, sql, params, many, context):
+                result = execute(sql, params, many, context)
+                if not unlinks and 'FROM "dcim_interface"' in sql and "FOR UPDATE" in sql:
+                    unlinks.append(executor.submit(unlink))
+                    with second_connection() as observer:
+                        # The cascade waits for the Device row that the module action holds.
+                        wait_for_lock_wait(observer, pids.get(timeout=5))
+                return result
+
+            flushed_events.clear()
+            with (
+                connection.execute_wrapper(start_the_unlink_once_the_primary_is_locked),
+                raised_sqlstates() as module_states,
+            ):
+                module_response = client.post(action, data=fields)
+            unlink_status, unlink_messages, unlink_states = unlinks[0].result(timeout=30)
+
+        for status, answers in (
+            (module_response.status_code, messages_on(module_response.wsgi_request)),
+            (unlink_status, unlink_messages),
+        ):
+            assert status != 500
+            assert not any("deadlock" in text.lower() for _level, text in answers)
+        assert "40P01" not in module_states + unlink_states
+        primary.refresh_from_db()
+        standalone.refresh_from_db()
+        device.refresh_from_db()
+        assert (primary.module_id, standalone.module_id, read_mapping(primary).own_id("default")) == (
+            module.pk,
+            module.pk,
+            8501,
+        )
+        # The bind makes the cascade that the unlink confirmed stale, so the unlink writes nothing.
+        assert "default" in mapping_summary(device)
+        assert ("device", device.pk) not in flushed_events
+        assert {("interface", primary.pk), ("interface", standalone.pk)} <= set(flushed_events)
+
+
+def _leave_world(tag):
+    """Build a page device and a member in one chassis, and a card row that the table gives to the member."""
+    from dcim.models import Device
+
+    from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays
+
+    page = make_device_with_module_bays(f"{tag}-page", [], serial=f"{tag}-PAGE")
+    member = make_device_with_module_bays(f"{tag}-member", ["Card"], serial=f"{tag}-MEMBER")
+    make_virtual_chassis(f"{tag}-vc", page, member)
+    outsider = make_device_with_module_bays(f"{tag}-outsider", ["Old Bay"])
+    card_type = make_module_type(f"{tag.upper()}-CARD")
+    # The stack names both members, and the member's chassis row holds the card.
+    rows = stack_inventory(
+        [
+            _inventory_item(1, "", "Member chassis", serial=member.serial, phys_class="chassis"),
+            _inventory_item(2, card_type.model, "Card", parent=1, serial=f"{tag}-SN"),
+            # The child gives the card its branch button; it fits no bay.
+            _inventory_item(3, make_module_type(f"{tag.upper()}-OPTIC").model, "Optic", parent=2),
+        ],
+        [page, member],
+    )
+    return {
+        "serial": f"{tag}-SN",
+        # A module write clears the cached inventory on commit, so a form seeds it after its own writes.
+        "seed": lambda: seed_mapped_modules(Device.objects.get(pk=page.pk), rows),
+        "page": page,
+        "member": member,
+        "outsider": outsider,
+        "card_type": card_type,
+        "bay": member.modulebays.get(name="Card"),
+    }
+
+
+def _leave_url(name, world):
+    from django.urls import reverse
+
+    return reverse(f"plugins:netbox_librenms_plugin:{name}", kwargs={"pk": world["page"].pk})
+
+
+def _carrier_leave_form(world, user):
+    # A carrier install has no inventory row, so it posts no ent_index and no grant.
+    return _leave_url("install_module", world), {
+        "server_key": "default",
+        "selected_device_id": str(world["member"].pk),
+        "module_bay_id": str(world["bay"].pk),
+        "module_type_id": str(world["card_type"].pk),
+    }
+
+
+def _rendered_leave_form(world, user, path_part, ent_index=2):
+    world["seed"]()
+    return rendered_module_form(render_module_tab(world["page"], user=user), path_part, ent_index)
+
+
+def _indexed_leave_form(world, user):
+    return _rendered_leave_form(world, user, "install-module")
+
+
+def _branch_leave_form(world, user):
+    return _rendered_leave_form(world, user, "install-branch")
+
+
+def _selected_leave_form(world, user):
+    action, fields = _rendered_leave_form(world, user, "install-selected", None)
+    return action, {**fields, "select": ["2"]}
+
+
+def _installed_card(world, model=None, serial="OLD-SN"):
+    from dcim.models import Module
+
+    module_type = world["card_type"] if model is None else make_module_type(model)
+    return Module.objects.create(
+        device=world["member"], module_bay=world["bay"], module_type=module_type, serial=serial, status="active"
+    )
+
+
+def _serial_leave_form(world, user):
+    _installed_card(world)
+    return _rendered_leave_form(world, user, "update-module-serial")
+
+
+def _replace_leave_form(world, user):
+    _installed_card(world, model="LEAVE-OLD-CARD")
+    world["seed"]()
+    return rendered_modal_form(world["page"], 2, "replace-module", user=user)
+
+
+def _interface_leave_form(world, user):
+    from dcim.models import InterfaceTemplate
+
+    InterfaceTemplate.objects.create(module_type=world["card_type"], name="c2/1", type="other")
+    module = _installed_card(world, serial=world["serial"])
+    # A standalone interface of the template name is what Update Interface adopts.
+    world["member"].interfaces.filter(module=module).update(module=None)
+    return _rendered_leave_form(world, user, "update-module-interface")
+
+
+def _apply_types_leave_form(world, user):
+    from dcim.models import InterfaceTemplate
+
+    InterfaceTemplate.objects.create(module_type=world["card_type"], name="c2/1", type="10gbase-x-sfpp")
+    module = _installed_card(world)
+    interface = world["member"].interfaces.get(module=module)
+    interface.type = "1000base-t"
+    interface.save()
+    return _leave_url("apply_module_interface_types", world), {
+        "server_key": "default",
+        "selected_device_id": str(world["member"].pk),
+        "module_id": str(module.pk),
+        "interface_id": [str(interface.pk)],
+        f"current_type_{interface.pk}": "1000base-t",
+        f"template_type_{interface.pk}": "10gbase-x-sfpp",
+    }
+
+
+def _move_leave_form(world, user):
+    from dcim.models import Module
+
+    moving = Module.objects.create(
+        device=world["outsider"],
+        module_bay=world["outsider"].modulebays.get(name="Old Bay"),
+        module_type=world["card_type"],
+        serial="MOVING-SN",
+        status="active",
+    )
+    return _leave_url("move_module", world), {
+        "server_key": "default",
+        "selected_device_id": str(world["member"].pk),
+        "conflict_module_id": str(moving.pk),
+        "target_bay_id": str(world["bay"].pk),
+    }
+
+
+def _bay_template_leave_form(world, user):
+    from django.urls import reverse
+
+    return reverse("plugins:netbox_librenms_plugin:add_bay_template", kwargs={"pk": world["page"].pk}), {
+        "server_key": "default",
+        "target_kind": "device_type",
+        "target_pk": world["member"].device_type_id,
+        "name": "Membership Bay",
+    }
+
+
+LEAVE_WRITERS = {
+    "bay-template": _bay_template_leave_form,
+    "carrier-install": _carrier_leave_form,
+    "indexed-install": _indexed_leave_form,
+    "branch": _branch_leave_form,
+    "selected": _selected_leave_form,
+    "serial": _serial_leave_form,
+    "replace": _replace_leave_form,
+    "interface": _interface_leave_form,
+    "apply-types": _apply_types_leave_form,
+    "move": _move_leave_form,
+}
+
+
+def _leave_written_state():
+    from dcim.models import Interface, Module, ModuleBay, ModuleBayTemplate
+
+    return (
+        set(Module.objects.values_list("pk", "device_id", "module_bay_id", "module_type_id", "serial")),
+        set(Interface.objects.values_list("pk", "device_id", "module_id", "type")),
+        set(ModuleBay.objects.values_list("pk", "device_id", "module_id")),
+        set(ModuleBayTemplate.objects.values_list("pk", "device_type_id", "module_type_id")),
+    )
+
+
+@transactional_db_with_all_apps()
+@pytest.mark.parametrize("writer", list(LEAVE_WRITERS))
+def test_a_module_writer_refuses_a_member_that_leaves_the_chassis_before_its_lock(client, flushed_events, writer):
+    """
+    The view resolves the member, then the member leaves the chassis before the writer locks it.
+
+    The writer locks the member row, so it waits for the leave, sees the committed state, and writes nothing.
+    """
+    from unittest.mock import patch
+
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import commit_when_waited
+    from netbox_librenms_plugin.views.mixins import CacheMixin
+
+    world = _leave_world(f"leave-{writer}")
+    user = make_superuser(f"leave-{writer}-user")
+    client.force_login(user)
+    try:
+        action, fields = LEAVE_WRITERS[writer](world, user)
+        if "selected_device_id" in fields:
+            assert fields["selected_device_id"] == str(world["member"].pk)
+        before = _leave_written_state()
+
+        def leave(other):
+            with other.cursor() as cursor:
+                cursor.execute(
+                    'UPDATE "dcim_device" SET "virtual_chassis_id" = NULL, "vc_position" = NULL WHERE id = %s',
+                    [world["member"].pk],
+                )
+
+        flushed_events.clear()
+        # Relocation exists from NetBox 4.7; on an older NetBox the move view refuses before its transaction.
+        with patch("netbox_librenms_plugin.views.sync.modules.netbox_relocates_module_subtree", return_value=True):
+            response = commit_when_waited(leave, lambda: client.post(action, fields))
+    finally:
+        cache.delete(CacheMixin().get_cache_key(world["page"], "inventory", "default"))
+
+    assert response.status_code == 302
+    assert GrantRefusal.DESTINATION.message in message_texts(response.wsgi_request)
+    assert _leave_written_state() == before
+    assert flushed_events == []
+
+
+def _moved_module_world(tag, user):
+    """Render the install forms of a card row, then install the card and leave its template interface standalone."""
+    from dcim.models import Device, InterfaceTemplate, Module
+
+    from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays
+
+    world = _leave_world(tag)
+    page = Device.objects.get(pk=world["page"].pk)
+    rows = stack_inventory(
+        [
+            _inventory_item(1, "", "Member chassis", serial=world["member"].serial, phys_class="chassis"),
+            _inventory_item(2, world["card_type"].model, "Card", parent=1, serial=world["serial"]),
+            _inventory_item(3, f"{tag.upper()}-OPTIC", "Optic", parent=2),
+        ],
+        [page, world["member"]],
+    )
+
+    def seed():
+        seed_mapped_modules(
+            Device.objects.get(pk=page.pk),
+            rows,
+            ports=[{"port_id": 7001, "ifName": "c2/1"}],
+            transceivers=[transceiver_row(2, port_id=7001, model=world["card_type"].model)],
+        )
+
+    seed()
+    html = render_module_tab(page, user=user)
+    forms = {
+        "branch": rendered_module_form(html, "install-branch", 2),
+        "selected": rendered_module_form(html, "install-selected", None),
+    }
+    forms["selected"][1]["select"] = ["2"]
+    InterfaceTemplate.objects.create(module_type=world["card_type"], name="c2/1", type="other")
+    # Another user installs the card after the render, so the install finds the bay occupied.
+    card = Module.objects.create(
+        device=world["member"], module_bay=world["bay"], module_type=world["card_type"], serial=world["serial"]
+    )
+    interface = world["member"].interfaces.get(name="c2/1")
+    interface.module = None
+    interface.save()
+    other_device = make_device_with_module_bays(f"{tag}-elsewhere", ["Elsewhere Bay"])
+    # A module write clears the cached inventory on commit.
+    seed()
+    return {**world, "forms": forms, "card": card, "interface": interface, "elsewhere": other_device}
+
+
+@transactional_db_with_all_apps()
+@pytest.mark.parametrize("writer", ["branch", "selected"])
+def test_a_bind_refuses_a_module_that_moves_to_another_device_before_the_interface_save(client, flushed_events, writer):
+    """The install finds the bay occupied and binds the row's port, while another transaction moves that module."""
+    from dcim.models import Interface, Module
+
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import commit_when_waited
+    from netbox_librenms_plugin.views.mixins import CacheMixin
+
+    user = make_superuser(f"moved-module-{writer}-user")
+    client.force_login(user)
+    world = _moved_module_world(f"moved-{writer}", user)
+    action, fields = world["forms"][writer]
+    elsewhere_bay = world["elsewhere"].modulebays.get(name="Elsewhere Bay")
+    try:
+
+        def move(other):
+            with other.cursor() as cursor:
+                cursor.execute(
+                    'UPDATE "dcim_module" SET "device_id" = %s, "module_bay_id" = %s WHERE id = %s',
+                    [world["elsewhere"].pk, elsewhere_bay.pk, world["card"].pk],
+                )
+
+        flushed_events.clear()
+        response = commit_when_waited(move, lambda: client.post(action, fields))
+    finally:
+        cache.delete(CacheMixin().get_cache_key(world["page"], "inventory", "default"))
+
+    interface = Interface.objects.get(pk=world["interface"].pk)
+    assert (interface.module_id, read_mapping(interface).own_id("default")) == (None, None)
+    assert Module.objects.filter(pk=world["card"].pk, device=world["elsewhere"]).exists()
+    assert flushed_events == []
+    assert response.status_code == 302
+    assert message_texts(response.wsgi_request, "error")
+
 
 class TestModulesRedirectResponse:
     """_modules_redirect_response: the classic (non-HTMX) redirect back to the modules tab."""
@@ -4605,3 +4987,184 @@ class TestGenericModuleTypeFallback:
         assert response.status_code == 200
         # The badge marks a LibreNMS model that resolved to the installed module's type.
         assert b"mdi-check-decagram" in response.content
+
+
+def _unlink_race_world(form):
+    """Return a linked device whose Modules tab offers *form* for one card with a port, and the posted form."""
+    from netbox_librenms_plugin.tests.view_test_helpers import rendered_module_form as rendered
+
+    device = seed_mapping(make_device(f"unlink-wait-{form}"), "default", own=87)
+    bay = make_module_bay(device, "Unlink Bay")
+    model = f"UNLINK-WAIT-{form.upper()}"
+    rows = [_inventory_item(870, model, bay.name)]
+    if form == "update-module-interface":
+        install_module(device, bay.name, model)
+    else:
+        make_module_type(model)
+    if form == "install-branch":
+        # A child with a module type makes the table render the branch button.
+        rows.append(_inventory_item(871, make_module_type(f"{model}-CHILD").model, "Child", parent=870))
+    interface = make_interface(device, "Ethernet87")
+    seed_inventory(
+        device,
+        rows,
+        librenms_id=87,
+        ports=[{"port_id": 8701, "ifName": interface.name}],
+        transceivers=[transceiver_row(870, port_id=8701, model=model)],
+    )
+    user = make_superuser(f"unlink-wait-{form}")
+    action, fields = rendered(render_module_tab(device, user=user), form, None if form == "install-selected" else 870)
+    if form == "install-selected":
+        fields = {**fields, "select": ["870"]}
+    return device, interface, user, action, fields
+
+
+_RACED_FORMS = pytest.mark.parametrize("form", ["install-selected", "install-branch", "update-module-interface"])
+
+
+@_RACED_FORMS
+def test_the_raced_module_write_binds_the_port_when_nothing_competes(client, form):
+    from dcim.models import Module
+
+    device, interface, user, action, fields = _unlink_race_world(form)
+    client.force_login(user)
+
+    client.post(action, data=fields)
+
+    interface.refresh_from_db()
+    assert Module.objects.filter(device=device).count() == 1
+    assert read_mapping(interface).own_id("default") == 8701
+
+
+@transactional_db_with_all_apps()
+@_RACED_FORMS
+def test_a_module_write_that_waits_for_an_unlink_reads_the_unlinked_mapping(client, form):
+    """The writer locks the page device before it reads the source binding, so it reads the committed unlink."""
+    from dcim.models import Device, Module
+
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import commit_when_waited
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping_row
+
+    device, interface, user, action, fields = _unlink_race_world(form)
+    installed = Module.objects.filter(device=device).count()
+    client.force_login(user)
+
+    def unlink(other):
+        # What an unlink holds and has written before its commit: the device row and its removed entry.
+        lock_row(other, Device, device.pk)
+        seed_mapping_row(device, Device(), connection=other)
+
+    commit_when_waited(unlink, lambda: client.post(action, data=fields))
+
+    interface.refresh_from_db()
+    assert mapping_summary(Device.objects.get(pk=device.pk)) == {}
+    assert Module.objects.filter(device=device).count() == installed
+    assert read_mapping(interface).own_id("default") is None
+
+
+# This inventory covers the nine participating writers. It checks direct calls in their
+# named methods, not aliases, arbitrary control flow or core/API writers.
+_MODULE_WRITER_METHODS = {
+    "InstallModuleView": "post",
+    "InstallBranchView": "_install_branch",
+    "InstallSelectedView": "post",
+    "UpdateModuleSerialView": "post",
+    "UpdateModuleInterfaceView": "post",
+    "ApplyModuleInterfaceTypesView": "post",
+    "ReplaceModuleView": "post",
+    "MoveModuleView": "post",
+    "AddBayTemplateView": "post",
+}
+_GRANT_WRITERS = frozenset(_MODULE_WRITER_METHODS) - {
+    "ApplyModuleInterfaceTypesView",
+    "MoveModuleView",
+    "AddBayTemplateView",
+}
+
+
+def _module_writer_protocol(source):
+    """Return the known methods seen and direct-call violations of their required phase order."""
+    import ast
+
+    def name(call):
+        return getattr(call.func, "id", getattr(call.func, "attr", ""))
+
+    seen, violations = set(), []
+    for owner in (node for node in ast.parse(source).body if isinstance(node, ast.ClassDef)):
+        for function in (node for node in owner.body if isinstance(node, ast.FunctionDef)):
+            calls = [node for node in ast.walk(function) if isinstance(node, ast.Call)]
+            if function.name == "_granted_selection":
+                forbidden = {"lock_module_write", "select_for_update", "_validate_module_destinations"}
+                if any(name(call) in forbidden or name(call).startswith("_lock_module_") for call in calls):
+                    violations.append((owner.name, "selection planning locks"))
+            if _MODULE_WRITER_METHODS.get(owner.name) != function.name:
+                continue
+            seen.add(owner.name)
+            owners = [call for call in calls if name(call) == "lock_module_write"]
+            observed = [call for call in calls if name(call) == "observe_module_write"]
+            membership = [call for call in calls if name(call) == "_validate_module_destinations"]
+            types = [call for call in calls if name(call) in {"lock_module_types", "lock_template_type"}]
+            if len(owners) != 1 or len(membership) != 1 or not observed:
+                violations.append((owner.name, "complete owner and membership phases"))
+                continue
+            if any(not any(keyword.arg == "page_device" for keyword in call.keywords) for call in observed):
+                violations.append((owner.name, "page and observed chassis owners"))
+            if membership[0].lineno <= owners[0].end_lineno or any(
+                call.lineno <= membership[0].end_lineno for call in types
+            ):
+                violations.append((owner.name, "membership follows owners and precedes types"))
+            if owner.name in _GRANT_WRITERS:
+                grants = [call for call in calls if name(call) == "_authorize_module_grant"]
+                final_wait = max(call.end_lineno for call in [*owners, *membership, *types])
+                if not grants or max(call.lineno for call in grants) <= final_wait:
+                    violations.append((owner.name, "final grant follows every wait"))
+    return seen, violations
+
+
+def test_every_module_writer_validates_membership_and_final_grants_after_its_complete_owner_locks():
+    import inspect
+
+    from netbox_librenms_plugin.views.sync import modules
+
+    source = inspect.getsource(modules)
+    seen, violations = _module_writer_protocol(source)
+    assert seen == set(_MODULE_WRITER_METHODS)
+    assert violations == []
+    assert "FOR KEY SHARE" not in source
+    assert "def _lock_module_destinations" not in source
+    assert "def _lock_module_scope" not in source
+
+
+@pytest.mark.parametrize("bad_phase", ["none", "grant", "membership", "page"])
+def test_the_module_protocol_guard_allows_planning_and_requires_final_authority(bad_phase):
+    source = """
+class InstallModuleView:
+    def post(self):
+        granted = _authorize_module_grant(page)
+        scope = lock_module_write(observe_module_write(page_device=page))
+        _validate_module_destinations(page, targets, scope)
+        scope = scope.lock_module_types(types)
+        granted = _authorize_module_grant(page)
+"""
+    if bad_phase == "grant":
+        source = source.rsplit("        granted = _authorize_module_grant(page)", 1)[0]
+    elif bad_phase == "membership":
+        source = source.replace(
+            "        scope = lock_module_write(observe_module_write(page_device=page))\n"
+            "        _validate_module_destinations(page, targets, scope)",
+            "        _validate_module_destinations(page, targets, scope)\n"
+            "        scope = lock_module_write(observe_module_write(page_device=page))",
+        )
+    elif bad_phase == "page":
+        source = source.replace("page_device=page", "device_ids=targets")
+    _seen, violations = _module_writer_protocol(source)
+    assert bool(violations) is (bad_phase != "none")
+
+
+def test_the_module_protocol_guard_refuses_locks_in_selection_planning():
+    source = """
+class InstallSelectedView:
+    def _granted_selection(self):
+        _lock_module_destinations(page, targets)
+"""
+    assert _module_writer_protocol(source)[1] == [("InstallSelectedView", "selection planning locks")]

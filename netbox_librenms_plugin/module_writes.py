@@ -65,9 +65,12 @@ class ModuleWriteObservation:
     modules: tuple
     bays: tuple
     serials: tuple
+    chassis_members: tuple = ()
 
 
-def observe_module_write(*, device_ids=(), module_ids=(), subtree_roots=(), observed_ids=()) -> ModuleWriteObservation:
+def observe_module_write(
+    *, device_ids=(), module_ids=(), subtree_roots=(), observed_ids=(), page_device=None
+) -> ModuleWriteObservation:
     """
     Observe destinations and existing or removed modules without permission-filtering the owner set.
 
@@ -76,7 +79,17 @@ def observe_module_write(*, device_ids=(), module_ids=(), subtree_roots=(), obse
     A concurrent change refuses the observation, rather than expanding its locks.
     The write claims the serials of *module_ids* and *subtree_roots*. It does not claim the
     serials of *observed_ids*: Modules whose topology it protects but whose serial it keeps.
+    A page includes its complete observed chassis, which the caller validates from the locked Devices.
     """
+    members = ()
+    if page_device is not None:
+        if page_device.virtual_chassis_id is not None:
+            members = tuple(
+                Device.objects.filter(virtual_chassis_id=page_device.virtual_chassis_id)
+                .order_by("pk")
+                .values_list("pk", flat=True)
+            )
+        device_ids = {*device_ids, page_device.pk, *members}
     released = set(module_ids)
     for root in subtree_roots:
         if root is not None:
@@ -90,7 +103,7 @@ def observe_module_write(*, device_ids=(), module_ids=(), subtree_roots=(), obse
     modules, bays = _topology(owners)
     if not set(rows).issubset(modules) or not _subtrees(modules, subtree_roots) <= selected:
         raise ValidationError(_CHANGED)
-    return ModuleWriteObservation(owners, modules, bays, tuple(row[4] for row in rows if row[0] in released))
+    return ModuleWriteObservation(owners, modules, bays, tuple(row[4] for row in rows if row[0] in released), members)
 
 
 @dataclass(frozen=True)

@@ -21,7 +21,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from django.db import DEFAULT_DB_ALIAS, connections, transaction
+from django.db import DEFAULT_DB_ALIAS, connections
 from django.db.models import JSONField, Q
 from django.db.models.fields.json import KeyTextTransform
 from django.db.models.lookups import Regex
@@ -32,7 +32,7 @@ from netbox_librenms_plugin.librenms_ids import (
     librenms_id_text_pattern,
     normalize_librenms_port_id,
 )
-from netbox_librenms_plugin.transactions import TransactionConflict, recorded_conflict
+from netbox_librenms_plugin.transactions import TransactionConflict, atomic_with_events, recorded_conflict
 
 logger = logging.getLogger(__name__)
 
@@ -1099,16 +1099,18 @@ def edit_server(
     """
     Build the change that sets the own ID and the OOB controller that an operator named on *server*.
 
-    *shown* is the entry the operator edited, as the form showed it. The named values replace it:
-    a None OOB ID removes the OOB entry, and a None own ID is allowed only where no own ID is
-    stored. The entry must keep an own ID or an OOB ID. *oob_type* counts only with an OOB ID. Each named ID is claimed, so an owner of either model refuses it at persistence.
+    *shown* is the entry the operator edited, as the form showed it. The named values replace it,
+    and a None ID removes that ID. The entry must keep an own ID or an OOB ID. *oob_type* counts
+    only with an OOB ID. Each named ID is claimed, so an owner of either model refuses it at
+    persistence. A change that removes or replaces a host ID is confirmed first, with its interface
+    cascade (:func:`host_change_scope`); this builder does not check that.
     A second usable mapping on *configured_servers* keeps the first one as preferred, as :func:`link_import` does.
 
     Raises:
         MappingChanged: The stored entry is not *shown*.
         ValueError: The stored value is legacy or invalid, the server records a migration marker or
-            a malformed entry, the stored own ID is removed, no ID is named, an ID is not a positive
-            integer, or the OOB type is missing or unknown.
+            a malformed entry, no ID is named, an ID is not a positive integer, or the OOB type is
+            missing or unknown.
 
     """
     server = require_server_key(server)
@@ -1130,9 +1132,6 @@ def edit_server(
         )
     own = _named_id(own_id, "LibreNMS ID")
     oob = _named_id(oob_id, "OOB controller ID")
-    # Discovery on the next page load stores a found own ID again, so a removal would not last.
-    if own is None and entry is not None and entry.own_id is not None:
-        raise ValueError("The LibreNMS ID cannot be removed here. Enter another ID to replace it.")
     if own is None and oob is None:
         raise ValueError("Enter a LibreNMS ID or an OOB controller ID.")
     if oob is not None and not oob_type:
@@ -1908,7 +1907,7 @@ def persist_merge(change: MergeChange | ChassisMove, *, write: Callable[[], obje
         RuntimeError: ``write`` did not persist each side exactly once.
 
     """
-    with transaction.atomic():
+    with atomic_with_events():
         for side in change.sides:
             row = side._model.objects.select_for_update().get(pk=side._pk)
             if read_mapping(row) != side.before:

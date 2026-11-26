@@ -6,7 +6,7 @@ from dcim.models import Device, Interface, VirtualChassis
 from django.contrib import messages
 from django.core import signing
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError
 from django.db.models import Q
 from django.http import Http404, HttpResponse
 from django.shortcuts import redirect, render
@@ -34,6 +34,7 @@ from netbox_librenms_plugin.sync_cache import (
 )
 from netbox_librenms_plugin.sync_query import page_query_url
 from netbox_librenms_plugin.transactions import (
+    atomic_with_events,
     classify_conflict,
     row_savepoint,
     run_transaction,
@@ -1380,7 +1381,7 @@ class CreateVRFFromIPRowView(SyncIPAddressesView):
             return self.redirect_to_ip_tab(request, obj)
         try:
             identity = self._creatable_vrf_identity(assessment, request.POST.get("create_vrf"))
-            with transaction.atomic():
+            with atomic_with_events():
                 vrf = self._create_vrf(request, identity)
         except _VRFCreateRefusedError as refusal:
             messages.error(request, str(refusal))
@@ -1452,7 +1453,7 @@ class CreateVRFFromIPRowView(SyncIPAddressesView):
             raise refusal
         vrf = VRF(name=name, rd=rd)
         try:
-            with transaction.atomic():
+            with atomic_with_events():
                 vrf.full_clean()
                 vrf.save()
         except (ValidationError, IntegrityError) as exc:
