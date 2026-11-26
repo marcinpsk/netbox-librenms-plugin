@@ -690,6 +690,7 @@ class TestValidateDeviceForImport:
             "virtual_chassis",
             "issues",
             "write_refusals",
+            "netbox_failed",
             "warnings",
             "site",
             "region",

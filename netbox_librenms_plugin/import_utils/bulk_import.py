@@ -282,7 +282,8 @@ def detect_collisions_for_device_ids(
             # closed: record it as unresolved rather than collision-check it on incomplete data
             # (mirrors the get_device_info miss above). The prefix is a shared constant so this
             # guard can't silently drift from the producer's wording.
-            unresolved[device_id] = LIBRENMS_ROW_UNREADABLE
+            # The DB-only pass reads no LibreNMS API, but a malformed LibreNMS row can still fail it.
+            unresolved[device_id] = NETBOX_ROW_UNREADABLE if validation["netbox_failed"] else LIBRENMS_ROW_UNREADABLE
             continue
         if stopped_at_unavailable_serial(validation):
             unresolved[device_id] = NETBOX_SERIAL_UNVERIFIED

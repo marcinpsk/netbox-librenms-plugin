@@ -1030,6 +1030,24 @@ def test_collision_precheck_reads_the_serial_rules_once_for_the_batch(live_libre
 
 
 @pytest.mark.django_db
+def test_collision_precheck_gives_a_netbox_reason_for_a_broken_serial_rule(live_librenms):
+    """The DB-only validation reads no LibreNMS data, so a broken stored rule is a NetBox reason."""
+    from netbox_librenms_plugin.import_utils.bulk_import import NETBOX_ROW_UNREADABLE, detect_collisions_for_device_ids
+    from netbox_librenms_plugin.tests.test_coverage_device_operations import _broken_serial_rule
+
+    device_id = 96216
+    _, row = _importable_row(live_librenms, device_id, "broken-rule-scan")
+    row["serial"] = "BROKEN-RULE-SERIAL"
+    _broken_serial_rule("scan")
+
+    collisions, unresolved = detect_collisions_for_device_ids(
+        [device_id], live_librenms.api, libre_devices_cache={device_id: row}
+    )
+
+    assert (collisions, unresolved) == ([], {device_id: NETBOX_ROW_UNREADABLE})
+
+
+@pytest.mark.django_db
 def test_collision_precheck_checks_a_vm_row_without_the_serial_rules(live_librenms):
     """A VM row needs no serial rule, so a failing rule read does not drop it from the batch."""
     from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids

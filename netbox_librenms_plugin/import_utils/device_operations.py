@@ -5,6 +5,7 @@ from collections.abc import Callable
 
 from dcim.models import Device, DeviceRole, DeviceType, Rack, Site, VirtualChassis
 from django.core.cache import cache
+from django.db import DatabaseError
 from django.db.models import Q
 from django.utils import timezone
 from tenancy.models import Tenant
@@ -887,6 +888,7 @@ def validate_device_for_import(  # noqa: C901
         "device_type_mismatch": False,  # True when existing device's type differs from LibreNMS
         "issues": [],
         "write_refusals": [],  # The issues that the import writer refuses; they are in "issues" too
+        "netbox_failed": False,  # True when validation stopped at a NetBox database error or a broken stored rule
         "warnings": [],
         "virtual_chassis": empty_virtual_chassis_data(),
         "site": {
@@ -1868,6 +1870,7 @@ def validate_device_for_import(  # noqa: C901
         # The validation result has no viewer: it is cached and shown to any import user.
         detail = exception_text_for(e, VirtualMachine if import_as_vm else Device, None)
         result["issues"].append(f"{VALIDATION_ERROR_ISSUE_PREFIX} {detail}")
+        result["netbox_failed"] = isinstance(e, (DatabaseError, RuleConfigurationError))
         return result
 
 
