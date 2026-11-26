@@ -16,7 +16,6 @@ import pytest
 from core.models import ObjectChange
 from dcim.models import Device, Interface, MACAddress
 from django.contrib.contenttypes.models import ContentType
-from django.core.cache import cache
 from django.db import transaction
 from django.urls import reverse
 from extras import events
@@ -28,12 +27,12 @@ from netbox_librenms_plugin.interface_sync import InterfaceWrite, update_interfa
 from netbox_librenms_plugin.middleware import TRY_AGAIN_MESSAGE
 from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.server_mappings import read_mapping
-from netbox_librenms_plugin.sync_cache import TAB_SPECS, SyncTab, sync_snapshot_key
 from netbox_librenms_plugin.tests.conftest import (
     configure_default_librenms_server,
     make_device,
     make_interface,
     make_superuser,
+    make_virtual_chassis_members,
     transactional_db_with_all_apps,
 )
 from netbox_librenms_plugin.tests.interface_sync_post_helpers import (
@@ -51,7 +50,9 @@ from netbox_librenms_plugin.tests.lock_conflict_helpers import commit_row_change
 from netbox_librenms_plugin.tests.mapping_fixtures import (
     custom_fields_without_mapping,
     mapping_from_change_record,
+    seed_stored_mapping,
 )
+from netbox_librenms_plugin.tests.source_snapshot_helpers import ip_address_row, seed_ip_snapshot
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms, messages_on
 from netbox_librenms_plugin.views.mixins import VlanAssignmentMixin
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
@@ -577,20 +578,13 @@ def seed_ip_rows(device, rows):
     """
     Put one IP row per ``(address, port_id, interface name)`` in the IP snapshot of *device*.
 
-    An IP row has no interface name, so the IP tab resolves the interface from the cached port.
+    An IP row has no interface name, so the IP tab resolves the interface from the snapshot port.
     """
-    cache.set(
-        sync_snapshot_key(device, TAB_SPECS[SyncTab.IP_ADDRESSES].source.data_type, SERVER_KEY),
-        {
-            "ip_addresses": [
-                {"ip_address": address, "prefix_length": 24, "ip_with_mask": f"{address}/24", "port_id": port_id}
-                for address, port_id, _ in rows
-            ],
-            "mgmt_ip": "",
-            "ports_by_id": {port_id: sync_port(port_id, name, alias=f"{name} uplink") for _, port_id, name in rows},
-            "interface_name_field": "ifName",
-        },
-        timeout=300,
+    seed_ip_snapshot(
+        device,
+        [ip_address_row(address, port_id) for address, port_id, _ in rows],
+        [sync_port(port_id, name, alias=f"{name} uplink") for _, port_id, name in rows],
+        server_key=SERVER_KEY,
     )
 
 
@@ -624,12 +618,24 @@ def commit_when_the_ip_tab_writes(monkeypatch, pk, commit):
     return state
 
 
+def _ip_tab_chassis(tag, names):
+    """
+    Return the page member of a three-member chassis and the member-2 interfaces of *names*.
+
+    Member 3 has the same names, bound to other ports, so the IP tab's name match is ambiguous and the
+    create-missing writer finds member 2 from the port name and writes its interface.
+    """
+    _chassis, (page, member, sibling) = make_virtual_chassis_members(tag, count=3)
+    seed_stored_mapping(page, {SERVER_KEY: {"id": 42}}, save=True)
+    for offset, name in enumerate(names):
+        bound_interface(sibling, name, 7900 + offset)
+    return page, [make_interface(member, name, iface_type="1000base-t") for name in names]
+
+
 @transactional_db_with_all_apps()
 def test_a_stale_row_in_the_ip_tab_retries_the_batch_and_every_row_syncs(client, monkeypatch):
-    device = make_device("late-write-ip", librenms_cf={SERVER_KEY: {"id": 42}})
-    stale = make_interface(device, "Ethernet1", iface_type="1000base-t")
-    fine = make_interface(device, "Ethernet2", iface_type="1000base-t")
-    seed_ip_rows(device, [("198.18.20.10", 7020, "Ethernet1"), ("198.18.21.10", 7021, "Ethernet2")])
+    device, (stale, fine) = _ip_tab_chassis("late-write-ip", ["Ethernet2/1", "Ethernet2/2"])
+    seed_ip_rows(device, [("198.18.20.10", 7020, "Ethernet2/1"), ("198.18.21.10", 7021, "Ethernet2/2")])
     client.force_login(make_superuser("late-write-ip-user"))
 
     with second_connection() as other:
@@ -644,11 +650,11 @@ def test_a_stale_row_in_the_ip_tab_retries_the_batch_and_every_row_syncs(client,
     assert response.status_code == 302
     assert messages_on(response.wsgi_request) == [("success", "Created IP addresses: 198.18.20.10/24, 198.18.21.10/24")]
     stale.refresh_from_db()
-    assert (stale.label, stale.description) == ("set by another operation", "Ethernet1 uplink")
+    assert (stale.label, stale.description) == ("set by another operation", "Ethernet2/1 uplink")
     assert read_mapping(stale).own_id(SERVER_KEY) == 7020
     assert IPAddress.objects.get(address="198.18.20.10/24").assigned_object == stale
     fine.refresh_from_db()
-    assert fine.description == "Ethernet2 uplink"
+    assert fine.description == "Ethernet2/2 uplink"
     assert IPAddress.objects.get(address="198.18.21.10/24").assigned_object == fine
 
 
@@ -656,9 +662,8 @@ def test_a_stale_row_in_the_ip_tab_retries_the_batch_and_every_row_syncs(client,
 @COMMIT_POINTS
 def test_a_row_that_leaves_the_change_scope_in_the_ip_tab_is_never_written(client, monkeypatch, commit_point):
     """The retry finds no interface of the port's name, so it creates one; the renamed row keeps its values."""
-    device = make_device(f"late-write-ip-scope-{commit_point}", librenms_cf={SERVER_KEY: {"id": 43}})
-    interface = make_interface(device, "eth1", iface_type="1000base-t")
-    seed_ip_rows(device, [("198.18.22.10", 7022, "eth1")])
+    device, (interface,) = _ip_tab_chassis(f"late-write-ip-scope-{commit_point}", ["eth2/1"])
+    seed_ip_rows(device, [("198.18.22.10", 7022, "eth2/1")])
     client.force_login(
         _user_who_may_change_only_eth_interfaces(
             f"late-write-ip-scope-{commit_point}-user", ("add", IPAddress), ("change", IPAddress)
@@ -680,7 +685,7 @@ def test_a_row_that_leaves_the_change_scope_in_the_ip_tab_is_never_written(clien
     interface.refresh_from_db()
     assert (interface.name, interface.description) == ("private-link", "")
     assert read_mapping(interface).own_id(SERVER_KEY) is None
-    created = Interface.objects.get(device=device, name="eth1")
+    created = Interface.objects.get(device=interface.device, name="eth2/1")
     assert read_mapping(created).own_id(SERVER_KEY) == 7022
     assert IPAddress.objects.get(address="198.18.22.10/24").assigned_object == created
 

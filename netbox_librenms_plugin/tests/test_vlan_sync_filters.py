@@ -11,13 +11,13 @@ from html import unescape
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 import pytest
-from django.core.cache import cache
 from django.urls import reverse
 from ipam.models import VLAN, VLANGroup
 
+from netbox_librenms_plugin.acquisition.registry import Resource
 from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
+from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_source_snapshot
 from netbox_librenms_plugin.tests.test_interface_sync_filters import CELL, _visible_text, serve_sync_page
-from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
 
 SERVER_KEY = "default"
 LIBRENMS_ID = 4242
@@ -33,7 +33,7 @@ FIELD_COLUMNS = {
 
 
 def _seed(device, rows):
-    cache.set(SyncVLANsView().get_cache_key(device, "vlans", SERVER_KEY), rows, timeout=300)
+    seed_source_snapshot(device, Resource.VLANS, SERVER_KEY, vlans=rows)
 
 
 def _vlan(vid, name, **fields):

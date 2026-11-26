@@ -3,6 +3,7 @@
 import pytest
 
 from netbox_librenms_plugin.tests.conftest import make_device
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
 
 class TestIsListOfDicts:
@@ -40,8 +41,13 @@ class TestVlanCachedPayloadShape:
         view.librenms_id = 1
         return view
 
-    @pytest.mark.parametrize("bad", ["garbage-string", [42], [{"vlan_vlan": 1}, "scalar"]])
-    def test_malformed_cached_vlans_are_purged_and_render_empty(self, bad):
+    # The raw VLAN list of the old cache format and a payload of another schema version read as no snapshot.
+    @pytest.mark.parametrize(
+        "bad",
+        ["garbage-string", [42], [{"vlan_vlan": 1}, "scalar"], [{"vlan_vlan": 1, "vlan_name": "v1"}], {"schema": 0}],
+        ids=["string", "scalar-list", "mixed-list", "raw-vlan-list", "other-schema"],
+    )
+    def test_malformed_cached_vlans_render_empty_and_are_left_for_a_refresh(self, bad):
         from django.contrib.auth.models import AnonymousUser
         from django.core.cache import cache
         from django.test import RequestFactory
@@ -57,20 +63,23 @@ class TestVlanCachedPayloadShape:
         context = view.get_vlan_context(request, device, server_key=server_key)
 
         assert context["vlan_table"] is None
-        assert cache.get(vlans_key) is None
+        # A read never deletes: a concurrent refresh can store a new snapshot under the same key.
+        assert cache.get(vlans_key) == bad
 
     def test_empty_cached_vlans_render_an_empty_table(self):
-        from django.contrib.auth.models import AnonymousUser
-        from django.core.cache import cache
         from django.test import RequestFactory
+
+        from netbox_librenms_plugin.acquisition.registry import Resource
+        from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_source_snapshot
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
         device = make_device("vlan-empty-render")
         view = self._view()
         request = RequestFactory().get("/")
-        request.user = AnonymousUser()
+        request.user = make_user_with_perms("vlan-empty-render-user", [("view", type(device))])
         server_key = view.librenms_api.server_key
-        vlans_key = view.get_cache_key(device, "vlans", server_key)
-        cache.set(vlans_key, [], timeout=300)
+        seed_mapping(device, server_key, own=501)
+        seed_source_snapshot(device, Resource.VLANS, server_key, vlans=[])
 
         context = view.get_vlan_context(request, device, server_key=server_key)
 
