@@ -123,25 +123,33 @@ class TestNestedBuiltInUnits:
 
     def test_a_unit_below_a_real_module_is_not_matched(self):
         from netbox_librenms_plugin.views.base.modules_view import DeviceIdentity, _check_ignore_rules
-        from netbox_librenms_plugin.utils import normalize_stack_serial
+        from netbox_librenms_plugin.serial_identity import plain_context
 
         rule = model_rule()
         inventory = {item["entPhysicalIndex"]: item for item in ixr_inventory()}
         # A line card of its own model holds the unit, so the unit is a real FRU on that card.
         inventory[SLOT_1] = {**inventory[SLOT_1], "entPhysicalModelName": "3HE16474AA"}
-        identity = DeviceIdentity(type_models=frozenset({PART_NUMBER.casefold()}), serial_key=normalize_stack_serial)
+        identity = DeviceIdentity(
+            type_models=frozenset({PART_NUMBER.casefold()}),
+            serial_context=plain_context(),
+            module_serial_context=plain_context(),
+        )
 
         assert _check_ignore_rules(inventory[MDA], inventory[SLOT_1], [rule], inventory, identity) is None
         assert _check_ignore_rules(inventory[SLOT_1], inventory[CHASSIS], [rule], inventory, identity) is None
 
     def test_a_built_in_chain_must_end_at_the_chassis(self):
         from netbox_librenms_plugin.views.base.modules_view import DeviceIdentity, _check_ignore_rules
-        from netbox_librenms_plugin.utils import normalize_stack_serial
+        from netbox_librenms_plugin.serial_identity import plain_context
 
         rule = model_rule()
         inventory = {item["entPhysicalIndex"]: item for item in ixr_inventory()}
         inventory[SLOT_1] = {**inventory[SLOT_1], "entPhysicalContainedIn": 999}
-        identity = DeviceIdentity(type_models=frozenset({PART_NUMBER.casefold()}), serial_key=normalize_stack_serial)
+        identity = DeviceIdentity(
+            type_models=frozenset({PART_NUMBER.casefold()}),
+            serial_context=plain_context(),
+            module_serial_context=plain_context(),
+        )
 
         assert _check_ignore_rules(inventory[MDA], inventory[SLOT_1], [rule], inventory, identity) is None
 
@@ -264,11 +272,13 @@ class TestCandidate:
     @staticmethod
     def _candidate(index, *, type_models=(), has_bay=False, **changes):
         from netbox_librenms_plugin.views.base.modules_view import DeviceIdentity, built_in_candidate
-        from netbox_librenms_plugin.utils import normalize_stack_serial
+        from netbox_librenms_plugin.serial_identity import plain_context
 
         inventory = {item["entPhysicalIndex"]: item for item in ixr_inventory()}
         inventory[index] = {**inventory[index], **changes}
-        identity = DeviceIdentity(type_models=frozenset(type_models), serial_key=normalize_stack_serial)
+        identity = DeviceIdentity(
+            type_models=frozenset(type_models), serial_context=plain_context(), module_serial_context=plain_context()
+        )
         candidate = built_in_candidate(inventory[index], inventory, identity, has_bay=has_bay)
         return None if candidate is None else (candidate.model, candidate.records_part_number)
 
@@ -359,13 +369,21 @@ class TestMarkBuiltIn:
 
         from netbox_librenms_plugin.models import BUILT_IN_UNITS_RULE
 
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+        from netbox_librenms_plugin.tests.view_test_helpers import queued_events
+
         device = ixr_device("ixr-mark", part_number="")
         assert set(controls(device)) == {SLOT_1, SLOT_A}
+        fields = modal_form(device, SLOT_1)
 
-        mark(device, modal_form(device, SLOT_1))
+        with queued_events(make_superuser("ixr-mark-events")) as queued:
+            mark(device, fields)
+            events = queued()
 
         assert DeviceType.objects.get(pk=device.device_type_id).part_number == PART_NUMBER
         (rule,) = built_in_rules()
+        # The control: the writes that stay send their events.
+        assert {("devicetype", device.device_type_id), ("inventoryignorerule", rule.pk)} <= events
         assert rule.manufacturer_id == device.device_type.manufacturer_id
         assert {field: getattr(rule, field) for field in BUILT_IN_UNITS_RULE} == BUILT_IN_UNITS_RULE
         rows = tab_rows(device)
@@ -571,7 +589,9 @@ class TestMarkBuiltIn:
         librenms_server.register(
             "/api/v0/devices/101/ports", {"status": "ok", "ports": [{"port_id": 99, "ifName": "1/1/c2"}]}, method="GET"
         )
-        merged, error = view._merge_transceiver_data(inventory)
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
+        merged, error = view._merge_transceiver_data(inventory, serial_context=SerialRules.load().context(None))
         assert error is None
 
         seed_snapshot(device, merged)
@@ -822,6 +842,7 @@ class TestMarkBuiltInScope:
         from dcim.models import DeviceType
 
         from netbox_librenms_plugin.models import InventoryIgnoreRule
+        from netbox_librenms_plugin.tests.view_test_helpers import queued_events
 
         device = ixr_device("ixr-scope-add", part_number="")
         user = self._user(
@@ -832,9 +853,13 @@ class TestMarkBuiltInScope:
         fields = modal_form(device, SLOT_1, user=user)
         before = written(device)
 
-        mark(device, fields, user=user)
+        with queued_events(user) as queued:
+            mark(device, fields, user=user)
+            events = queued()
 
         assert written(device) == before
+        # The rolled-back writes must not send their events.
+        assert {model for model, _pk in events}.isdisjoint({"devicetype", "inventoryignorerule"})
 
     def test_the_modal_does_not_show_a_reused_rule_outside_the_change_constraint(self):
         from dcim.models import DeviceType
@@ -863,6 +888,7 @@ class TestMarkBuiltInScope:
         from dcim.models import DeviceType
 
         from netbox_librenms_plugin.models import InventoryIgnoreRule
+        from netbox_librenms_plugin.tests.view_test_helpers import queued_events
 
         device = ixr_device("ixr-scope-change", part_number="")
         user = self._user(
@@ -873,9 +899,13 @@ class TestMarkBuiltInScope:
         fields = modal_form(device, SLOT_1, user=user)
         before = written(device)
 
-        mark(device, fields, user=user)
+        with queued_events(user) as queued:
+            mark(device, fields, user=user)
+            events = queued()
 
         assert written(device) == before
+        # The rolled-back writes must not send their events.
+        assert {model for model, _pk in events}.isdisjoint({"devicetype", "inventoryignorerule"})
 
     def test_a_manufacturer_changed_before_the_lock_refuses_the_mark(self):
         from dcim.models import DeviceType, Manufacturer

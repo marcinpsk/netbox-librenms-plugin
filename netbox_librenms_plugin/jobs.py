@@ -92,6 +92,8 @@ class FilterDevicesJob(JobRunner):
 
         """
         from netbox_librenms_plugin.import_utils import process_device_filters
+        from netbox_librenms_plugin.import_utils.cache import serial_rules_version
+        from netbox_librenms_plugin.serial_identity import SerialRules
 
         self.logger.info("Starting LibreNMS device filter job")
         self.logger.info(f"Filters: {filters}")
@@ -108,6 +110,7 @@ class FilterDevicesJob(JobRunner):
         self.logger.info(f"LibreNMS API initialized (cache timeout: {api.cache_timeout}s)")
 
         # Process filters using shared function
+        serial_rules = SerialRules.load()
         validated_devices = process_device_filters(
             api=api,
             filters=filters,
@@ -118,6 +121,7 @@ class FilterDevicesJob(JobRunner):
             job=self,
             use_sysname=use_sysname,
             strip_domain=strip_domain,
+            serial_rules=serial_rules,
         )
 
         # Store device IDs for result retrieval
@@ -139,6 +143,7 @@ class FilterDevicesJob(JobRunner):
             "vc_detection_enabled": vc_detection_enabled,
             "use_sysname": use_sysname,
             "strip_domain": strip_domain,
+            "serial_rules": serial_rules_version(serial_rules),
             "cache_timeout": api.cache_timeout,
             "cached_at": cached_at,
             "completed": True,
@@ -337,8 +342,7 @@ class ImportDevicesJob(JobRunner):
                     if skipped_device_ids:
                         self.logger.warning(precheck_outcome.skip_message)
                         device_result.setdefault("failed", []).extend(
-                            {"device_id": device_id, "error": precheck_outcome.skip_message}
-                            for device_id in skipped_device_ids
+                            {"device_id": device_id, "error": unresolved[device_id]} for device_id in skipped_device_ids
                         )
 
         # Import VMs
@@ -351,7 +355,7 @@ class ImportDevicesJob(JobRunner):
                 vm_result["failed"] = [{"device_id": device_id, "error": batch_blocked_msg} for device_id in vm_imports]
             else:
                 # Apply the same skip set to VMs: import the collision-checked VM rows, skip the
-                # unresolved ones (surfaced as failures with the shared message).
+                # unresolved ones (surfaced as failures with their reasons).
                 importable_vm_imports = precheck_outcome.importable_vm_imports if precheck_outcome else vm_imports
                 skipped_vm_ids = [d for d in vm_imports if d in skipped_id_set] if precheck_outcome else []
                 if importable_vm_imports:
@@ -364,7 +368,7 @@ class ImportDevicesJob(JobRunner):
                 if skipped_vm_ids:
                     self.logger.warning(precheck_outcome.skip_message)
                     vm_result.setdefault("failed", []).extend(
-                        {"device_id": device_id, "error": precheck_outcome.skip_message} for device_id in skipped_vm_ids
+                        {"device_id": device_id, "error": unresolved[device_id]} for device_id in skipped_vm_ids
                     )
 
         # Combine results — partition device_result successes by model type since

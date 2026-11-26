@@ -85,7 +85,7 @@ def _is_valid_cached_search_metadata(metadata, server_key: str) -> bool:
     )
 
 
-def get_active_cached_searches(server_key: str) -> list[dict]:
+def get_active_cached_searches(server_key: str, serial_rules) -> list[dict]:
     """
     Retrieve all active cached searches for a server and enrich with display-friendly values.
 
@@ -94,6 +94,7 @@ def get_active_cached_searches(server_key: str) -> list[dict]:
 
     Args:
         server_key: LibreNMS server identifier
+        serial_rules: The SerialRules that a search must have validated its rows under to be listed.
 
     Returns:
         List of dicts containing cache metadata with enriched display_filters
@@ -153,6 +154,11 @@ def get_active_cached_searches(server_key: str) -> list[dict]:
             remaining_seconds = max(0, cache_timeout - age_seconds)
 
             if remaining_seconds > 0:
+                # The index keeps a search of other serial rules: a rebuild under the current rules reuses its key.
+                valid_cache_keys.append(cache_key)
+                # A search that validated under other serial rules has no rows to reopen, so it is not listed.
+                if not search_metadata_is_current(metadata, serial_rules):
+                    continue
                 # Add remaining time and cache key
                 metadata["remaining_seconds"] = int(remaining_seconds)
                 metadata["cache_key"] = cache_key
@@ -172,7 +178,6 @@ def get_active_cached_searches(server_key: str) -> list[dict]:
                 metadata["display_filters"] = display_filters
 
                 active_searches.append(metadata)
-                valid_cache_keys.append(cache_key)
 
     # Clean up index if any keys have expired
     if len(valid_cache_keys) < len(cache_index):
@@ -184,11 +189,11 @@ def get_active_cached_searches(server_key: str) -> list[dict]:
     return active_searches
 
 
-def get_active_cached_searches_for_servers(servers: Mapping[str, str]) -> list[dict]:
+def get_active_cached_searches_for_servers(servers: Mapping[str, str], serial_rules) -> list[dict]:
     """Return active cached searches from configured servers without merging namespaces."""
     active_searches = []
     for server_key, display_name in servers.items():
-        for search in get_active_cached_searches(server_key):
+        for search in get_active_cached_searches(server_key, serial_rules):
             active_searches.append(
                 {
                     **search,
@@ -200,6 +205,18 @@ def get_active_cached_searches_for_servers(servers: Mapping[str, str]) -> list[d
     return active_searches
 
 
+def serial_rules_version(serial_rules=None) -> str:
+    """Return the serial rule version that validated rows key on; None reads the rules."""
+    from netbox_librenms_plugin.serial_identity import SerialRules
+
+    return (serial_rules or SerialRules.load()).digest[:16]
+
+
+def search_metadata_is_current(metadata, serial_rules=None) -> bool:
+    """Return whether cached search *metadata* exists for the serial rules that its validated rows key on."""
+    return isinstance(metadata, dict) and metadata.get("serial_rules") == serial_rules_version(serial_rules)
+
+
 def get_validated_device_cache_key(
     server_key: str,
     filters: dict,
@@ -207,6 +224,7 @@ def get_validated_device_cache_key(
     vc_enabled: bool,
     use_sysname: bool = True,
     strip_domain: bool = False,
+    serial_rules=None,
 ) -> str:
     """
     Generate a consistent cache key for validated device data.
@@ -221,6 +239,7 @@ def get_validated_device_cache_key(
         vc_enabled: Whether virtual chassis detection was enabled
         use_sysname: Whether sysName is preferred over hostname for device naming
         strip_domain: Whether domain suffix is stripped from device names
+        serial_rules: The SerialRules the validation used; None reads them. A rule edit changes the key.
 
     Returns:
         str: Cache key for the validated device
@@ -228,14 +247,16 @@ def get_validated_device_cache_key(
     Example:
         >>> key = get_validated_device_cache_key('default', {'location': 'NYC'}, 123, True)
         >>> key
-        'validated_device_default_154d56ec9289d49c_123_vc_sysname=True_strip=False'
+        'validated_device_default_154d56ec9289d49c_123_vc_sysname=True_strip=False_rules=4f53cda18c2baa0c'
     """
     # Sort filters for a deterministic, cross-process stable hash; None values are excluded
     # (consistent with get_cache_metadata_key).
     filter_hash = _build_filter_hash(filters)
     vc_part = "vc" if vc_enabled else "novc"
+    rules_part = serial_rules_version(serial_rules)
     return (
         f"validated_device_{server_key}_{filter_hash}_{device_id}_{vc_part}_sysname={use_sysname}_strip={strip_domain}"
+        f"_rules={rules_part}"
     )
 
 
