@@ -1078,6 +1078,33 @@ class TestVirtualChassisInventory:
         assert holder.name not in held_row
         assert holder.get_absolute_url() not in held_row
 
+    def test_a_page_device_outside_the_change_scope_offers_no_assignment(self, client, librenms_server):
+        """The writer changes the page device A first, so a user who may change only B gets no selector and no submit."""
+        from dcim.models import Device
+        from django.utils.html import escape
+
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms, module_tab_forms
+        from netbox_librenms_plugin.views.base.librenms_sync_view import VC_SERIALS_PAGE_REFUSAL
+
+        _vc, (page, other) = make_virtual_chassis_members("inventory-page-scope", count=2)
+        seed_mapping(page, SERVER_KEY, own=6667)
+        inventory = _stack_inventory({"entPhysicalSerialNum": "PAGE-A"}, {"entPhysicalSerialNum": "PAGE-B"})
+        _register_device(librenms_server, 6667, page.name, inventory=inventory)
+        user = make_user_with_perms("vc-serial-page-a", [("view", Device)])
+        client.force_login(grant(user, "change", Device, constraints={"pk": other.pk}))
+
+        response = client.get(_sync_url(page))
+
+        html = response.content.decode()
+        (form,) = [form for form in module_tab_forms(html).forms if "assign-vc-serial" in form["action"]]
+        assert form["selects"] == {}
+        assert (form["fields"]["member_id_1"], form["fields"]["member_id_2"]) == ("", "")
+        assert html.count(escape(VC_SERIALS_PAGE_REFUSAL)) == 1
+        assert 'type="submit" form="vc-serials-form"' not in html
+        # The submit would reach a writer that refuses the page device.
+        posted = client.post(form["action"], form["fields"])
+        assert posted.status_code == 404
+
     def test_two_rows_that_match_one_holder_select_no_member(self, logged_in_client, librenms_server):
         """Two rows report the serial of A, so neither row selects A and the post of a third row succeeds."""
         _vc, (holder, other) = make_virtual_chassis_members("inventory-shared-holder", count=2)

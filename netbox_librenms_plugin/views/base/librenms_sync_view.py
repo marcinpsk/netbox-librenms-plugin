@@ -69,6 +69,10 @@ SYNC_TAB_PREFERENCE = "plugins.netbox_librenms_plugin.sync_tab"
 
 INTERFACE_NAME_SELECTOR_TABS = ("interfaces", "cables", "ipaddresses")
 
+VC_SERIALS_PAGE_REFUSAL = (
+    "You cannot change this device. The dialog assigns serials through this device, so it only shows them."
+)
+
 
 class BaseLibreNMSSyncView(
     LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectPermissionMixin, generic.ObjectListView
@@ -865,6 +869,7 @@ class BaseLibreNMSSyncView(
                     'assigned_member': Device object or None (if serial matches existing assignment)
                     'holder_visible': whether the user may view the assigned member
                     'member_options': the members that the user may view and change, which the row offers
+                    'assign_refusal': why the dialog assigns no serial on this page, or ""
                     'selected_member': the assigned member when the user may change it, no other row
                         has it too and the writer can store the serial, else None
                     'shared_holder': whether another row has the same assigned member
@@ -896,8 +901,14 @@ class BaseLibreNMSSyncView(
             .filter(virtual_chassis_id=obj.virtual_chassis_id)
             .values_list("pk", flat=True)
         )
+        # The writer changes the page device first, so a page outside the change scope offers no member.
+        assign_refusal = "" if obj.pk in changeable else VC_SERIALS_PAGE_REFUSAL
         # The writer rolls back the whole post for a member outside the change scope, so the dialog offers none.
-        assignable = [member for member in vc_members if member.pk in changeable and member.pk in viewable]
+        assignable = (
+            [member for member in vc_members if member.pk in changeable and member.pk in viewable]
+            if not assign_refusal
+            else []
+        )
 
         result = []
         # Like admits(), the stack holds when the rules of any member explain it; the dialog shows the LibreNMS text.
@@ -917,6 +928,7 @@ class BaseLibreNMSSyncView(
                     "assigned_member": assigned_member,
                     "holder_visible": assigned_member is not None and assigned_member.pk in viewable,
                     "member_options": assignable,
+                    "assign_refusal": assign_refusal,
                 }
             )
 

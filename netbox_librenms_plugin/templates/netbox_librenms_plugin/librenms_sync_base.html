@@ -1174,11 +1174,16 @@ that may well be correct.
                 </h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
             </div>
+            {% with page_refusal=vc_inventory_serials.0.assign_refusal %}
             <div class="modal-body">
+                {% if page_refusal %}
+                <div class="alert alert-warning" data-vc-serials-refusal>{{ page_refusal }}</div>
+                {% else %}
                 <p class="text-muted">
                     Serial numbers retrieved from LibreNMS inventory API.
                     Select which Virtual Chassis member each serial number should be assigned to, then click "Sync All" to save.
                 </p>
+                {% endif %}
                 <form method="post" id="vc-serials-form"
                       action="{% url 'plugins:netbox_librenms_plugin:assign_vc_serial' pk=object.pk %}">
                     {% csrf_token %}
@@ -1217,10 +1222,12 @@ that may well be correct.
                                 </td>
                                 <td>
                                     <input type="hidden" name="librenms_serial_{{ forloop.counter }}" value="{{ item.librenms_serial }}">
-                                    {% if item.fit_refusal %}
+                                    {% if page_refusal or item.fit_refusal %}
                                     {# The writer reads rows until the first missing member field, so the row posts an empty one. #}
                                     <input type="hidden" name="member_id_{{ forloop.counter }}" value="">
+                                    {% if item.fit_refusal %}
                                     <span class="text-muted small" data-serial-fit-refusal>{{ item.fit_refusal }}</span>
+                                    {% endif %}
                                     {% else %}
                                     <select name="member_id_{{ forloop.counter }}" class="form-select form-select-sm">
                                         <option value="">Select member...</option>
@@ -1243,10 +1250,13 @@ that may well be correct.
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                {% if not page_refusal %}
                 <button type="submit" form="vc-serials-form" class="btn btn-primary">
                     <i class="mdi mdi-sync"></i> Sync All
                 </button>
+                {% endif %}
             </div>
+            {% endwith %}
         </div>
     </div>
 </div>
