@@ -369,13 +369,21 @@ class TestMarkBuiltIn:
 
         from netbox_librenms_plugin.models import BUILT_IN_UNITS_RULE
 
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+        from netbox_librenms_plugin.tests.view_test_helpers import queued_events
+
         device = ixr_device("ixr-mark", part_number="")
         assert set(controls(device)) == {SLOT_1, SLOT_A}
+        fields = modal_form(device, SLOT_1)
 
-        mark(device, modal_form(device, SLOT_1))
+        with queued_events(make_superuser("ixr-mark-events")) as queued:
+            mark(device, fields)
+            events = queued()
 
         assert DeviceType.objects.get(pk=device.device_type_id).part_number == PART_NUMBER
         (rule,) = built_in_rules()
+        # The control: the writes that stay send their events.
+        assert {("devicetype", device.device_type_id), ("inventoryignorerule", rule.pk)} <= events
         assert rule.manufacturer_id == device.device_type.manufacturer_id
         assert {field: getattr(rule, field) for field in BUILT_IN_UNITS_RULE} == BUILT_IN_UNITS_RULE
         rows = tab_rows(device)
@@ -834,6 +842,7 @@ class TestMarkBuiltInScope:
         from dcim.models import DeviceType
 
         from netbox_librenms_plugin.models import InventoryIgnoreRule
+        from netbox_librenms_plugin.tests.view_test_helpers import queued_events
 
         device = ixr_device("ixr-scope-add", part_number="")
         user = self._user(
@@ -844,9 +853,13 @@ class TestMarkBuiltInScope:
         fields = modal_form(device, SLOT_1, user=user)
         before = written(device)
 
-        mark(device, fields, user=user)
+        with queued_events(user) as queued:
+            mark(device, fields, user=user)
+            events = queued()
 
         assert written(device) == before
+        # The rolled-back writes must not send their events.
+        assert {model for model, _pk in events}.isdisjoint({"devicetype", "inventoryignorerule"})
 
     def test_the_modal_does_not_show_a_reused_rule_outside_the_change_constraint(self):
         from dcim.models import DeviceType
@@ -875,6 +888,7 @@ class TestMarkBuiltInScope:
         from dcim.models import DeviceType
 
         from netbox_librenms_plugin.models import InventoryIgnoreRule
+        from netbox_librenms_plugin.tests.view_test_helpers import queued_events
 
         device = ixr_device("ixr-scope-change", part_number="")
         user = self._user(
@@ -885,9 +899,13 @@ class TestMarkBuiltInScope:
         fields = modal_form(device, SLOT_1, user=user)
         before = written(device)
 
-        mark(device, fields, user=user)
+        with queued_events(user) as queued:
+            mark(device, fields, user=user)
+            events = queued()
 
         assert written(device) == before
+        # The rolled-back writes must not send their events.
+        assert {model for model, _pk in events}.isdisjoint({"devicetype", "inventoryignorerule"})
 
     def test_a_manufacturer_changed_before_the_lock_refuses_the_mark(self):
         from dcim.models import DeviceType, Manufacturer

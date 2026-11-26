@@ -35,6 +35,7 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
     make_request,
     message_texts,
     post as view_post,
+    queued_events,
     render_module_tab,
     rendered_modal_form,
     rendered_module_form,
@@ -1257,13 +1258,17 @@ class TestInstallAndUpdateViews:
             UpdateModuleInterfaceView, device, [item], 54, live_librenms, "update-module-interface", 540
         )
 
-        response = view_post(view, request, pk=device.pk)
+        with queued_events(request.user) as queued:
+            response = view_post(view, request, pk=device.pk)
+            events = queued()
 
         interface.refresh_from_db()
         assert response.status_code == 302
         assert interface.module == module
         assert read_mapping(interface).own_id("default") == 5540
         assert any("Updated interface" in text for text in message_texts(request))
+        # The control: a bind that stays sends its event.
+        assert ("interface", interface.pk) in events
 
     def test_update_interface_refuses_a_reused_inventory_index(self, live_librenms):
         """A stale interface form must not bind identity from a replacement row."""
@@ -1855,14 +1860,80 @@ class TestModuleBindLockConflicts:
 
         with second_connection() as other:
             lock_row(other, Interface, standalone.pk)
-            with lock_timeout(200), pytest.raises(OperationalError) as caught:
-                view_post(view, request, pk=device.pk)
+            with queued_events(request.user) as queued:
+                with lock_timeout(200), pytest.raises(OperationalError) as caught:
+                    view_post(view, request, pk=device.pk)
+                events = queued()
 
         primary.refresh_from_db()
         standalone.refresh_from_db()
         assert classify_conflict(caught.value)
         assert (primary.module_id, standalone.module_id) == (None, None)
         assert read_mapping(primary).own_id("default") is None
+        # The rolled-back bind must not send its event.
+        assert ("interface", primary.pk) not in events
+
+    def test_a_failed_adoption_sends_no_event_for_the_interfaces_it_rolled_back(self, live_librenms):
+        """The bind stays and the adoption rolls back, so only the bound interface sends an event."""
+        from dcim.models import InterfaceTemplate
+
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
+
+        device = make_device("adopt-fail-update", librenms_cf={"default": 85})
+        bay = make_module_bay(device, "Adopt Fail Bay")
+        module = install_module(device, bay.name, "ADOPT-FAIL-CARD")
+        for name in ("c2/1", "c2/2"):
+            InterfaceTemplate.objects.create(module_type=module.module_type, name=name, type="other")
+        primary = make_interface(device, "Ethernet85")
+        standalone_pks = {make_interface(device, name).pk for name in ("c2/1", "c2/2")}
+        item = self._bound_item(850, module.module_type, bay, primary, 8501)
+        view, request = _rendered_post(
+            UpdateModuleInterfaceView, device, [item], 85, live_librenms, "update-module-interface", 850
+        )
+        adoptions = []
+
+        def second_adoption(sql, params):
+            # Django puts the row pk last in the UPDATE of one interface.
+            if sql.startswith('UPDATE "dcim_interface"') and params and params[-1] in standalone_pks:
+                adoptions.append(params[-1])
+            return len(adoptions) == 2
+
+        with queued_events(request.user) as queued:
+            with failing_statement(second_adoption, "23514"):
+                response = view_post(view, request, pk=device.pk)
+            events = queued()
+
+        primary.refresh_from_db()
+        assert response.status_code == 302
+        assert primary.module_id == module.pk
+        assert len(adoptions) == 2
+        assert not module.interfaces.filter(pk__in=standalone_pks).exists()
+        assert ("interface", primary.pk) in events
+        assert not {("interface", pk) for pk in standalone_pks} & events
+
+
+@pytest.mark.parametrize("scope", ["in-scope", "out-of-scope"])
+def test_an_interface_type_update_sends_events_only_for_the_types_it_keeps(settings, scope):
+    """A saved type outside the change scope rolls the update back, so its event must not be sent."""
+    from dcim.models import Device, Interface, Module
+
+    from netbox_librenms_plugin.tests.test_module_interface_types import (
+        TestApplyModuleInterfaceTypes,
+        _vc_member_type_mismatch,
+    )
+    from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+
+    page_device, member, module, interface = _vc_member_type_mismatch(f"type-events-{scope}")
+    user = make_user_with_perms(f"type-events-{scope}-user", [("view", Device), ("view", Module)])
+    user = grant(user, "change", Interface, constraints={"type": "1000base-t"} if scope == "out-of-scope" else None)
+
+    with queued_events(user) as queued:
+        TestApplyModuleInterfaceTypes._post(settings, user, page_device, member, module, interface)
+        events = queued()
+
+    interface.refresh_from_db()
+    assert interface.type == ("10gbase-x-sfpp" if scope == "in-scope" else "1000base-t")
+    assert (("interface", interface.pk) in events) is (scope == "in-scope")
 
 
 class TestModulesRedirectResponse:
@@ -4130,6 +4201,43 @@ def test_the_owner_lock_scan_finds_a_lock_in_a_response_argument():
     )
 
     assert _responses_under_module_owner_locks(source) == {5}
+
+
+def _plain_transactions(source):
+    """Return the lines that open a plain transaction.atomic() block, by a with-statement or a decorator."""
+    import ast
+
+    return sorted(
+        node.lineno
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Attribute) and ast.unparse(node) == "transaction.atomic"
+    )
+
+
+def test_the_module_writers_open_no_plain_transaction():
+    """A plain block keeps the NetBox events of a write that it rolls back, also through a helper or a caught error."""
+    import inspect
+
+    from netbox_librenms_plugin.views.sync import modules
+
+    violations = _plain_transactions(inspect.getsource(modules))
+    assert not violations, f"Use atomic_with_events() or row_savepoint() at lines {violations}"
+
+
+def test_the_plain_transaction_scan_finds_each_form_and_passes_the_event_aware_helpers():
+    """The control: each plain form is found, and the event-aware helpers pass."""
+    source = (
+        "@transaction.atomic\n"
+        "def _write(self):\n"
+        "    with transaction.atomic(savepoint=True):\n"
+        "        with atomic_with_events(), row_savepoint():\n"
+        "            save()\n"
+        "@atomic_with_events()\n"
+        "def _adopt(self):\n"
+        "    save()\n"
+    )
+
+    assert _plain_transactions(source) == [1, 3]
 
 
 @pytest.mark.parametrize("decorator", ["atomic_with_events()", "transaction.atomic"])

@@ -10,7 +10,7 @@ from urllib.parse import quote_plus, urlsplit
 from django.contrib import messages
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError, models, transaction
+from django.db import IntegrityError, models
 from django.http import HttpResponse, QueryDict
 from django.shortcuts import redirect, render
 from django.urls import reverse
@@ -659,7 +659,7 @@ def _adopt_existing_template_interfaces(device, module, interfaces):
         }
 
     adopted_names = []
-    with transaction.atomic():
+    with atomic_with_events():
         for interface in adoptable:
             interface.snapshot()
             interface.module = module
@@ -2382,8 +2382,8 @@ class UpdateModuleInterfaceView(
         bind_result = None
         adoption_failed = False
         try:
-            # One transaction: a lock conflict in the bind or the adoption rolls back both.
-            with transaction.atomic():
+            # One transaction: a lock conflict in the bind or the adoption rolls back both, and their events.
+            with atomic_with_events():
                 granted = _authorize_module_grant(
                     self, page_device, server_key, ACTION_UPDATE_INTERFACE, request.POST.get("inventory_binding")
                 )
@@ -2487,7 +2487,7 @@ class UpdateModuleInterfaceView(
             # A hard conflict/skip is left untouched so we don't mutate past an unresolved issue.
             if bind_result is None or bind_result.get("status") == "bound":
                 try:
-                    with transaction.atomic():
+                    with atomic_with_events():
                         adopt_result = _adopt_existing_template_interfaces(
                             target_device,
                             module,
@@ -2691,7 +2691,7 @@ class ApplyModuleInterfaceTypesView(
         }
         validation_failures = []
         try:
-            with transaction.atomic():
+            with atomic_with_events():
                 scope = lock_module_write(observe_module_write(device_ids=[target_device.pk], observed_ids=[module.pk]))
                 target_device = scope.devices[target_device.pk]
                 module.refresh_from_db()
@@ -3858,7 +3858,7 @@ class AddBayTemplateView(
                 manufacturer=manufacturer,
             )
             try:
-                with transaction.atomic():
+                with atomic_with_events():
                     mapping.full_clean()
                     mapping.save()
             except (ValidationError, IntegrityError) as exc:
@@ -4404,7 +4404,7 @@ class MarkBuiltInView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libr
             return _modules_action_response(request, page_device)
 
         try:
-            with transaction.atomic():
+            with atomic_with_events():
                 plan = self._plan(page_device, server_key, request.POST, write=True)
                 self.required_object_permissions = {"POST": self._permissions(plan)}
                 if error := self.require_object_permissions("POST"):

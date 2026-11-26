@@ -103,6 +103,26 @@ def make_request(method="post", data=None, *, user=None, path="/", **factory_kwa
     return request
 
 
+@contextmanager
+def queued_events(user):
+    """Open NetBox's request event queue as its request processor does, without the flush; yield its reader."""
+    from netbox.context import current_request, events_queue
+
+    request = make_request(user=user)
+    request.id = uuid4()
+    request_token, queue_token = current_request.set(request), events_queue.set({})
+
+    def read():
+        """Return the ``(model name, pk)`` of each queued event."""
+        return {(event["object_type"].model, event["object_id"]) for event in events_queue.get().values()}
+
+    try:
+        yield read
+    finally:
+        current_request.reset(request_token)
+        events_queue.reset(queue_token)
+
+
 def queued_request(user):
     """Return the ``copy_safe_request()`` copy that the import view queues with a background job."""
     from uuid import uuid4
