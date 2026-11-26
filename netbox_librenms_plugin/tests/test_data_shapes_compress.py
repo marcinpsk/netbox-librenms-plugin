@@ -6,6 +6,8 @@ the full and compressed recordings (verified by replaying both over real HTTP), 
 high-cardinality ports are dropped.
 """
 
+from copy import deepcopy
+
 import pytest
 
 from netbox_librenms_plugin.data_shapes.compress import compress_recording
@@ -578,6 +580,33 @@ def test_compression_preserves_ip_and_link_presence_per_port_shape():
         == recording["responses"]["GET /api/v0/devices/1/links"]["links"]
     )
     assert len(responses["GET /api/v0/devices/1/ports"]["ports"]) == 3
+
+
+def test_compression_prunes_only_the_compressed_members_address_rows():
+    addresses = [
+        {"port_id": 1, "ipv4_address": "198.18.1.1"},
+        {"port_id": 2, "ipv4_address": "198.18.1.2"},
+    ]
+    recording = {
+        "schema_version": 1,
+        "name": "member-addresses",
+        "device_id": 1,
+        "responses": {
+            "GET /api/v0/devices/1/ports": {
+                "ports": [_port(1, "eth1", "ethernetCsmacd"), _port(2, "eth2", "ethernetCsmacd")]
+            },
+            "GET /api/v0/devices/1/ip": {"addresses": deepcopy(addresses)},
+            "GET /api/v0/devices/2/ip": {"addresses": deepcopy(addresses)},
+        },
+    }
+
+    before = deepcopy(recording)
+
+    compressed = compress_recording(recording)
+
+    assert len(compressed["responses"]["GET /api/v0/devices/1/ip"]["addresses"]) == 1
+    assert compressed["responses"]["GET /api/v0/devices/2/ip"]["addresses"] == addresses
+    assert recording == before
 
 
 @pytest.mark.parametrize("suffix,field", [("ip", "addresses"), ("links", "links")])
