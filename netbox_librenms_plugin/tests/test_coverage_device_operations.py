@@ -11,6 +11,7 @@ from netbox_librenms_plugin.tests.conftest import (
     ip_on,
     make_cluster,
     make_device,
+    make_interface,
     make_ip,
     make_virtual_chassis,
     make_vm,
@@ -37,6 +38,15 @@ def _broken_serial_rule(tag, *, manufacturer=None):
     # A QuerySet.update() skips clean(), as a rule stored before the replacement check did.
     NormalizationRule.objects.filter(pk=rule.pk).update(replacement=r"X\1")
     return rule
+
+
+def _member_of_a_broken_rule_vendor(device, tag):
+    """Give *device* a type of the vendor whose broken serial rule refuses every decision."""
+    from dcim.models import Device, DeviceType
+
+    vendor = _broken_serial_rule(tag).manufacturer
+    device_type = DeviceType.objects.create(manufacturer=vendor, model=f"Broken {tag}", slug=f"broken-{tag}")
+    Device.objects.filter(pk=device.pk).update(device_type=device_type)
 
 
 def _stray_chassis_member(tag, serial):
@@ -517,11 +527,10 @@ class TestHostIpResolution:
         device = make_device("host-ip-single")
         ip_on(device, "198.18.10.9/24", "management")
 
-        resolved, ambiguous, matching = resolve_device_by_host_ip("198.18.10.9")
+        resolved, ambiguous = resolve_device_by_host_ip("198.18.10.9")
 
         assert resolved == device
         assert ambiguous is False
-        assert matching.count() == 1
 
     def test_device_and_oob_owners_for_the_same_host_fail_closed(self):
         from netbox_librenms_plugin.import_utils.device_operations import resolve_device_by_host_ip
@@ -532,7 +541,7 @@ class TestHostIpResolution:
         second.oob_ip = make_ip("198.18.10.10/32")
         second.save()
 
-        resolved, ambiguous, _matching = resolve_device_by_host_ip("198.18.10.10")
+        resolved, ambiguous = resolve_device_by_host_ip("198.18.10.10")
 
         assert resolved is None
         assert ambiguous is True
@@ -542,11 +551,10 @@ class TestHostIpResolution:
 
         make_ip("198.18.10.11/32")
 
-        resolved, ambiguous, matching = resolve_device_by_host_ip("198.18.10.11")
+        resolved, ambiguous = resolve_device_by_host_ip("198.18.10.11")
 
         assert resolved is None
         assert ambiguous is False
-        assert matching.count() == 1
 
 
 @pytest.mark.django_db
@@ -679,6 +687,8 @@ class TestValidateDeviceForImport:
             "serial_role_choice_available",
             "librenms_id_needs_migration",
             "oob_candidate",
+            "row_is_oob_controller",
+            "match_verified",
             "existing_librenms_link",
             "merge_candidates",
             "name_matches",
@@ -1168,16 +1178,28 @@ class TestValidateDeviceForImport:
         assert collision["serial_duplicate"] is True
 
     def test_duplicate_serial_without_a_unique_owner_is_terminal(self):
-        make_device("validation-duplicate-serial-a", serial="DUPLICATE-ONLY-SERIAL")
-        make_device("validation-duplicate-serial-b", serial="DUPLICATE-ONLY-SERIAL")
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
 
-        result = self._validate(
-            _device_payload(5427, hostname="unmatched-duplicate-serial", serial="DUPLICATE-ONLY-SERIAL")
-        )
+        owner = make_device("validation-duplicate-serial-a", serial="DUPLICATE-ONLY-SERIAL")
+        duplicate = make_device("validation-duplicate-serial-b", serial=owner.serial)
+        payload = _device_payload(5427, hostname="unmatched-duplicate-serial", serial=owner.serial)
+        result = self._validate(payload)
 
         assert result["existing_device"] is None
         assert result["serial_duplicate"] is True
-        assert any("Multiple NetBox devices share serial" in issue for issue in result["issues"])
+
+        _refresh_existing_device(result, libre_device=payload, server_key=SERVER_KEY)
+
+        assert len(result["issues"]) == 1
+        assert result["serial_duplicate"] is True
+
+        duplicate.delete()
+        _refresh_existing_device(result, libre_device=payload, server_key=SERVER_KEY)
+
+        assert result["existing_device"] == owner
+        assert result["existing_match_type"] == "serial"
+        assert result["serial_duplicate"] is False
+        assert result["issues"] == []
 
     def test_primary_ip_match_forces_device_mode(self):
         device = make_device("validation-primary-ip")
@@ -1243,7 +1265,576 @@ class TestValidateDeviceForImport:
         assert result["serial_action"] == "oob_candidate"
         assert result["oob_candidate"]["type"] == "idrac"
 
+    def test_a_controller_with_the_host_hostname_at_its_oob_ip_reports_no_host_hardware_change(self):
+        """The controller reports the host's hostname, answers at its OOB IP and has its own serial."""
+        from netbox_librenms_plugin.import_utils.device_operations import _serial_differs_warning
+
+        device = make_device("validation-mirror-oob-ip", serial="HOST-SN-MIRROR-VALIDATION")
+        device.oob_ip = make_ip("198.18.20.6/32")
+        device.save()
+        payload = _device_payload(
+            5430,
+            hostname=device.name,
+            sysName=device.name,
+            hardware="iDRAC9",
+            os="idrac",
+            serial="CTRL-SN-MIRROR-VALIDATION",
+            ip="198.18.20.6",
+        )
+
+        result = self._validate(payload)
+
+        assert result["existing_device"] == device
+        assert result["row_is_oob_controller"] is True
+        assert _serial_differs_warning("CTRL-SN-MIRROR-VALIDATION") not in result["warnings"]
+        assert (result["serial_action"], result["oob_candidate"]["device"]) == ("oob_candidate", device)
+
+    def test_a_controller_with_the_host_hostname_and_an_oob_os_gets_no_serial_update(self):
+        """The controller reports the host's hostname, its own serial and an OOB OS; the host has no OOB IP."""
+        from netbox_librenms_plugin.import_utils.device_operations import _serial_differs_warning
+
+        device = make_device("validation-oob-os-hostname", serial="HOST-SN-OOB-OS-VALIDATION")
+        payload = _device_payload(
+            5431, hostname=device.name, sysName=device.name, hardware="iDRAC9", os="idrac", serial="CTRL-SN-OOB-OS"
+        )
+
+        result = self._validate(payload)
+
+        assert (result["existing_device"], result["existing_match_type"]) == (device, "hostname")
+        assert result["row_is_oob_controller"] is True
+        assert result["serial_action"] == "oob_candidate"
+        assert (result["oob_candidate"]["device"], result["oob_candidate"]["matched_by"]) == (device, "hostname")
+        assert _serial_differs_warning("CTRL-SN-OOB-OS") not in result["warnings"]
+        assert result["name_sync_available"] is False
+
+    def test_a_cached_controller_row_is_classified_again_on_refresh(self):
+        """The cached-row refresh reads the same rule: a host that gained an OOB link drops the attach offer."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+        from netbox_librenms_plugin.import_utils.device_operations import OOB_ALREADY_LINKED_WARNING
+
+        device = make_device("validation-oob-os-refresh", serial="HOST-SN-OOB-OS-REFRESH")
+        payload = _device_payload(
+            5432, hostname=device.name, sysName=device.name, hardware="iDRAC9", os="idrac", serial="CTRL-SN-REFRESH"
+        )
+        result = self._validate(payload)
+        assert result["serial_action"] == "oob_candidate"
+        seed_mapping(device, SERVER_KEY, oob=7432, oob_type="idrac")
+
+        _refresh_existing_device(result, libre_device=payload, server_key=SERVER_KEY)
+
+        assert result["row_is_oob_controller"] is True
+        assert (result["serial_action"], result["oob_candidate"]) == (None, None)
+        assert OOB_ALREADY_LINKED_WARNING in result["warnings"]
+
+    def test_a_serial_match_with_an_oob_os_offers_no_host_promotion(self):
+        """An OOB OS is evidence: the row that is the controller is never offered as the host."""
+        device = make_device(
+            "validation-oob-os-serial-host",
+            serial="SHARED-CHASSIS-SN",
+            librenms_cf={SERVER_KEY: {"id": 6001}},
+        )
+        payload = _device_payload(
+            5433, hostname="validation-oob-os-serial-bmc", hardware="iDRAC9", os="idrac", serial="SHARED-CHASSIS-SN"
+        )
+
+        result = self._validate(payload)
+
+        assert (result["existing_device"], result["existing_match_type"]) == (device, "serial")
+        assert result["row_is_oob_controller"] is True
+        assert result["serial_action"] == "oob_candidate"
+        assert "promote_to_host" not in result
+        assert result["serial_role_choice_available"] is False
+
+    def test_an_oob_id_match_classifies_the_controller_with_a_broken_chassis_serial_rule(self):
+        from netbox_librenms_plugin.models import LibreNMSSettings
+
+        LibreNMSSettings.objects.update_or_create(pk=1, defaults={"vc_member_name_pattern": "-{serial}"})
+        other = make_device("validation-rule-error-master")
+        member = make_device("validation-rule-error-member", serial="MEMBER-SN-5440")
+        make_virtual_chassis("validation-rule-error-chassis", other, member)
+        seed_mapping(member, SERVER_KEY, oob=5440, oob_type="idrac")
+        # The chassis master decides the serial rules of its members.
+        _member_of_a_broken_rule_vendor(other, "validate-oob-id")
+
+        result = self._validate(_device_payload(5440, hostname="rule-error-ctrl", serial="REAL-5440"))
+
+        assert (result["existing_device"], result["existing_match_type"]) == (member, "librenms_oob")
+        assert result["issues"] == []
+        assert result["match_verified"] is True
+        assert result["row_is_oob_controller"] is True
+        assert result["name_sync_available"] is False
+
+    def test_a_merge_row_at_the_host_oob_ip_is_the_controller(self):
+        """The row matches the host by hostname and another linked Device by serial, and answers at the OOB IP."""
+        host = make_device("validation-merge-oob-host")
+        host.oob_ip = make_ip("198.18.21.46/32", assigned_object=make_interface(host, "mgmt"))
+        host.save()
+        make_device("validation-merge-oob-peer", serial="MERGE-OOB-SN", librenms_cf={SERVER_KEY: {"id": 9146}})
+        payload = _device_payload(5446, hostname=host.name, sysName=host.name, serial="MERGE-OOB-SN", ip="198.18.21.46")
+
+        result = self._validate(payload)
+
+        assert result["serial_action"] == "merge_netbox_devices"
+        assert result["existing_device"] == host
+        assert result["row_is_oob_controller"] is True
+
+    def test_a_stripped_domain_name_is_no_controller_evidence(self):
+        """The matcher strips the domain, so the row name it used is the device's own name."""
+        device = make_device("oob-switch-01")
+        payload = _device_payload(
+            5447, hostname="oob-switch-01.example.test", sysName="oob-switch-01.example.test", serial="-"
+        )
+
+        result = self._validate(payload, strip_domain=True)
+
+        assert (result["existing_device"], result["existing_match_type"]) == (device, "hostname")
+        assert result["row_is_oob_controller"] is False
+        assert result["oob_candidate"] is None
+
+    def test_a_refreshed_name_match_at_the_oob_ip_offers_the_attach(self):
+        """The host appears after the row is cached; the refresh matches it by name and reads the OOB IP."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        payload = _device_payload(
+            5448,
+            hostname="validation-refresh-name-host",
+            sysName="validation-refresh-name-host",
+            serial="-",
+            ip="198.18.21.48",
+        )
+        result = self._validate(payload)
+        assert result["existing_device"] is None
+        host = make_device("validation-refresh-name-host")
+        host.oob_ip = make_ip("198.18.21.48/32")
+        host.save()
+
+        _refresh_existing_device(result, libre_device=payload, server_key=SERVER_KEY)
+
+        assert result["existing_device"] == host
+        assert result["row_is_oob_controller"] is True
+        assert (result["oob_candidate"]["device"], result["oob_candidate"]["matched_by"]) == (host, "oob_ip")
+
+    def test_a_chassis_member_reads_the_oob_link_of_its_sync_owner(self):
+        """The sync owner of the chassis already holds an OOB link, so the member gets no attach offer."""
+        from netbox_librenms_plugin.import_utils.device_operations import OOB_ALREADY_LINKED_WARNING
+
+        owner = make_device("validation-owner-oob-master")
+        member = make_device("validation-owner-oob-member")
+        make_virtual_chassis("validation-owner-oob-chassis", owner, member)
+        seed_mapping(owner, SERVER_KEY, own=7100, oob=7200, oob_type="idrac")
+        payload = _device_payload(7300, hostname=member.name, sysName=member.name, os="idrac", serial="-", ip="")
+
+        result = self._validate(payload)
+
+        assert (result["existing_device"], result["existing_match_type"]) == (member, "hostname")
+        assert result["row_is_oob_controller"] is True
+        assert result["oob_candidate"] is None
+        assert OOB_ALREADY_LINKED_WARNING in result["warnings"]
+
+    def test_an_ip_match_with_an_oob_os_on_a_host_with_its_own_primary_ip_is_the_controller(self):
+        """The row's address is on a second host interface; the host has its own primary IP and no OOB IP."""
+        from dcim.models import Device
+
+        host = make_device("validation-ip-oob-os-host")
+        primary = ip_on(host, "198.18.24.1/24", "eth0")
+        Device.objects.filter(pk=host.pk).update(primary_ip4=primary)
+        ip_on(host, "198.18.24.52/24", "idrac0")
+        payload = _device_payload(5452, hostname="validation-ip-oob-os-bmc", os="idrac", serial="-", ip="198.18.24.52")
+
+        result = self._validate(payload)
+
+        assert (result["existing_device"], result["existing_match_type"]) == (host, "primary_ip")
+        assert result["row_is_oob_controller"] is True
+        assert result["oob_candidate"]["matched_by"] == "primary_ip"
+
+    def test_an_ip_match_by_address_alone_on_a_host_with_its_own_primary_ip_is_no_controller(self):
+        """An ordinary row whose address is on a second host interface stays a host-side IP match."""
+        from dcim.models import Device
+
+        host = make_device("validation-ip-plain-host")
+        primary = ip_on(host, "198.18.24.2/24", "eth0")
+        Device.objects.filter(pk=host.pk).update(primary_ip4=primary)
+        ip_on(host, "198.18.24.53/24", "eth1")
+        payload = _device_payload(5453, hostname="validation-ip-plain-row", serial="-", ip="198.18.24.53")
+
+        result = self._validate(payload)
+
+        assert (result["existing_device"], result["existing_match_type"]) == (host, "primary_ip")
+        assert result["row_is_oob_controller"] is False
+        assert result["oob_candidate"] is None
+
+    def test_a_refresh_withdraws_the_attach_offer_when_the_oob_ip_is_gone(self):
+        """The row matched by hostname at the host's OOB IP; the OOB IP is cleared before the refresh."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        host = make_device("validation-refresh-oob-gone")
+        host.oob_ip = make_ip("198.18.24.57/32", assigned_object=make_interface(host, "mgmt"))
+        host.save()
+        payload = _device_payload(5457, hostname=host.name, sysName=host.name, serial="-", ip="198.18.24.57")
+        result = self._validate(payload)
+        assert result["serial_action"] == "oob_candidate"
+        Device.objects.filter(pk=host.pk).update(oob_ip=None)
+
+        _refresh_existing_device(result, libre_device=payload, server_key=SERVER_KEY)
+
+        assert result["row_is_oob_controller"] is False
+        assert (result["serial_action"], result["oob_candidate"]) == (None, None)
+
+    @pytest.mark.parametrize("hardware", [["iDRAC9"], {"model": "iDRAC9"}], ids=["list", "dict"])
+    def test_a_non_text_hardware_is_no_controller_evidence(self, hardware):
+        """A container in the hardware field must not stop the validation of the row."""
+        host = make_device(f"validation-odd-hardware-{type(hardware).__name__}")
+        payload = _device_payload(5458, hostname=host.name, sysName=host.name, hardware=hardware, serial="-")
+
+        result = self._validate(payload)
+
+        assert result["existing_device"] == host
+        assert result["row_is_oob_controller"] is False
+
+    @pytest.mark.parametrize("os_value", [["idrac"], {"name": "idrac"}], ids=["list", "dict"])
+    def test_a_non_text_os_is_no_controller_evidence(self, os_value):
+        """A container in the OS field must not stop the validation of the row."""
+        host = make_device(f"validation-odd-os-{type(os_value).__name__}")
+        payload = _device_payload(5459, hostname=host.name, sysName=host.name, os=os_value, serial="-")
+
+        result = self._validate(payload)
+
+        assert result["existing_device"] == host
+        assert result["row_is_oob_controller"] is False
+
+    def test_a_controller_name_that_is_not_the_preferred_name_still_classifies_the_row(self):
+        """The hostname names a controller and sysName names the row; the serial is the host's."""
+        host = make_device("validation-name-role-old", serial="A162-SN")
+        payload = _device_payload(
+            5462, hostname="validation-name-role-idrac", sysName="validation-name-role-new", serial="A162-SN", ip=""
+        )
+
+        result = self._validate(payload)
+
+        assert (result["existing_device"], result["existing_match_type"]) == (host, "serial")
+        assert result["serial_action"] == "oob_candidate"
+        assert result["row_is_oob_controller"] is True
+        assert result["name_sync_available"] is False
+
+    def test_a_non_text_hostname_is_no_name_evidence(self):
+        """The list hostname names nothing; sysName matches the host and the row answers at its OOB IP."""
+        host = make_device("validation-list-hostname-host")
+        host.oob_ip = make_ip("198.18.27.63/32", assigned_object=make_interface(host, "mgmt"))
+        host.save()
+        payload = _device_payload(
+            5463, hostname=["validation-list-hostname-idrac"], sysName=host.name, serial="-", ip="198.18.27.63"
+        )
+
+        result = self._validate(payload)
+
+        assert result["existing_device"] == host
+        assert result["row_is_oob_controller"] is True
+        assert (result["oob_candidate"]["type"], result["oob_candidate"]["matched_by"]) == ("oob", "oob_ip")
+
+    def test_a_refresh_withdraws_a_serial_role_offer_whose_evidence_is_gone(self):
+        """LibreNMS reported idrac at validation; the refresh reads linux with the same serial and names."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        make_device("validation-serial-role-gone-host", serial="A164-SN")
+        payload = _device_payload(5464, hostname="validation-serial-role-gone-row", os="idrac", serial="A164-SN", ip="")
+        result = self._validate(payload)
+        assert result["serial_action"] == "oob_candidate"
+
+        _refresh_existing_device(result, libre_device={**payload, "os": "linux"}, server_key=SERVER_KEY)
+
+        assert result["row_is_oob_controller"] is False
+        assert result["oob_candidate"] is None
+        assert result["serial_action"] != "oob_candidate"
+
+    def test_a_refresh_keeps_the_ambiguous_serial_role_offer(self):
+        """The host is linked to another LibreNMS ID, so the serial role still offers both roles."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        host = make_device(
+            "validation-serial-role-kept-host", serial="A164-KEPT", librenms_cf={SERVER_KEY: {"id": 9164}}
+        )
+        payload = _device_payload(5465, hostname="validation-serial-role-kept-row", serial="A164-KEPT", ip="")
+        result = self._validate(payload)
+        assert (result["serial_action"], result["row_is_oob_controller"]) == ("oob_candidate", False)
+
+        _refresh_existing_device(result, libre_device=payload, server_key=SERVER_KEY)
+
+        assert result["row_is_oob_controller"] is False
+        assert result["oob_candidate"]["device"] == host
+
+    def test_an_ip_match_with_a_controller_name_is_the_controller(self):
+        """The row's name names iDRAC and its address is on a second host interface; the OS is generic."""
+        from dcim.models import Device
+
+        host = make_device("validation-ip-name-host")
+        Device.objects.filter(pk=host.pk).update(primary_ip4=ip_on(host, "198.18.28.1/24", "eth0"))
+        ip_on(host, "198.18.28.69/24", "eth1")
+        payload = _device_payload(
+            5469,
+            hostname="validation-ip-name-host-idrac",
+            sysName="validation-ip-name-host-idrac",
+            serial="-",
+            ip="198.18.28.69",
+        )
+
+        result = self._validate(payload)
+
+        assert (result["existing_device"], result["existing_match_type"]) == (host, "primary_ip")
+        assert result["row_is_oob_controller"] is True
+
+    def test_an_ip_match_with_the_host_own_controller_like_name_is_no_controller(self):
+        """The host's own name looks like a controller's, and the row reports that same name."""
+        from dcim.models import Device
+
+        host = make_device("validation-ip-own-bmc01")
+        Device.objects.filter(pk=host.pk).update(primary_ip4=ip_on(host, "198.18.28.2/24", "eth0"))
+        ip_on(host, "198.18.28.70/24", "eth1")
+        payload = _device_payload(5470, hostname=host.name, sysName=host.name, serial="-", ip="198.18.28.70")
+
+        result = self._validate(payload, include_vc_detection=False)
+
+        assert result["existing_device"] == host
+        assert result["row_is_oob_controller"] is False
+
+    def test_the_short_form_of_the_device_name_is_no_name_evidence(self):
+        """The device name has a domain; the row's sysName is the short form of that name."""
+        device = make_device("oob-switch-02.example.test")
+        payload = _device_payload(
+            5473, hostname="oob-switch-02.example.test", sysName="oob-switch-02", serial="-", ip=""
+        )
+
+        result = self._validate(payload, use_sysname=False)
+
+        assert (result["existing_device"], result["existing_match_type"]) == (device, "hostname")
+        assert result["row_is_oob_controller"] is False
+        assert result["oob_candidate"] is None
+
+    def test_a_cached_already_linked_action_is_no_controller_evidence(self):
+        """The host lost its OOB link and LibreNMS now reports linux with the same serial and names."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        host = make_device("validation-already-linked-host", serial="A174-SN")
+        seed_mapping(host, SERVER_KEY, oob=8174, oob_type="idrac")
+        payload = _device_payload(5474, hostname="validation-already-linked-row", os="idrac", serial="A174-SN", ip="")
+        result = self._validate(payload)
+        assert result["serial_action"] == "oob_already_linked"
+        seed_stored_mapping(host, {}, save=True)
+
+        _refresh_existing_device(result, libre_device={**payload, "os": "linux"}, server_key=SERVER_KEY)
+
+        assert result["row_is_oob_controller"] is False
+        assert result["oob_candidate"] is None
+        assert result["serial_action"] not in ("oob_candidate", "oob_already_linked")
+
+    def test_the_serial_role_reads_the_oob_link_of_the_chassis_owner(self):
+        """The member's own name looks like a controller's; the chassis owner already holds an OOB link."""
+        owner = make_device("validation-role-owner-master")
+        member = make_device("validation-role-owner-idrac", serial="A175-SN")
+        make_virtual_chassis("validation-role-owner-chassis", owner, member)
+        seed_mapping(owner, SERVER_KEY, own=7175, oob=7176, oob_type="idrac")
+        payload = _device_payload(7177, hostname="validation-role-owner-row", serial="A175-SN", ip="")
+
+        result = self._validate(payload)
+
+        assert (result["existing_device"], result["existing_match_type"]) == (member, "serial")
+        assert result["oob_candidate"] is None
+        assert result["serial_action"] != "oob_candidate"
+
+    def test_another_fqdn_with_the_same_short_name_is_name_evidence(self):
+        """The host and its controller share a short name; the controller's FQDN names iDRAC."""
+        host = make_device("node01.prod.example.test", serial="A178-SN")
+        payload = _device_payload(
+            5478, hostname="node01.idrac.example.test", sysName="node01.idrac.example.test", serial="A178-SN", ip=""
+        )
+
+        result = self._validate(payload)
+
+        assert (result["existing_device"], result["existing_match_type"]) == (host, "serial")
+        assert result["row_is_oob_controller"] is True
+
+    def test_a_refresh_reads_the_current_names_of_a_renamed_row(self):
+        """The row's only OOB evidence was its name; LibreNMS now reports the row under a plain name."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        make_device("validation-renamed-node-old", serial="A182-SN")
+        payload = _device_payload(
+            5482,
+            hostname="validation-renamed-node-idrac",
+            sysName="validation-renamed-node-idrac",
+            serial="A182-SN",
+            ip="",
+        )
+        result = self._validate(payload)
+        assert (result["serial_action"], result["row_is_oob_controller"]) == ("oob_candidate", True)
+        renamed = {**payload, "hostname": "validation-renamed-node", "sysName": "validation-renamed-node"}
+
+        _refresh_existing_device(result, libre_device=renamed, server_key=SERVER_KEY)
+
+        assert result["row_is_oob_controller"] is False
+        assert result["oob_candidate"] is None
+
+    def test_offers_of_two_chassis_members_share_the_owner_oob_target(self):
+        """Two controller rows match two members by hostname; the chassis owner holds the one OOB slot."""
+        from netbox_librenms_plugin.import_utils.collisions import detect_bulk_collisions
+
+        owner = make_device("validation-target-owner")
+        first = make_device("validation-target-member-1")
+        second = make_device("validation-target-member-2")
+        make_virtual_chassis("validation-target-chassis", owner, first, second)
+        seed_mapping(owner, SERVER_KEY, own=7181)
+        rows = [
+            (5481, self._validate(_device_payload(5481, hostname=first.name, sysName=first.name, os="idrac", ip=""))),
+            (5482, self._validate(_device_payload(5482, hostname=second.name, sysName=second.name, os="idrac", ip=""))),
+        ]
+        assert [validation["oob_candidate"]["device"] for _id, validation in rows] == [owner, owner]
+
+        groups = detect_bulk_collisions(
+            [{"device_id": device_id, "device_name": f"row-{device_id}", "validation": v} for device_id, v in rows]
+        )
+
+        assert [group["nb_device_pk"] for group in groups] == [owner.pk]
+
+    def test_a_serial_match_at_the_oob_ip_of_the_chassis_owner_is_the_controller(self):
+        """The row matches a member by serial; its address is the OOB IP of the chassis owner."""
+        owner = make_device("validation-owner-ip-master")
+        member = make_device("validation-owner-ip-member", serial="A184-SN")
+        make_virtual_chassis("validation-owner-ip-chassis", owner, member)
+        seed_mapping(owner, SERVER_KEY, own=7184)
+        owner.oob_ip = make_ip("198.18.30.84/32", assigned_object=make_interface(owner, "idrac0"))
+        owner.save()
+        payload = _device_payload(5484, hostname="validation-owner-ip-row", serial="A184-SN", ip="198.18.30.84")
+
+        result = self._validate(payload)
+
+        assert (result["existing_device"], result["existing_match_type"]) == (member, "serial")
+        assert result["row_is_oob_controller"] is True
+        assert (result["oob_candidate"]["device"], result["oob_candidate"]["matched_by"]) == (owner, "oob_ip")
+
+    def test_a_row_blocked_by_a_failed_serial_recheck_gets_no_attach_offer(self):
+        """The refresh cannot verify the serial holder, so it blocks the row; the classifier builds no offer."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        host = make_device("validation-recheck-failed-host", serial="REAL-A195-SN")
+        payload = _device_payload(
+            5495, hostname="validation-recheck-failed-row", os="idrac", serial="REAL-A195-SN", ip=""
+        )
+        result = self._validate(payload)
+        assert result["serial_action"] == "oob_candidate"
+        _member_of_a_broken_rule_vendor(host, "refresh-recheck")
+
+        _refresh_existing_device(result, libre_device=payload, server_key=SERVER_KEY)
+
+        assert result["can_import"] is False
+        # The OS evidence keeps the controller flag, so host writes stay refused; the unverified match gets no offer.
+        assert result["row_is_oob_controller"] is True
+        assert result["oob_candidate"] is None
+        assert result["serial_action"] != "oob_candidate"
+
+    def test_a_provisional_hostname_match_of_an_error_path_gets_no_attach_offer(self):
+        """Two Devices share the name; a broken serial rule stops validation before its duplicate check."""
+        from dcim.models import Device, Site
+
+        from netbox_librenms_plugin.import_utils.device_operations import VALIDATION_ERROR_ISSUE_PREFIX
+
+        first = make_device("validation-provisional-node", serial="FIRST-A199")
+        other_site = Site.objects.create(name="validation-provisional-site", slug="validation-provisional-site")
+        Device.objects.create(
+            name=first.name, device_type=first.device_type, role=first.role, site=other_site, status="active"
+        )
+        for device in Device.objects.filter(name=first.name):
+            _member_of_a_broken_rule_vendor(device, f"provisional-{device.pk}")
+        payload = _device_payload(5499, hostname=first.name, sysName=first.name, os="idrac", serial="REAL-A199", ip="")
+
+        result = self._validate(payload)
+
+        assert [issue for issue in result["issues"] if issue.startswith(VALIDATION_ERROR_ISSUE_PREFIX)]
+        assert result["oob_candidate"] is None
+        assert result["serial_action"] != "oob_candidate"
+
+    def test_a_failed_reload_in_the_refresh_gets_no_attach_offer(self, monkeypatch):
+        """The refresh cannot read the matched Device again, so the cached offer is not verified."""
+        from netbox_librenms_plugin.import_utils import bulk_import
+
+        host = make_device("validation-reload-failed-host")
+        host.oob_ip = make_ip("198.18.33.1/32", assigned_object=make_interface(host, "mgmt"))
+        host.save()
+        payload = _device_payload(5501, hostname=host.name, sysName=host.name, serial="-", ip="198.18.33.1")
+        result = self._validate(payload)
+        assert result["serial_action"] == "oob_candidate"
+
+        def fail_linkage(*_args, **_kwargs):
+            raise RuntimeError("database read failed")
+
+        # Error injection: a transient read failure inside the reload.
+        monkeypatch.setattr(bulk_import, "_refresh_librenms_linkage", fail_linkage)
+
+        bulk_import._refresh_existing_device(result, libre_device=payload, server_key=SERVER_KEY)
+
+        assert result["oob_candidate"] is None
+        assert result["serial_action"] != "oob_candidate"
+
+    def test_a_refresh_rebuilds_the_offer_for_the_current_chassis_owner(self):
+        """The chassis owner of the matched member changes between validation and refresh."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        first_owner = make_device("validation-owner-change-a")
+        second_owner = make_device("validation-owner-change-b")
+        member = make_device("validation-owner-change-member", serial="A202-SN")
+        make_virtual_chassis("validation-owner-change-chassis", first_owner, second_owner, member)
+        seed_mapping(first_owner, SERVER_KEY, own=7202)
+        payload = _device_payload(5502, hostname="validation-owner-change-row", os="idrac", serial="A202-SN", ip="")
+        result = self._validate(payload)
+        assert result["oob_candidate"]["device"] == first_owner
+        seed_stored_mapping(first_owner, {}, save=True)
+        seed_mapping(second_owner, SERVER_KEY, own=7203)
+
+        _refresh_existing_device(result, libre_device=payload, server_key=SERVER_KEY)
+
+        assert result["oob_candidate"]["device"] == second_owner
+
+    def test_a_refresh_gives_a_serial_match_the_role_offer_of_a_fresh_validation(self):
+        """The host gains a link to another LibreNMS ID between validation and refresh."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        host = make_device("validation-gains-link-host", serial="A210-SN")
+        payload = _device_payload(5510, hostname="validation-gains-link-row", serial="A210-SN", ip="")
+        result = self._validate(payload)
+        assert result["oob_candidate"] is None
+        seed_mapping(host, SERVER_KEY, own=9210)
+        fresh = self._validate(payload)
+
+        _refresh_existing_device(result, libre_device=payload, server_key=SERVER_KEY)
+
+        assert fresh["oob_candidate"] is not None
+        assert (result["serial_action"], result["serial_role_choice_available"]) == (
+            fresh["serial_action"],
+            fresh["serial_role_choice_available"],
+        )
+        assert result["oob_candidate"]["device"] == fresh["oob_candidate"]["device"]
+
+    def test_the_classifier_reads_the_server_of_the_given_api(self, librenms_api):
+        """The API names the server; the host's OOB link is on that server only."""
+        from netbox_librenms_plugin.import_utils.device_operations import (
+            OOB_ALREADY_LINKED_WARNING,
+            validate_device_for_import,
+        )
+
+        api, _server = librenms_api
+        host = make_device("validation-api-server-host")
+        seed_mapping(host, SERVER_KEY, own=7160, oob=7161, oob_type="idrac")
+        payload = _device_payload(7162, hostname=host.name, sysName=host.name, os="idrac", serial="-", ip="")
+
+        result = validate_device_for_import(payload, api=api, include_vc_detection=False)
+
+        assert result["row_is_oob_controller"] is True
+        assert result["oob_candidate"] is None
+        assert OOB_ALREADY_LINKED_WARNING in result["warnings"]
+
     def test_linked_oob_ip_is_informational_instead_of_a_new_candidate(self):
+        from netbox_librenms_plugin.import_utils.device_operations import OOB_ALREADY_LINKED_WARNING
+
         device = make_device(
             "validation-linked-oob-ip",
             librenms_cf={SERVER_KEY: {"id": 42, "oob": {"id": 99, "type": "idrac"}}},
@@ -1265,7 +1856,7 @@ class TestValidateDeviceForImport:
         assert result["existing_device"] == device
         assert result["existing_match_type"] == "primary_ip"
         assert result["oob_candidate"] is None
-        assert any("OOB already linked" in warning for warning in result["warnings"])
+        assert OOB_ALREADY_LINKED_WARNING in result["warnings"]
 
     def test_oob_id_reimport_is_not_a_host_serial_conflict(self):
         device = make_device(

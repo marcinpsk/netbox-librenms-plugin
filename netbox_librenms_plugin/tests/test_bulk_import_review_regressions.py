@@ -331,6 +331,57 @@ def _importable_row(live_librenms, device_id, tag, *, members=None):
 
 
 @pytest.mark.django_db
+def test_bulk_import_reports_duplicate_serial_as_terminal_ambiguity(live_librenms):
+    from dcim.models import Device, Site
+
+    from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
+
+    device_id = 96301
+    prerequisites, row = _importable_row(live_librenms, device_id, "bulk-duplicate-serial")
+    serial = "BULK-SHARED-SERIAL"
+    owner = make_device("bulk-duplicate-serial-owner", serial=serial)
+    other_site = Site.objects.create(name="Bulk duplicate comparison", slug="bulk-duplicate-comparison")
+    Device.objects.create(
+        name=owner.name, serial=serial, site=other_site, device_type=owner.device_type, role=owner.role, status="active"
+    )
+    import_site = Site.objects.create(name="Bulk duplicate destination", slug="bulk-duplicate-destination")
+    user = make_superuser("bulk-duplicate-serial-user")
+
+    def import_row(payload):
+        live_librenms.server.register(f"/api/v0/devices/{device_id}", {"status": "ok", "devices": [payload]})
+        return bulk_import_devices_shared(
+            [device_id],
+            server_key="default",
+            manual_mappings_per_device={
+                device_id: {
+                    "site_id": import_site.pk,
+                    "device_type_id": prerequisites["device_type_id"],
+                    "device_role_id": prerequisites["device_role_id"],
+                }
+            },
+            user=user,
+        )
+
+    serial_conflict = import_row({**row, "serial": serial})
+    hostname_conflict = import_row({**row, "hostname": owner.name, "sysName": owner.name})
+
+    assert serial_conflict["success"] == []
+    assert serial_conflict["skipped"] == []
+    assert not Device.objects.filter(name=row["hostname"]).exists()
+    assert len(hostname_conflict["failed"]) == 1
+    assert serial_conflict["failed"] == hostname_conflict["failed"]
+
+    Device.objects.filter(serial=serial).update(serial="")
+    resolved = import_row({**row, "serial": serial})
+
+    assert resolved["failed"] == []
+    assert [entry["device_id"] for entry in resolved["success"]] == [device_id]
+    imported = Device.objects.get(name=row["hostname"])
+    assert imported.serial == serial
+    assert imported.role_id == prerequisites["device_role_id"]
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize("kind", ["device", "stack", "vm", "missing-os"])
 def test_a_platform_warning_failure_leaves_the_import_retryable(client, live_librenms, kind, flushed_events):
     from dcim.models import Device, DeviceRole, DeviceType, Platform, Site, VirtualChassis

@@ -57,10 +57,13 @@ from .cache import (
 )
 from .collisions import detect_bulk_collisions, scope_bulk_collisions
 from .device_operations import (
+    SERIAL_DUPLICATE_ISSUE_MARKER,
+    NAME_MATCH_TYPES,
     VALIDATION_ERROR_ISSUE_PREFIX,
     DeviceTypeOverrideError,
     _describe_existing_librenms_link,
     check_legacy_id_serial,
+    classify_oob_controller,
     effective_import_device_type,
     import_single_device,
     is_serial_unavailable_issue,
@@ -98,13 +101,9 @@ NETBOX_SERIAL_UNVERIFIED = "NetBox could not verify the serial"
 # _refresh_existing_device) so a resolved duplicate's stale message is reliably removed
 # regardless of which librenms_id value was interpolated into it.
 _AMBIGUOUS_LIBRENMS_ID_MARKER = "matches more than one existing NetBox record"
-# Substrings of the ambiguity blockers that carry the "ambiguous_hostname_or_serial" match type,
-# used to strip a stale instance once the duplicate is resolved (mirrors the librenms_id marker
-# above). The blocker can be appended by either the refresh serial/IP fallback below ("serial or
-# management IP") or validate_device_for_import's duplicate name/serial guard ("hostname/serial"),
-# so the cleanup must recognise either wording — otherwise a hostname/serial blocker survives the
-# match_type reset and keeps the row blocked until cache expiry.
+# Refresh removes these ambiguity blockers before checking the current matches.
 _AMBIGUOUS_SERIAL_IP_MARKERS = (
+    SERIAL_DUPLICATE_ISSUE_MARKER,
     "serial or management IP",
     "hostname/serial",
 )
@@ -919,7 +918,26 @@ def _recheck_legacy_id_serial(validation: dict, device, incoming_serial, serial_
         validation["legacy_id_serial_shared"] = False
 
 
-def _refresh_existing_device(  # noqa: C901
+def _refresh_existing_device(
+    validation: dict, libre_device: dict = None, server_key: str = "default", *, serial_rules=None
+) -> None:
+    """
+    Refresh the match of a cached row from the DB, then decide again whether the row is the match's OOB controller.
+
+    Args:
+        validation (dict): The cached validation state, mutated in place.
+        libre_device (dict | None): The LibreNMS device data used to re-evaluate the match.
+        server_key (str): The active LibreNMS server key.
+        serial_rules (SerialRules | None): The batch's serial rules; None reads them when the serial re-check runs.
+
+    """
+    # Each refresh verifies the match again; a failed reload or re-check clears the flag.
+    validation["match_verified"] = True
+    _refresh_match(validation, libre_device, server_key, serial_rules=serial_rules)
+    classify_oob_controller(validation, libre_device, server_key)
+
+
+def _refresh_match(  # noqa: C901
     validation: dict, libre_device: dict = None, server_key: str = "default", *, serial_rules=None
 ) -> None:
     """
@@ -1056,6 +1074,8 @@ def _refresh_existing_device(  # noqa: C901
         except Exception as e:
             existing_id = getattr(existing, "pk", "unknown") if existing else "none"
             logger.error("Failed to refresh existing device (pk=%s): %s", existing_id, e)
+            # The cached match was not read again, so it is not verified.
+            validation["match_verified"] = False
             return
 
     # Re-evaluate the match under current DB state. Reached when existing_device was None at
@@ -1101,6 +1121,7 @@ def _refresh_existing_device(  # noqa: C901
         # the row blocked until cache expiry. Clear it so the row is re-evaluated under current rules.
         if validation.get("existing_match_type") == "ambiguous_hostname_or_serial":
             validation["existing_match_type"] = None
+            validation["serial_duplicate"] = False
             for _key in ("issues", "warnings"):
                 msgs = validation.get(_key)
                 if isinstance(msgs, list):
@@ -1199,11 +1220,8 @@ def _refresh_existing_device(  # noqa: C901
             # hostname path); a single-model hit binds and wins over any lower-priority candidate.
             # The librenms_id match above already short-circuited, so this only does the
             # name/hostname/sysName fallbacks.
-            for value, mt in (
-                (validation.get("resolved_name"), "resolved_name"),
-                (hostname, "hostname"),
-                (sys_name, "sysname"),
-            ):
+            # The match types come from the list that the OOB-controller classifier reads.
+            for value, mt in zip((validation.get("resolved_name"), hostname, sys_name), NAME_MATCH_TYPES, strict=True):
                 if not value:
                     continue
                 model_match, model_amb = _lookup_value(Model, value)
@@ -1278,6 +1296,7 @@ def _refresh_existing_device(  # noqa: C901
                     return
                 if serial_match.kind is ResolutionKind.AMBIGUOUS:
                     ambiguous_fallback = True
+                    validation["serial_duplicate"] = True
                 elif serial_match.kind is ResolutionKind.UNIQUE:
                     new_device, match_type = serial_match.object, "serial"
 
@@ -1287,7 +1306,7 @@ def _refresh_existing_device(  # noqa: C901
                     # Shared resolver (scans interface-assignment + oob_ip-FK across all duplicate
                     # net_host rows, fails closed on >1 distinct device) — same helper
                     # validate_device_for_import() uses, so the two paths can't drift.
-                    matched_object, ip_ambiguous, _matching_ips = resolve_device_by_host_ip(primary_ip)
+                    matched_object, ip_ambiguous = resolve_device_by_host_ip(primary_ip)
                     if ip_ambiguous:
                         ambiguous_fallback = True
                     elif matched_object:
@@ -1406,6 +1425,7 @@ def _block_failed_recheck(validation: dict) -> None:
     """Block a row whose refresh re-check did not run; a later refresh retries it."""
     validation["can_import"] = False
     validation["is_ready"] = False
+    validation["match_verified"] = False
     message = "Duplicate re-check failed (transient lookup error); import blocked. Refresh to retry."
     # Append to issues (not just a warning) — a later recalculate_validation_status()
     # recomputes can_import from the issues list, so anything weaker would be silently

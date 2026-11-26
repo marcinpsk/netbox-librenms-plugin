@@ -62,6 +62,7 @@ from netbox_librenms_plugin.import_utils.device_operations import (
     effective_import_device_type,
     match_import_device_type,
     resolve_device_by_host_ip,
+    row_at_oob_target_ip,
 )
 from netbox_librenms_plugin.import_utils.disclosure import serial_conflict_text
 from netbox_librenms_plugin.import_utils.naming import _resolve_device_name
@@ -142,7 +143,11 @@ from netbox_librenms_plugin.server_mappings import (
     promote_to_host,
     read_mapping,
 )
-from netbox_librenms_plugin.server_selection import get_librenms_sync_device, parse_configured_server_key
+from netbox_librenms_plugin.server_selection import (
+    get_librenms_sync_device,
+    librenms_link_owner,
+    parse_configured_server_key,
+)
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
 from netbox_librenms_plugin.transactions import (
     atomic_with_events,
@@ -270,6 +275,33 @@ _OOB_INTERFACE_NAME_PATTERN = re.compile(
 
 # Actions that operate on Device-only fields and cannot be applied to VMs.
 _DEVICE_ONLY_ACTIONS = frozenset({"update_serial", "update_type", "sync_serial", "sync_device_type"})
+# The conflict actions that copy the LibreNMS row onto the matched object.
+_PAYLOAD_COPY_ACTIONS = frozenset(
+    {"link", "update", "update_serial", "sync_name", "update_type", "sync_serial", "sync_platform", "sync_device_type"}
+)
+# An OOB match selects the host, but the row describes its controller.
+_OOB_ROW_REFUSED = (
+    "This LibreNMS device is the OOB controller of the matched device, so its data is not copied onto it."
+)
+
+
+def _row_is_oob_controller(validation) -> bool:
+    """Return whether validation found that the LibreNMS row is the OOB controller of the matched object."""
+    return bool(validation) and validation.get("row_is_oob_controller") is True
+
+
+# A write needs a match that validation verified; an error or a failed re-check leaves it unverified.
+_UNVERIFIED_MATCH_REFUSED = "The match of this LibreNMS device to the NetBox device is not verified. Refresh and retry."
+
+
+def _match_unverified(validation) -> bool:
+    """Return whether validation left its match unverified, so no write may target the matched object."""
+    return bool(validation) and validation.get("match_verified") is False
+
+
+def _unverified_match_response(validation) -> HttpResponse | None:
+    """Return the refusal of a write to an unverified match, or None when the match is verified."""
+    return _htmx_error_response(_UNVERIFIED_MATCH_REFUSED) if _match_unverified(validation) else None
 
 
 _TRUTHY_VALUES = {"1", "true", "on", "yes"}
@@ -600,6 +632,8 @@ def _oob_ip_is_reassignable(candidate, interface) -> bool:
 
 # A target that validation found by its serial must still hold the serial alone; the text names no device.
 _SERIAL_MATCH_LOST = "The serial no longer identifies this device alone. Refresh the validation and retry."
+_IP_MATCH_LOST = "The IP address no longer identifies this device alone. Refresh and retry."
+_HOSTNAME_MATCH_LOST = "The hostname no longer identifies this device. Refresh and retry."
 
 
 class _LibreNMSDeviceUnavailable(Exception):
@@ -2001,6 +2035,13 @@ class DeviceVCDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         )
 
 
+def _oob_interface_queryset(user, device):
+    """Return the interfaces of *device* that *user* can view; the Add as OOB picker lists them and its POST reads them."""
+    from dcim.models import Interface
+
+    return Interface.objects.restrict(user, "view").filter(device=device)
+
+
 def _suggest_oob_interface(device, oob_candidate, interfaces=None):
     """
     Suggest an interface (and default new-interface name) for an OOB IP.
@@ -2099,22 +2140,26 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
             "platform_display": _platform_display(validation.get("platform") or {}, request.user),
         }
 
-        # Add sync comparison data for existing devices
+        # Add sync comparison data for existing devices; a controller row describes the controller, not the host.
         existing = validation.get("existing_device")
         if existing:
-            context["sync_info"] = self._build_sync_info(libre_device, existing, request.user)
+            context["row_is_oob_controller"] = _row_is_oob_controller(validation)
+            if not context["row_is_oob_controller"]:
+                context["sync_info"] = self._build_sync_info(libre_device, existing, request.user)
             context["existing_id_servers"] = self._build_id_server_info(existing)
             context["existing_device_model_name"] = existing._meta.model_name
             # OOB-attach needs an interface to hang the OOB IP on (NetBox requires
             # oob_ip be interface-assigned). Offer the device's interfaces with a
             # sensible default pre-selected.
             if validation.get("oob_candidate") and existing._meta.model_name == "device":
-                oob_interfaces = list(existing.interfaces.all())
+                # The offer's device is its OOB target, the Device whose interface the POST resolves.
+                oob_target = validation["oob_candidate"]["device"]
+                oob_interfaces = list(_oob_interface_queryset(request.user, oob_target))
                 context["oob_interfaces"] = oob_interfaces
                 (
                     context["oob_suggested_interface_id"],
                     context["oob_default_new_name"],
-                ) = _suggest_oob_interface(existing, validation["oob_candidate"], interfaces=oob_interfaces)
+                ) = _suggest_oob_interface(oob_target, validation["oob_candidate"], interfaces=oob_interfaces)
 
         return render(
             request,
@@ -2369,6 +2414,10 @@ class DeviceConflictActionView(
             return _htmx_error_response("Missing validated conflict target")
         if validated_existing.pk != existing_device.pk or type(validated_existing) is not type(existing_device):
             return _htmx_error_response("Device ID mismatch: existing_device_id does not match validated device")
+        if _row_is_oob_controller(validation) and action in _PAYLOAD_COPY_ACTIONS:
+            return _htmx_error_response(_OOB_ROW_REFUSED)
+        if refusal := _unverified_match_response(validation):
+            return refusal
 
         # Require force flag when device type mismatches, but only for actions that use it
         force = replacement_intent.force if replacement_intent is not None else request.POST.get("force") == "on"
@@ -3039,6 +3088,9 @@ class CreatePlatformFromImportView(
         except ValueError:
             pass
         existing_obj = validation.get("existing_device") if validation else None
+        # An OOB match selects the host, but the row's OS is the controller's; an unverified match is no target.
+        if _row_is_oob_controller(validation) or _match_unverified(validation):
+            existing_obj = None
         if existing_obj is not None and (device_pk is None or device_pk == existing_obj.pk):
             return type(existing_obj), existing_obj.pk
         # Validation found no object, or the hidden device_pk disagrees: never guess which record to change.
@@ -3153,26 +3205,23 @@ class AddAsOOBView(
         if not libre_device:
             return _htmx_error_response("LibreNMS device not found")
 
+        if refusal := _unverified_match_response(validation):
+            return refusal
         oob_candidate = validation.get("oob_candidate") if validation else None
         if not oob_candidate:
             return _htmx_error_response("No OOB candidate found in validation data")
-        if oob_candidate["device"].pk != existing_device.pk:
+        validated_existing = validation.get("existing_device")
+        if validated_existing is None or validated_existing.pk != existing_device.pk:
             return _htmx_error_response("Device ID mismatch: existing_device_id does not match OOB candidate")
 
         server_key = self.librenms_api.server_key
 
-        # Resolve the VC sync device up front: LibreNMS treats a Virtual Chassis as one logical
-        # device, so the host librenms_id and OOB link live on the single sync member
-        # (get_librenms_sync_device) — which may differ from the user-selected member the OOB
-        # candidate matched (matched by the controller's shared chassis serial / primary IP).
-        # Every reader (interfaces/cables/modules) resolves the sync device before
-        # reading the OOB entry, so the link — and the lock, guards, IP set, and save around it — must
-        # target the sync device too: writing to a non-sync member stores the OOB where no reader
-        # looks and, since that member holds no host id, orphans it under no host link. For a
-        # non-VC device (or when the selected member IS the sync device) this resolves to the same
-        # row, so the common path is unchanged. The candidate-match check above stays on the
-        # user-selected existing_device (it validates the POST, not the linkage target).
-        sync_device = get_librenms_sync_device(existing_device, server_key=server_key) or existing_device
+        # The offer's device is its OOB target: the owner of the LibreNMS links of the matched device
+        # (librenms_link_owner), because every reader looks for the OOB link and the OOB IP there. The lock,
+        # guards, IP set and save below target it; the check under the lock reads the owner again.
+        sync_device = oob_candidate["device"]
+        if sync_device.pk != librenms_link_owner(existing_device, server_key).pk:
+            return _htmx_error_response("Device ID mismatch: existing_device_id does not match OOB candidate")
         # The sync device is DERIVED (a VC sibling of the scoped existing_device), and the block
         # below locks and saves it. Authorize it too, or a grant covering only the selected member
         # writes the OOB link onto a sibling it cannot see. Skipped when they are the same row.
@@ -3201,7 +3250,9 @@ class AddAsOOBView(
         with transaction.atomic():
             # Serial-derived candidates take their identity lock before the claim and row locks.
             serial_rules = SerialRules.load()
-            serial_match = validation.get("existing_match_type") != "primary_ip"
+            # The evidence that found the controller is checked again under the locks.
+            matched_by = oob_candidate.get("matched_by")
+            serial_match = matched_by not in ("oob_ip", "primary_ip", "hostname")
             # Hold a serial-matched row that is not the sync row; a serial writer locks a member before its master.
             hold_matched = serial_match and existing_device.pk != sync_device.pk
             matched_is_master = hold_matched and VirtualChassis.objects.filter(master_id=existing_device.pk).exists()
@@ -3239,12 +3290,16 @@ class AddAsOOBView(
             if serial_match:
                 if not is_sole_holder(existing_device, libre_device.get("serial"), rules=serial_rules):
                     return _htmx_error_response(_SERIAL_MATCH_LOST)
+            elif matched_by == "hostname":
+                if (existing_device.name or "").lower() != (validation.get("resolved_name") or "").lower():
+                    return _htmx_error_response(_HOSTNAME_MATCH_LOST)
+            elif matched_by == "oob_ip":
+                if not row_at_oob_target_ip(existing_device, libre_device, server_key):
+                    return _htmx_error_response(_IP_MATCH_LOST)
             else:
-                matched, ambiguous, _matching_ips = resolve_device_by_host_ip(oob_ip_str)
+                matched, ambiguous = resolve_device_by_host_ip(oob_ip_str)
                 if ambiguous or matched is None or matched.pk != existing_device.pk or not isinstance(matched, Device):
-                    return _htmx_error_response(
-                        "The IP address no longer identifies this device alone. Refresh and retry."
-                    )
+                    return _htmx_error_response(_IP_MATCH_LOST)
 
             # Re-verify the legacy gate on the LOCKED row (mirrors DeviceConflictActionView's
             # post-lock gate): a legacy bare-int written between the unlocked check above and
@@ -3599,11 +3654,11 @@ class AddAsOOBView(
             # Scope BEFORE locking: locking first lets a caller hold a row it cannot even see and
             # stall concurrent work on it. Lock only within the caller's view scope.
             existing = (
-                Interface.objects.restrict(request.user, "view")
+                _oob_interface_queryset(request.user, device)
                 # of=("self",): restrict() joins the permission tables, and a bare
                 # select_for_update() would try to lock those joined rows too.
                 .select_for_update(of=("self",))
-                .filter(device=device, name=name)
+                .filter(name=name)
                 .first()
             )
             if existing is not None:
@@ -3633,9 +3688,9 @@ class AddAsOOBView(
                 # not FK-protected, so a concurrent delete before the IP save would orphan
                 # oob_ip on a missing interface. select_for_update blocks that delete.
                 existing = (
-                    Interface.objects.restrict(request.user, "view")
+                    _oob_interface_queryset(request.user, device)
                     .select_for_update(of=("self",))
-                    .filter(device=device, name=name)
+                    .filter(name=name)
                     .first()
                 )
                 # The winner of the race can sit outside the caller's view scope, which is the
@@ -3651,9 +3706,7 @@ class AddAsOOBView(
                 # Scoped like every other client-supplied id: the device filter proves where the
                 # interface sits, not that the caller's grant covers it.
                 interface = (
-                    Interface.objects.restrict(request.user, "view")
-                    .select_for_update(of=("self",))
-                    .get(pk=iface_pk, device=device)
+                    _oob_interface_queryset(request.user, device).select_for_update(of=("self",)).get(pk=iface_pk)
                 )
                 return interface, None
             except Interface.DoesNotExist:
@@ -3835,6 +3888,8 @@ class PromoteToHostView(
         if not libre_device:
             return _htmx_error_response("LibreNMS device not found")
 
+        if refusal := _unverified_match_response(validation):
+            return refusal
         promote = validation.get("promote_to_host") if validation else None
         if not promote:
             return _htmx_error_response("Promotion is not applicable for this device")
@@ -4034,6 +4089,8 @@ class MergeNetBoxDevicesView(
         if not libre_device:
             return _htmx_error_response("LibreNMS device not found")
 
+        if refusal := _unverified_match_response(validation):
+            return refusal
         candidate_pks = merge_candidate_pks(validation)
         # Derive the donor from the selected winner. The merge is always between this fixed pair
         # of candidates, so the donor is unambiguously the other candidate and no client-supplied
