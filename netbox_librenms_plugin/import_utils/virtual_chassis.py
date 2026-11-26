@@ -594,11 +594,11 @@ class _Attribution:
             parent = self.by_index[parent_index]
             if (member := self.serial_owner(parent)) is not None:
                 return (None, UNATTRIBUTED_SOURCE) if crossed else (member, "ancestor-serial")
+            crossed = crossed or self._has_serial_without_identity(parent)
             # A row below an FPC link inherits the linked row's result.
             if self._junos_link(parent) is not None:
                 member, _source = self.resolve(parent, resolving)
                 return (None, UNATTRIBUTED_SOURCE) if member is None or crossed else (member, "parent-context")
-            crossed = crossed or self._has_serial_without_identity(parent)
             parent_index = parent.get("entPhysicalContainedIn", 0)
         # A descendant's parentRelPos is its hardware slot, so it inherits its parent's member.
         inherits, member, source = self._inherited(row, resolving)

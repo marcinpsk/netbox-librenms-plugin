@@ -704,6 +704,38 @@ class TestRecognizedStack:
             # A blank FPC serial gives no link, so the rows resolve as develop does: by parent context, on the page.
             assert {owner[index] for index in (2, 4, 30, 120, 121, 1210)} == {(None, "parent-context")}
 
+    @pytest.mark.parametrize("serial", ["12", "BAY140X"], ids=["short", "identity"])
+    def test_no_member_is_inherited_across_a_short_serial_fpc_link(self, serial):
+        """Outside a recognized stack, a bay that names FPC 0 and reports "12" gives its child no member."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import UNATTRIBUTED_SOURCE
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
+        master, member = make_junos_vc_members(f"junos-short-bay-{serial}")
+        fpc = {"entPhysicalName": "EX4400-24X-S", "entPhysicalModelName": "650-151094"}
+        inventory = junos_vc_inventory() + [
+            # A short-serial FPC 2 makes the stack unrecognized.
+            _row(
+                122,
+                "container",
+                1,
+                position=2,
+                entPhysicalDescr="FPC: EX4400-24X @ 2/*/*",
+                entPhysicalSerialNum="12",
+                **fpc,
+            ),
+            _row(
+                140, "container", 1, position=5, entPhysicalDescr="FPC 0 Power Supply Bay", entPhysicalSerialNum=serial
+            ),
+            _row(141, "powerSupply", 140, entPhysicalDescr="Power Supply 0"),
+        ]
+
+        owners = attribute_inventory(inventory, [master, member], SerialRules.load().for_device(master))
+
+        owner = {row["entPhysicalIndex"]: found for row, found in zip(inventory, owners, strict=True)}
+        assert owner[122] == (None, UNATTRIBUTED_SOURCE)
+        assert owner[140] == (master, "junos-member")
+        assert owner[141] == ((None, UNATTRIBUTED_SOURCE) if serial == "12" else (master, "parent-context"))
+
     @pytest.mark.parametrize("serial", ["12", "0", "CARD999"], ids=["short", "zero", "identity"])
     def test_a_non_member_row_with_a_short_serial_keeps_its_member_row(self, serial):
         """The stack shape names the member rows, so a carrier below Switch 1 that reports "12" is no member."""
