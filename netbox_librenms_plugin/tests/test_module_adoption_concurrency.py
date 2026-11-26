@@ -31,7 +31,12 @@ def test_concurrent_hidden_interface_is_not_adopted(commit_point):
     from django.contrib.auth import get_user_model
     from django.db import close_old_connections, connection, transaction
 
-    from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, make_user_with_perms
+    from netbox_librenms_plugin.tests.view_test_helpers import (
+        grant,
+        make_request,
+        make_user_with_perms,
+        message_texts,
+    )
     from netbox_librenms_plugin.views.sync.modules import InstallModuleView
 
     device = make_device("module-adoption-race")
@@ -60,6 +65,11 @@ def test_concurrent_hidden_interface_is_not_adopted(commit_point):
     user = grant(user, "change", Interface, constraints={"pk": allowed.pk})
     install_ready = Event()
     winner_committed = Event()
+    adopted_by_save = []
+
+    def record_adoption(sender, instance, created, **kwargs):
+        if not created and instance.name == "Te1/1/1" and instance.module_id is not None:
+            adopted_by_save.append(instance.pk)
 
     def pause_at_the_commit_point(execute, sql, params, many, context):
         if not install_ready.is_set() and commit_point(sql):
@@ -74,7 +84,10 @@ def test_concurrent_hidden_interface_is_not_adopted(commit_point):
         return execute(sql, params, many, context)
 
     def install_module():
+        from django.db.models.signals import post_save
+
         close_old_connections()
+        post_save.connect(record_adoption, sender=Interface, weak=False)
         try:
             with connection.cursor() as cursor:
                 cursor.execute("SET lock_timeout = '5s'")
@@ -94,8 +107,10 @@ def test_concurrent_hidden_interface_is_not_adopted(commit_point):
             view._librenms_api = SimpleNamespace(server_key="default")
             view.setup(request, pk=thread_device.pk)
             with connection.execute_wrapper(pause_at_the_commit_point):
-                return view.post(request, pk=thread_device.pk)
+                view.post(request, pk=thread_device.pk)
+            return request
         finally:
+            post_save.disconnect(record_adoption, sender=Interface)
             close_old_connections()
 
     with bounded_executor(max_workers=1) as executor:
@@ -115,8 +130,11 @@ def test_concurrent_hidden_interface_is_not_adopted(commit_point):
             else:
                 winner.save()
         winner_committed.set()
-        future.result(timeout=10)
+        request = future.result(timeout=10)
 
+    assert message_texts(request, "error") == ["A matching interface is not available for module adoption."]
+    # The late race must reach Module.save(): NetBox adopts the interface there before the rollback.
+    assert adopted_by_save == ([winner.pk] if commit_point is _after_the_adoption_scan else [])
     winner.refresh_from_db()
     assert winner.module_id is None
     assert not Module.objects.filter(device=device, module_bay=bay).exists()
