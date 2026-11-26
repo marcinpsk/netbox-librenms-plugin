@@ -2848,6 +2848,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         from users.models import ObjectPermission
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.serial_identity import module_subtrees
         from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
         from netbox_librenms_plugin.tests.view_test_helpers import (
             get,
@@ -2941,13 +2942,22 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         assert other_device.name not in " ".join(message_texts(request, "error"))
         # The delete scope refuses before the write locks the holder's Device or walks the holder's subtree.
         assert self._locks_device(queries, other_device.pk) is False
-        holder_subtree = re.compile(rf'"dcim_module"\."id" = {holder.pk}\b|"module_id" IN \({holder.pk}\)')
-        subtree_reads = [
-            query["sql"]
-            for query in queries.captured_queries
-            if '"dcim_module"."serial"' in query["sql"] and holder_subtree.search(query["sql"])
-        ]
-        assert subtree_reads == []
+        holder_subtree = re.compile(
+            rf'"dcim_module"\."id" (?:= {holder.pk}\b|IN \([^)]*\b{holder.pk}\b)|"module_id" IN \([^)]*\b{holder.pk}\b'
+        )
+
+        def subtree_reads(captured):
+            return [
+                query["sql"]
+                for query in captured.captured_queries
+                if '"dcim_module"."serial"' in query["sql"] and holder_subtree.search(query["sql"])
+            ]
+
+        assert subtree_reads(queries) == []
+        # Positive control: the pattern matches the real root read of the subtree walk.
+        with CaptureQueriesContext(connection) as walk:
+            module_subtrees([holder.pk])
+        assert subtree_reads(walk), walk.captured_queries
 
     def test_module_preview_does_not_expose_a_hidden_serial_conflict(self):
         """The preview must not render the location or id of a conflict outside view scope."""
