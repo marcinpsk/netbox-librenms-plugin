@@ -1030,6 +1030,26 @@ def test_collision_precheck_reads_the_serial_rules_once_for_the_batch(live_libre
 
 
 @pytest.mark.django_db
+def test_collision_precheck_checks_a_vm_row_without_the_serial_rules(live_librenms):
+    """A VM row needs no serial rule, so a failing rule read does not drop it from the batch."""
+    from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import aborting_statement
+
+    vm_id = 96215
+    _, row = _importable_row(live_librenms, vm_id, "vm-no-rules")
+    row["serial"] = "VM-ROW-SERIAL"
+
+    with aborting_statement(
+        lambda sql, params: sql.startswith("SELECT") and '"netbox_librenms_plugin_normalizationrule"' in sql
+    ) as failed:
+        collisions, unresolved = detect_collisions_for_device_ids(
+            [vm_id], live_librenms.api, libre_devices_cache={vm_id: row}, vm_device_ids=[vm_id]
+        )
+
+    assert (failed, collisions, unresolved) == ([], [], {})
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize("serial", ["", "STAMP-UNMATCHED-SERIAL"], ids=["vc-cache-stamp", "serial-lookup"])
 def test_collision_precheck_continues_when_the_vc_cache_stamp_cannot_read_rules(live_librenms, serial):
     """A blank serial reads the rules first in the VC cache stamp; an unmatched serial reads them in its lookup."""
