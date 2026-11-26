@@ -1903,6 +1903,24 @@ def import_platform_warnings(label, plan, text_viewer):
     return [f"Imported {label} with {assigned}: {detail}"]
 
 
+def import_refusal(validation, device_id) -> str:
+    """Return why the import writer refuses the Device row of *validation* before any write, else ""."""
+    if validation.get("virtual_chassis", {}).get("detection_failed"):
+        return STACK_DETECTION_FAILED_MESSAGE
+    if validation.get("existing_device"):
+        # No name: the match came from an unrestricted search, and this text reaches job data and job logs.
+        return f"Device {device_id} already exists in NetBox"
+    # Validation sets existing_device=None for both ambiguities, and a manual mapping would create a duplicate.
+    if validation.get("ambiguous_librenms_id"):
+        return "Import blocked: ambiguous LibreNMS ID matches multiple NetBox records."
+    if validation.get("existing_match_type") == "ambiguous_hostname_or_serial":
+        return (
+            "Import blocked: this device's hostname, serial, or management IP matches multiple NetBox devices; "
+            "resolve the duplicate first."
+        )
+    return ""
+
+
 def import_single_device(  # noqa: C901
     device_id: int,
     server_key: str = None,
@@ -1986,53 +2004,14 @@ def import_single_device(  # noqa: C901
                 serial_rules=serial_rules,
             )
 
-        if validation.get("virtual_chassis", {}).get("detection_failed"):
+        # The refusals before any write; the bulk confirmation reads the same function.
+        if refusal := import_refusal(validation, device_id):
+            detection_failed = validation.get("virtual_chassis", {}).get("detection_failed")
             return {
                 "success": False,
-                "device": None,
+                "device": None if detection_failed else validation.get("existing_device"),
                 "message": "",
-                "error": STACK_DETECTION_FAILED_MESSAGE,
-                "synced": {},
-            }
-
-        # Check if device already exists
-        if validation.get("existing_device"):
-            return {
-                "success": False,
-                "device": validation["existing_device"],
-                "message": "",
-                # No name: the match came from an unrestricted search and this string reaches
-                # job data and job logs, which any holder of core.view_job can read.
-                "error": f"Device {device_id} already exists in NetBox",
-                "synced": {},
-            }
-
-        # Hard fail-closed guard: an ambiguous librenms_id (matches >1 NetBox record) is the
-        # terminal blocker — validate_device_for_import() sets existing_device=None for it, so the
-        # check above doesn't catch it, and a manual_mappings import would otherwise create a
-        # duplicate Device under the ambiguous id. Block the create outright.
-        if validation.get("ambiguous_librenms_id"):
-            return {
-                "success": False,
-                "device": None,
-                "message": "",
-                "error": "Import blocked: ambiguous LibreNMS ID matches multiple NetBox records.",
-                "synced": {},
-            }
-
-        # Parallel terminal-ambiguity guard: a duplicate hostname/serial match is also a terminal
-        # blocker — validate_device_for_import() sets existing_device=None AND
-        # existing_match_type="ambiguous_hostname_or_serial" for it, so neither the existing_device
-        # check above nor the ambiguous_librenms_id guard catches it. Without this, a manual_mappings
-        # import (which supplies site/type/role and so skips the `if not site` fail-closed below)
-        # would create a duplicate Device under the unresolved ambiguity — the same fail-open the
-        # ambiguous_librenms_id guard exists to prevent.
-        if validation.get("existing_match_type") == "ambiguous_hostname_or_serial":
-            return {
-                "success": False,
-                "device": None,
-                "message": "",
-                "error": "Import blocked: this device's hostname, serial, or management IP matches multiple NetBox devices; resolve the duplicate first.",
+                "error": refusal,
                 "synced": {},
             }
 

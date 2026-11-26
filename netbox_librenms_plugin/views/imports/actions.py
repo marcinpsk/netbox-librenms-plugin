@@ -61,6 +61,7 @@ from netbox_librenms_plugin.import_utils import (
 )
 from netbox_librenms_plugin.import_utils.device_operations import (
     effective_import_device_type,
+    import_refusal,
     match_import_device_type,
     resolve_device_by_host_ip,
 )
@@ -1226,6 +1227,8 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         vc_detection_enabled = _resolve_vc_detection_enabled(request)
 
         devices = []
+        # The rows that the writer refuses; they are not submitted, but they still count for collisions.
+        refused = []
         errors = []
         seen_ids = set()
         cache_expired_count = 0
@@ -1272,9 +1275,19 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 include_vc_detection=True,
                 serial_rules=serial_rules,
             )
-            # The import writer refuses this row, so the form does not submit it. The text names only LibreNMS data.
-            if validation["write_refusals"]:
-                errors.append(f"Device ID {device_id} cannot be imported: {'; '.join(validation['write_refusals'])}")
+            # The import writer refuses this row, so the form does not submit it. The text names no NetBox object.
+            refusals = [*validation["write_refusals"]]
+            if not validation.get("import_as_vm") and (refusal := import_refusal(validation, device_id)):
+                refusals.insert(0, refusal)
+            if refusals:
+                refused.append(
+                    {
+                        "device_id": device_id,
+                        "device_name": validation.get("resolved_name") or f"device-{device_id}",
+                        "validation": validation,
+                    }
+                )
+                errors.append(f"Device ID {device_id} cannot be imported: {'; '.join(refusals)}")
                 continue
             # Mark validation with VC detection flag for proper URL generation in table
             # Bulk confirm should respect the initial filter's VC detection preference
@@ -1377,6 +1390,19 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 }
             )
 
+        # A refused row still counts: two rows that target one NetBox object get the collision answer.
+        collisions = scope_bulk_collisions(detect_bulk_collisions([*devices, *refused]), request.user)
+        if collisions:
+            # Render at 200 (not 4xx): this is an interstitial modal swapped
+            # into #htmx-modal-content, exactly like the confirm step. A non-2xx
+            # status makes HTMX skip the swap and route the body through
+            # htmx:responseError -> showErrorToast(), which would dump the
+            # collision template as raw text in a toast.
+            return render(
+                request,
+                "netbox_librenms_plugin/htmx/bulk_import_collision.html",
+                {"collisions": collisions},
+            )
         if not devices:
             # All branches return 200 (not 400): this is HTMX modal content swapped into
             # #htmx-modal-content, and htmx does not swap 4xx responses by default.
@@ -1426,21 +1452,9 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             "vc_detection_enabled": vc_detection_enabled,
         }
 
-        collisions = scope_bulk_collisions(detect_bulk_collisions(devices), request.user)
         # After collision detection, which must key on the unrestricted matches to stop two rows
         # writing the same NetBox device.
         scope_validation_disclosures([entry.get("validation") for entry in devices], request.user)
-        if collisions:
-            # Render at 200 (not 4xx): this is an interstitial modal swapped
-            # into #htmx-modal-content, exactly like the confirm step. A non-2xx
-            # status makes HTMX skip the swap and route the body through
-            # htmx:responseError -> showErrorToast(), which would dump the
-            # collision template as raw text in a toast.
-            return render(
-                request,
-                "netbox_librenms_plugin/htmx/bulk_import_collision.html",
-                {"collisions": collisions},
-            )
 
         return render(
             request,

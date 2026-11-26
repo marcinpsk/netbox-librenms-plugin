@@ -1189,8 +1189,8 @@ class TestBulkImportConfirmViewIntegration:
         assert b"Import 1 device" in response.content
         assert view_message_texts(request, "error") == []
 
-    def test_distinct_existing_devices_render_confirmation(self, settings, librenms_server):
-        """Two LibreNMS rows targeting distinct NetBox devices pass the bulk collision gate."""
+    def test_distinct_existing_devices_pass_the_collision_gate_and_are_not_submitted(self, settings, librenms_server):
+        """Two LibreNMS rows targeting distinct NetBox devices pass the bulk collision gate; the writer refuses both."""
         server_key = "confirm-integration-distinct-targets"
         first_device = make_device("confirm-integration-distinct-target-a")
         second_device = make_device("confirm-integration-distinct-target-b")
@@ -1229,12 +1229,14 @@ class TestBulkImportConfirmViewIntegration:
         response = post_view(view, request)
 
         assert response.status_code == 200
-        assert b"Confirm Import" in response.content
-        assert first_device.name.encode() in response.content
-        assert second_device.name.encode() in response.content
         assert b"Bulk import blocked" not in response.content
-        assert response.content.count(b'<div class="border rounded-3 p-2 mb-2">') == 2
-        assert b"Import 2 devices" in response.content
+        for device_id in (61, 62):
+            assert (
+                f"Device ID {device_id} cannot be imported: Device {device_id} already exists in NetBox".encode()
+                in (response.content)
+            )
+        assert b'name="select"' not in response.content
+        assert b"data-bulk-confirm-submit" not in response.content
         assert view_message_texts(request, "error") == []
 
     def test_colliding_rows_render_the_collision_block(self, settings, librenms_server):

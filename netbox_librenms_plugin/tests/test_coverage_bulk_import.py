@@ -1163,3 +1163,31 @@ def test_the_bulk_confirmation_blocks_a_stack_member_that_the_writer_refuses(cli
     # The text of the member writer's refusal.
     assert submitted == ([device_id] if case == "free" else [])
     assert (f"Device ID {device_id} cannot be imported: {issue}" in content) is (case != "free")
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("case", ["detection-failed", "existing", "ambiguous-id"])
+def test_the_bulk_confirmation_omits_a_row_that_the_writer_refuses_before_any_write(client, live_librenms, case):
+    """The writer refuses these rows before it writes, so the form submits only the eligible row."""
+    from netbox_librenms_plugin.import_utils.device_operations import STACK_DETECTION_FAILED_MESSAGE
+
+    prerequisites = TestBulkImportIntegration()._prerequisites()
+    eligible, refused = 311, 312 + ["detection-failed", "existing", "ambiguous-id"].index(case)
+    _register_device(live_librenms, _cached_row(eligible, "confirm-eligible", "ELIGIBLE-311", prerequisites))
+    row = _cached_row(refused, f"confirm-refused-{case}", f"REFUSED-{refused}", prerequisites)
+    _register_device(live_librenms, row)
+    if case == "detection-failed":
+        live_librenms.server.register(f"/api/v0/inventory/{refused}", {"status": "error"}, status=500)
+        reason = STACK_DETECTION_FAILED_MESSAGE
+    elif case == "existing":
+        make_device("confirm-existing-holder", librenms_cf={"default": refused})
+        reason = f"Device {refused} already exists in NetBox"
+    else:
+        for index in range(2):
+            make_device(f"confirm-ambiguous-holder-{index}", librenms_cf={"default": refused})
+        reason = "Import blocked: ambiguous LibreNMS ID matches multiple NetBox records."
+
+    submitted, content = _confirm(client, [eligible, refused], f"refused-{case}")
+
+    assert submitted == [eligible]
+    assert f"Device ID {refused} cannot be imported: {reason}" in content
