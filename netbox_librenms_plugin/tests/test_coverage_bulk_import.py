@@ -1223,3 +1223,42 @@ def test_the_bulk_confirmation_keeps_a_refusal_beside_the_expiry_notice(client, 
     assert submitted == []
     assert "Some device data has expired." in content
     assert f"Device ID {refused} cannot be imported: Device {refused} already exists in NetBox" in content
+
+
+@pytest.mark.django_db
+def test_a_selected_role_keeps_a_stack_member_issue_whose_serial_names_a_role(client, live_librenms):
+    """The role selection removes the role issue only, not every issue whose text contains "role"."""
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
+    from netbox_librenms_plugin.serial_identity import UNAVAILABLE_MASTER_LINK
+    from netbox_librenms_plugin.tests.test_coverage_device_operations import _stray_chassis_member
+    from netbox_librenms_plugin.tests.test_virtual_chassis_fallbacks import _seed_stack
+
+    prerequisites = TestBulkImportIntegration()._prerequisites()
+    _stray_chassis_member("confirm-role-stray", "ROLE-123")
+    device_id = 353
+    row = _libre_device(
+        device_id,
+        "confirm-stack-role",
+        serial="STACK-MASTER-353",
+        hardware=prerequisites["hardware"],
+        location=prerequisites["location"],
+    )
+    _seed_stack(live_librenms.server, device_id, serials=(row["serial"], "ROLE-123"))
+    cache.set(get_import_device_cache_key(device_id, "default"), row, timeout=300)
+    client.force_login(make_superuser("confirm-stack-role-user"))
+
+    # The confirmation leaves a refused stack out, so the row's details view applies the role selection.
+    response = client.get(
+        reverse("plugins:netbox_librenms_plugin:device_validation_details", kwargs={"device_id": device_id}),
+        {"server_key": "default", f"role_{device_id}": str(prerequisites["device_role_id"])},
+        HTTP_HX_REQUEST="true",
+    )
+
+    assert response.status_code == 200
+    validation = response.context["validation"]
+    assert validation["device_role"]["role"] is not None
+    issue = f"Stack member 2: Cannot check VC member serial 'ROLE-123': {UNAVAILABLE_MASTER_LINK}"
+    assert validation["issues"] == [issue]
+    assert validation["can_import"] is False

@@ -3000,7 +3000,10 @@ class TestApplyImportIntentToValidation:
             "cluster": {"found": False, "cluster": None},
             "vm_placement": {"method": "site", "found": False, "host_device": None},
             "device_role": {"found": False, "role": None},
-            "issues": ["VM placement requires a selected cluster", "Device role must be selected"],
+            "issues": [
+                "VM placement requires a selected cluster",
+                "Device role must be manually selected before import",
+            ],
         }
         intent = ImportRowIntent(
             source_device_id=1,
@@ -3158,7 +3161,7 @@ class TestApplyImportIntentToValidation:
             "site": {"found": True},
             "device_type": {"found": True},
             "device_role": {"found": False, "role": None},
-            "issues": ["Device role must be selected"],
+            "issues": ["Device role must be manually selected before import"],
         }
         intent = ImportRowIntent(
             source_device_id=1,
