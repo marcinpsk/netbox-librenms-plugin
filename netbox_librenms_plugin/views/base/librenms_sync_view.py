@@ -70,6 +70,7 @@ SYNC_TAB_PREFERENCE = "plugins.netbox_librenms_plugin.sync_tab"
 INTERFACE_NAME_SELECTOR_TABS = ("interfaces", "cables", "ipaddresses")
 
 VC_SERIALS_PAGE_REFUSAL = "You cannot change this device, so this dialog cannot assign serials."
+VC_SERIALS_WRITE_REFUSAL = "You do not have the plugin write permission, so this dialog cannot assign serials."
 
 
 class BaseLibreNMSSyncView(
@@ -899,8 +900,13 @@ class BaseLibreNMSSyncView(
             .filter(virtual_chassis_id=obj.virtual_chassis_id)
             .values_list("pk", flat=True)
         )
-        # The writer changes the page device first, so a page outside the change scope offers no member.
-        assign_refusal = "" if obj.pk in changeable else VC_SERIALS_PAGE_REFUSAL
+        # The writer checks the plugin write permission, then changes the page device, so either refusal offers no member.
+        if not self.has_write_permission():
+            assign_refusal = VC_SERIALS_WRITE_REFUSAL
+        elif obj.pk not in changeable:
+            assign_refusal = VC_SERIALS_PAGE_REFUSAL
+        else:
+            assign_refusal = ""
         # The writer rolls back the whole post for a member outside the change scope, so the dialog offers none.
         assignable = (
             [member for member in vc_members if member.pk in changeable and member.pk in viewable]

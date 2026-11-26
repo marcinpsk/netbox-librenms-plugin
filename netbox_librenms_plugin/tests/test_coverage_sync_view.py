@@ -1105,6 +1105,39 @@ class TestVirtualChassisInventory:
         posted = client.post(form["action"], form["fields"])
         assert posted.status_code == 404
 
+    def test_a_user_without_plugin_write_permission_gets_no_assignment(self, client, librenms_server):
+        """The writer checks the plugin write permission first, so a user who may change both members gets no submit."""
+        from dcim.models import Device
+        from django.utils.html import escape
+
+        from netbox_librenms_plugin.models import LibreNMSSettings
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms, module_tab_forms
+        from netbox_librenms_plugin.views.base.librenms_sync_view import (
+            VC_SERIALS_PAGE_REFUSAL,
+            VC_SERIALS_WRITE_REFUSAL,
+        )
+
+        _vc, (page, other) = make_virtual_chassis_members("inventory-plugin-write", count=2)
+        seed_mapping(page, SERVER_KEY, own=6668)
+        inventory = _stack_inventory({"entPhysicalSerialNum": "WRITE-A"}, {"entPhysicalSerialNum": "WRITE-B"})
+        _register_device(librenms_server, 6668, page.name, inventory=inventory)
+        user = make_user_with_perms("vc-serial-no-write", [("view", Device), ("change", Device)], plugin_write=False)
+        client.force_login(grant(user, "view", LibreNMSSettings))
+
+        response = client.get(_sync_url(page))
+
+        html = response.content.decode()
+        (form,) = [form for form in module_tab_forms(html).forms if "assign-vc-serial" in form["action"]]
+        assert form["selects"] == {}
+        assert html.count(escape(VC_SERIALS_WRITE_REFUSAL)) == 1
+        assert escape(VC_SERIALS_PAGE_REFUSAL) not in html
+        assert 'type="submit" form="vc-serials-form"' not in html
+        # The writer refuses the submit that a selector would make.
+        posted = client.post(form["action"], {**form["fields"], "member_id_2": str(other.pk)})
+        assert posted.status_code == 302
+        other.refresh_from_db()
+        assert other.serial != "WRITE-B"
+
     def test_two_rows_that_match_one_holder_select_no_member(self, logged_in_client, librenms_server):
         """Two rows report the serial of A, so neither row selects A and the post of a third row succeeds."""
         _vc, (holder, other) = make_virtual_chassis_members("inventory-shared-holder", count=2)
