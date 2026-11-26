@@ -124,10 +124,11 @@ def test_verify_keeps_the_interface_name_option_from_the_page(client):
     assert "Page port description" in response.json()["formatted_row"]["local_port"]
 
 
-def _sync(client, subject, local, remote):
+def _sync(client, subject, local, remote, **extra):
     return client.post(
         reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[subject.pk]),
         {
+            **extra,
             "server_key": SERVER_KEY,
             "select": str(LOCAL_PORT_ID),
             f"device_selection_{LOCAL_PORT_ID}": local.device_id,

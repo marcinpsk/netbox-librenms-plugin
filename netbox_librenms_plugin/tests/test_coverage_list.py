@@ -214,6 +214,151 @@ class TestCompletedJobResults:
     """Completed jobs are resolved through the real Job model and cache."""
 
     @pytest.mark.django_db
+    def test_completed_job_refreshes_matches_with_a_fixed_number_of_identity_queries(
+        self, client, django_user_model, librenms_server, caplog
+    ):
+        from core.models import Job
+        from dcim.models import Device
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        from virtualization.models import VirtualMachine
+
+        from netbox_librenms_plugin.import_utils import get_import_device_cache_key
+        from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+
+        user = _create_user(django_user_model, "completed-job-identity-refresh")
+        client.force_login(user)
+        devices = [_device(device_id) for device_id in range(4620, 4632)]
+        _register_devices(librenms_server, devices)
+        device_ids = [device["device_id"] for device in devices]
+        cache.set_many({get_import_device_cache_key(device["device_id"], SERVER_KEY): device for device in devices})
+        jobs = [
+            Job.objects.create(
+                name="Completed import search",
+                user=user,
+                job_id=uuid4(),
+                status="completed",
+                data={"device_ids": ids, "server_key": SERVER_KEY},
+            )
+            for ids in (device_ids[:3], device_ids)
+        ]
+        mapped = seed_mapping(make_device("completed-job-late-link"), SERVER_KEY, own=device_ids[0])
+        host = seed_mapping(make_device("completed-job-host-link"), SERVER_KEY, own=device_ids[1])
+        oob = seed_mapping(make_device("completed-job-oob-link"), SERVER_KEY, oob=device_ids[1])
+        serial_match = make_device("completed-job-serial-match", serial=devices[2]["serial"])
+
+        identity_tables = tuple(f'FROM "{model._meta.db_table}"' for model in (Device, VirtualMachine))
+        counts = []
+        for job in jobs:
+            with CaptureQueriesContext(connection) as queries:
+                response = client.get(_import_url(), {"job_id": job.pk})
+
+            assert response.status_code == 200
+            rows = {row["device_id"]: row["_validation"] for row in response.context["table"].data}
+            assert set(rows) == set(job.data["device_ids"])
+            assert rows[device_ids[0]]["existing_device"] == mapped
+            assert rows[device_ids[0]]["existing_match_type"] == "librenms_id"
+            assert rows[device_ids[1]]["existing_device"] is None
+            assert rows[device_ids[1]]["ambiguous_librenms_id"] is True
+            assert rows[device_ids[2]]["existing_device"] == serial_match
+            assert rows[device_ids[2]]["existing_match_type"] == "serial"
+            serial_queries = [
+                query["sql"]
+                for query in queries.captured_queries
+                if 'BTRIM("dcim_device"."serial"' in query["sql"] and "LIKE ANY" in query["sql"]
+            ]
+            assert len(serial_queries) == 1
+            counts.append(
+                sum(
+                    "librenms_id" in query["sql"] and any(table in query["sql"] for table in identity_tables)
+                    for query in queries.captured_queries
+                )
+            )
+
+        assert counts[0] == counts[1], counts
+        assert any(
+            f"host pk={host.pk} but a different OOB pk={oob.pk} on server {SERVER_KEY!r}" in record.message
+            for record in caplog.records
+        )
+
+    @pytest.mark.django_db
+    def test_completed_job_detects_duplicate_mappings_for_a_server_key_ending_in_underscore(
+        self, client, django_user_model, librenms_server, settings
+    ):
+        from core.models import Job
+
+        from netbox_librenms_plugin.import_utils import get_import_device_cache_key
+        from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+
+        server_key = "lab_"
+        plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+        servers = plugin_config["netbox_librenms_plugin"]["servers"]
+        servers[server_key] = servers.pop(SERVER_KEY)
+        settings.PLUGINS_CONFIG = plugin_config
+        user = _create_user(django_user_model, "completed-job-duplicate-identity")
+        client.force_login(user)
+        target, sibling = _device(4632), _device(4633)
+        _register_devices(librenms_server, [target, sibling])
+        seed_mapping(make_device(sibling["sysName"]), server_key, own=target["device_id"])
+        seed_mapping(make_device("second-identity-holder"), server_key, own=target["device_id"])
+        cache.set_many({get_import_device_cache_key(row["device_id"], server_key): row for row in (target, sibling)})
+
+        outcomes = []
+        for device_ids in ([target["device_id"]], [target["device_id"], sibling["device_id"]]):
+            job = Job.objects.create(
+                name="Completed import search",
+                user=user,
+                job_id=uuid4(),
+                status="completed",
+                data={"device_ids": device_ids, "server_key": server_key},
+            )
+            response = client.get(_import_url(), {"job_id": job.pk})
+            assert response.status_code == 200
+            rows = {row["device_id"]: row["_validation"] for row in response.context["table"].data}
+            validation = rows[target["device_id"]]
+            outcomes.append((validation["existing_match_type"], validation["existing_device"]))
+
+        assert outcomes == [("ambiguous_librenms_id", None)] * 2
+
+    @pytest.mark.django_db
+    @pytest.mark.parametrize("use_sysname", [True, False], ids=["selected-name", "unused-name"])
+    def test_completed_job_keeps_validating_rows_when_a_name_candidate_has_malformed_custom_fields(
+        self, client, django_user_model, librenms_server, use_sysname
+    ):
+        from core.models import Job
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.import_utils import get_import_device_cache_key
+        from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+
+        user = _create_user(django_user_model, "completed-job-malformed-candidate")
+        client.force_login(user)
+        valid, candidate = _device(4634), _device(4635)
+        _register_devices(librenms_server, [valid, candidate])
+        mapped = seed_mapping(make_device("valid-identity-holder"), SERVER_KEY, own=valid["device_id"])
+        malformed = make_device(candidate["sysName"])
+        Device.objects.filter(pk=malformed.pk).update(custom_field_data=[])
+        cache.set_many({get_import_device_cache_key(row["device_id"], SERVER_KEY): row for row in (valid, candidate)})
+        job = Job.objects.create(
+            name="Completed import search",
+            user=user,
+            job_id=uuid4(),
+            status="completed",
+            data={
+                "device_ids": [valid["device_id"], candidate["device_id"]],
+                "server_key": SERVER_KEY,
+                "use_sysname": use_sysname,
+            },
+        )
+
+        response = client.get(_import_url(), {"job_id": job.pk})
+
+        assert response.status_code == 200
+        rows = {row["device_id"]: row["_validation"] for row in response.context["table"].data}
+        assert rows[valid["device_id"]]["existing_device"] == mapped
+        assert rows[candidate["device_id"]]["match_verified"] is (not use_sysname)
+
+    @pytest.mark.django_db
     def test_completed_job_loads_only_live_cached_rows_and_restores_its_options(
         self,
         django_user_model,
@@ -450,15 +595,16 @@ class TestImportListRequest:
         librenms_server,
     ):
         """A Device stores "True" and LibreNMS sends `serial: true`; the batch serial lookup reads the value."""
-        make_device("search-boolean-text-holder", serial="True")
-        _register_devices(librenms_server, [{**_device(4116), "serial": True}])
+        holder = make_device("search-boolean-text-holder", serial="True")
+        # The text row puts "True" in the batch, so the boolean row finds a populated key.
+        _register_devices(librenms_server, [{**_device(4116), "serial": True}, {**_device(4117), "serial": "True"}])
         client.force_login(_create_user(django_user_model, "search-boolean-serial"))
 
         response = client.get(_import_url(), _search_params())
 
-        (row,) = response.context["table"].data
-        assert row["_validation"]["existing_device"] is None
-        assert row["_validation"]["existing_match_type"] is None
+        rows = {row["device_id"]: row["_validation"] for row in response.context["table"].data}
+        assert (rows[4116]["existing_device"], rows[4116]["existing_match_type"]) == (None, None)
+        assert (rows[4117]["existing_device"].pk, rows[4117]["existing_match_type"]) == (holder.pk, "serial")
 
     @pytest.mark.django_db
     def test_a_warm_search_validates_a_row_again_that_stopped_at_an_unavailable_serial(

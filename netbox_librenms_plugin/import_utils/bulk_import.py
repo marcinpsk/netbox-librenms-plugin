@@ -1,6 +1,5 @@
 """Bulk import orchestration for devices and filter processing."""
 
-import functools
 import logging
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -19,8 +18,6 @@ from ..serial_identity import (
     assignment_lock,
     display,
     fingerprint,
-    is_serial_value,
-    resolve_devices,
 )
 from ..transactions import atomic_with_events
 from ..utils import (
@@ -44,6 +41,7 @@ from .device_operations import (
     effective_import_device_type,
     import_single_device,
     is_serial_unavailable_issue,
+    preload_import_objects,
     validate_device_for_import,
 )
 from .filters import _safe_disabled, get_librenms_devices_for_import
@@ -743,19 +741,6 @@ def _stopped_at_unavailable_serial(validation: dict) -> bool:
     return any(is_serial_unavailable_issue(issue) for issue in validation.get("issues", []))
 
 
-def search_serial_discoveries(devices, serial_rules):
-    """Build a lazy serial lookup shared by the rows of a search."""
-
-    @functools.cache
-    def discover():
-        return resolve_devices(
-            (display(row.get("serial")) for row in devices if is_serial_value(row.get("serial"))),
-            rules=serial_rules,
-        )
-
-    return discover
-
-
 def validate_search_row(
     api: LibreNMSAPI,
     device: dict,
@@ -765,12 +750,13 @@ def validate_search_row(
     strip_domain,
     serial_rules,
     numbering_rules,
-    serial_discoveries,
+    known_objects=None,
 ) -> dict:
     """
     Validate one row of an import search against the current NetBox state.
 
     A search and the completed-job page call it for every row. Only the LibreNMS-side inputs come from the cache.
+    *known_objects* is the :func:`preload_import_objects` of the batch, or None to read each match as one object.
     """
     validation = validate_device_for_import(
         device,
@@ -782,7 +768,7 @@ def validate_search_row(
         strip_domain=strip_domain,
         serial_rules=serial_rules,
         numbering_rules=numbering_rules,
-        serial_discoveries=serial_discoveries,
+        known_objects=known_objects,
     )
     if not vc_detection_enabled:
         validation["virtual_chassis"] = empty_virtual_chassis_data()
@@ -912,8 +898,6 @@ def process_device_filters(  # noqa: C901
     serial_rules = serial_rules or SerialRules.load()
     numbering_rules = load_numbering_rules()
 
-    serial_discoveries = search_serial_discoveries(libre_devices, serial_rules)
-
     # Always pass api so validate_device_for_import can run hardware/chassis lookups.
     # vc_detection_enabled only gates VC-specific paths inside that function.
 
@@ -924,6 +908,9 @@ def process_device_filters(  # noqa: C901
             return _empty_return(return_cache_status)
     else:
         logger.info(f"Validating {total} devices")
+
+    # One load serves every row: every object that a row can match.
+    known_objects = preload_import_objects(libre_devices, api.server_key, serial_rules=serial_rules)
 
     for idx, device in enumerate(libre_devices, 1):
         # Check for job termination periodically
@@ -939,8 +926,8 @@ def process_device_filters(  # noqa: C901
             use_sysname=use_sysname,
             strip_domain=strip_domain,
             serial_rules=serial_rules,
-            serial_discoveries=serial_discoveries,
             numbering_rules=numbering_rules,
+            known_objects=known_objects,
         )
         # The dialog and the completed-job page read this raw row, so they describe the row that the table shows.
         cache.set(get_import_device_cache_key(device_id, api.server_key), dict(device), timeout=api.cache_timeout)

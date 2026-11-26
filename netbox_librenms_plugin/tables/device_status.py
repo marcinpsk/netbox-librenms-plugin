@@ -16,7 +16,6 @@ from netbox_librenms_plugin.import_utils.disclosure import scope_validation_disc
 from netbox_librenms_plugin.import_utils.naming import import_name_variants
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 from netbox_librenms_plugin.serial_identity import display
-from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.utils import netbox_allows_standalone_vm_host
 
 _IMPORT_NAMING_INCLUDE = "#use-sysname-toggle, #strip-domain-toggle"
@@ -32,6 +31,11 @@ class DeviceStatusTable(DeviceTable):
         orderable=False,
     )
 
+    def __init__(self, *args, **kwargs):
+        """Create the table; the list view sets the sync member of each listed chassis, keyed by chassis ID."""
+        super().__init__(*args, **kwargs)
+        self.sync_by_chassis = {}
+
     def render_librenms_status(self, value, record):
         """Render LibreNMS sync status with link to sync page."""
         sync_url = reverse(
@@ -39,18 +43,14 @@ class DeviceStatusTable(DeviceTable):
             kwargs={"pk": record.pk},
         )
 
-        # Check if device is VC member and redirect to sync device if different
-        if hasattr(record, "virtual_chassis") and record.virtual_chassis:
-            sync_device = get_librenms_sync_device(record)
-            if sync_device and record.pk != sync_device.pk:
-                sync_device_url = reverse(
-                    "plugins:netbox_librenms_plugin:device_librenms_sync",
-                    kwargs={"pk": sync_device.pk},
-                )
-                return mark_safe(
-                    f'<a href="{sync_device_url}"><span class="text-info">'
-                    f'<i class="mdi mdi-server-network"></i> See {sync_device.name}</span></a>'
-                )
+        # A chassis row whose sync member is another device links to that member.
+        sync_device = self.sync_by_chassis.get(record.virtual_chassis_id)
+        if sync_device is not None and sync_device.pk != record.pk:
+            return format_html(
+                '<a href="{}"><span class="text-info"><i class="mdi mdi-server-network"></i> See {}</span></a>',
+                reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": sync_device.pk}),
+                sync_device.name,
+            )
         if value:
             status = '<span class="text-success"><i class="mdi mdi-check-circle"></i> Found</span>'
         elif value is False:

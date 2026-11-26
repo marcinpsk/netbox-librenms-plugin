@@ -31,7 +31,7 @@ from netbox_librenms_plugin.acquisition.snapshot import (
     SourceSnapshot,
 )
 from netbox_librenms_plugin.librenms_api import configured_cache_timeout, stored_librenms_id
-from netbox_librenms_plugin.server_mappings import MappingRole, identity_q, read_mapping
+from netbox_librenms_plugin.server_mappings import MappingRole, identity_q, prefetch_mappings, read_mapping
 from netbox_librenms_plugin.sync_cache import sync_snapshot_key
 
 IDENTITY_CHANGED = "LibreNMS source identity changed or expired. Refresh this tab and try again."
@@ -96,7 +96,7 @@ def visible_cable_port_sources(user, server_key, identities):
     hidden_chassis = {owner.virtual_chassis_id for owner in owners if owner.pk in hidden_ids}
     # An identity that no NetBox device holds names no object the actor could be denied.
     visibility = dict.fromkeys(identities, True)
-    for owner in sources:
+    for owner in prefetch_mappings(sources):
         visible = owner.pk not in hidden_ids and (
             owner.virtual_chassis_id is None or owner.virtual_chassis_id not in hidden_chassis
         )
@@ -236,6 +236,7 @@ def read(subject, resource, server_key, *, user=None):
 
 def _binding_holds(snapshot, resource, owner):
     """Compare the acquired binding with the owner's current effective identity and source."""
+    prefetch_mappings([owner])
     host_id = stored_librenms_id(owner, snapshot.server_key)
     link = oob_link(read_mapping(owner), snapshot.server_key) if resource in OOB_ACQUIRERS else None
     current = SourceBinding(
