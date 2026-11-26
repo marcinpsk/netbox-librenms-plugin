@@ -1195,7 +1195,7 @@ that may well be correct.
                                 <th class="text-wrap" style="width: 25%;">Hardware Model</th>
                                 <th class="text-wrap" style="width: 20%;">Serial Number</th>
                                 <th class="text-wrap" style="width: 20%;">Currently Assigned</th>
-                                <th class="text-wrap" style="width: 35%;">Assign To</th>
+                                {% if not page_refusal %}<th class="text-wrap" style="width: 35%;">Assign To</th>{% endif %}
                             </tr>
                         </thead>
                         <tbody>
@@ -1219,15 +1219,18 @@ that may well be correct.
                                     {% else %}
                                         <span class="text-muted">-</span>
                                     {% endif %}
+                                {% if page_refusal %}
+                                    <input type="hidden" name="librenms_serial_{{ forloop.counter }}" value="{{ item.librenms_serial }}">
+                                    <input type="hidden" name="member_id_{{ forloop.counter }}" value="">
+                                {% endif %}
                                 </td>
+                                {% if not page_refusal %}
                                 <td>
                                     <input type="hidden" name="librenms_serial_{{ forloop.counter }}" value="{{ item.librenms_serial }}">
-                                    {% if page_refusal or item.fit_refusal %}
+                                    {% if item.fit_refusal %}
                                     {# The writer reads rows until the first missing member field, so the row posts an empty one. #}
                                     <input type="hidden" name="member_id_{{ forloop.counter }}" value="">
-                                    {% if item.fit_refusal %}
                                     <span class="text-muted small" data-serial-fit-refusal>{{ item.fit_refusal }}</span>
-                                    {% endif %}
                                     {% else %}
                                     <select name="member_id_{{ forloop.counter }}" class="form-select form-select-sm">
                                         <option value="">Select member...</option>
@@ -1242,6 +1245,7 @@ that may well be correct.
                                         <div class="text-muted small mt-1">Another row matches this member too. Select the member on one row only.</div>
                                     {% endif %}
                                 </td>
+                                {% endif %}
                             </tr>
                             {% endfor %}
                         </tbody>

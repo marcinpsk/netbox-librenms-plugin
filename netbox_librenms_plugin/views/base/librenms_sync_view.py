@@ -69,9 +69,7 @@ SYNC_TAB_PREFERENCE = "plugins.netbox_librenms_plugin.sync_tab"
 
 INTERFACE_NAME_SELECTOR_TABS = ("interfaces", "cables", "ipaddresses")
 
-VC_SERIALS_PAGE_REFUSAL = (
-    "You cannot change this device. The dialog assigns serials through this device, so it only shows them."
-)
+VC_SERIALS_PAGE_REFUSAL = "You cannot change this device, so this dialog cannot assign serials."
 
 
 class BaseLibreNMSSyncView(
