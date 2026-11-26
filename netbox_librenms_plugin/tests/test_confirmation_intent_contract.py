@@ -338,11 +338,105 @@ class _ChangeOOBScenario(_HostChangeScenario):
         return self.entry().get("oob") == self.claimed
 
 
+class _LinkScenario:
+    """An unlinked device whose primary IP the LibreNMS fake matches as device 7100, and a user who may link it."""
+
+    resource = intent.Resource.MAPPING_LIFECYCLE
+    action = "link"
+    permissions = [("view", Device), ("change", Device)]
+    librenms_id = 7100
+    relevant = {
+        "primary_ip_changed": "assumptions.inputs.primary_ip4.address",
+        "another_object_took_the_id": "assumptions.owned",
+        "linked_meanwhile": "assumptions.own_id",
+        "stored_value_invalid": "assumptions.linkable",
+    }
+    unrelated = ("name_changed", "description_changed", "another_id_taken", "other_server_linked")
+    target_gone_path = "assumptions.inputs.primary_ip4"
+    revoked = "change"
+
+    def __init__(self, tag, client, settings, librenms_server):
+        self.tag = tag
+        self.client = client
+        self.server = librenms_server
+        url = librenms_server.url
+        configure_librenms_servers(
+            settings, {key: {"librenms_url": url, "api_token": "test-token"} for key in ("default", "other")}
+        )
+        self.device = make_device(f"contract-{tag}")
+        self.ip = links.give_primary_ip(self.device, "198.51.100.10/24")
+        links.register_match(librenms_server, "198.51.100.10", self.librenms_id)
+        self.user = make_user_with_perms(f"contract-{tag}", self.permissions)
+        client.force_login(self.user)
+
+    def mint(self):
+        return links.page_token(self.client, self.device)
+
+    def submit(self, tokens, *, subject=None, server_key="default"):
+        return links.link(self.client, subject or self.device, tokens, server_key=server_key)
+
+    def applied(self):
+        self.device.refresh_from_db()
+        return mapping_summary(self.device).get("default", {}).get("own") == self.librenms_id
+
+    def stale_paths(self, response):
+        return links.stale_paths(response, self.device.name)
+
+    def change(self, name):
+        from ipam.models import IPAddress
+
+        if name == "primary_ip_changed":
+            IPAddress.objects.filter(pk=self.ip.pk).update(address="198.51.100.11/24")
+        elif name == "another_object_took_the_id":
+            seed_mapping(make_device(f"owner-{self.tag}"), "default", own=self.librenms_id)
+        elif name == "linked_meanwhile":
+            seed_mapping(Device.objects.get(pk=self.device.pk), "default", own=self.librenms_id + 1)
+        elif name == "stored_value_invalid":
+            seed_quarantined(Device.objects.get(pk=self.device.pk))
+        elif name == "name_changed":
+            Device.objects.filter(pk=self.device.pk).update(name=f"renamed-{self.tag}")
+            self.device.name = f"renamed-{self.tag}"
+        elif name == "description_changed":
+            Device.objects.filter(pk=self.device.pk).update(description="changed")
+        elif name == "another_id_taken":
+            seed_mapping(make_device(f"unrelated-{self.tag}"), "default", own=self.librenms_id + 2)
+        elif name == "other_server_linked":
+            seed_mapping(Device.objects.get(pk=self.device.pk), "other", own=self.librenms_id)
+        else:
+            raise AssertionError(name)
+
+    def remove_target(self):
+        self.ip.delete()
+
+    def revoke(self, action):
+        from users.models import ObjectPermission
+
+        ObjectPermission.objects.filter(users=self.user, actions=[action], object_types__model="device").delete()
+
+    def other_subject(self):
+        other = make_device(f"other-subject-{self.tag}")
+        links.give_primary_ip(other, "198.51.100.20/24")
+        links.register_match(self.server, "198.51.100.20", self.librenms_id + 3)
+        return other
+
+    def prepare_server(self, server_key):
+        pass
+
+    def legacy_tokens(self):
+        legacy = signing.dumps(
+            {"object_pk": self.device.pk, "librenms_id": self.librenms_id, "server_key": "default"},
+            salt="netbox_librenms_plugin.librenms_id",
+            compress=True,
+        )
+        return [legacy, f"mapping_lifecycle:{legacy}"]
+
+
 SCENARIOS = {
     (intent.Resource.VLAN, "create"): _VLANCreateScenario,
     (intent.Resource.VLAN, "update"): _VLANUpdateScenario,
     (intent.Resource.MAPPING_LIFECYCLE, "relink"): _RelinkScenario,
     (intent.Resource.MAPPING_LIFECYCLE, "change_oob"): _ChangeOOBScenario,
+    (intent.Resource.MAPPING_LIFECYCLE, "link"): _LinkScenario,
 }
 ACTION_IDS = {key: f"{key[0]}.{key[1]}" for key in SCENARIOS}
 
@@ -502,7 +596,7 @@ class TestContract:
     def test_another_action_refuses(self, scenario_for, key):
         scenario = scenario_for(key)
         token = scenario.mint()
-        others = sorted({action for _resource, action in SCENARIOS} - {key[1]}) + ["delete", "convert"]
+        others = sorted({action for _resource, action in SCENARIOS} - {key[1]}) + ["delete", "convert", "unlink"]
 
         for other in others:
             _assert_refused(scenario, [_resign(token, lambda envelope, other=other: envelope.update(action=other))])
@@ -716,6 +810,19 @@ class TestDependentVLANOperations:
         finally:
             events_queue.reset(queue_token)
             current_request.reset(request_token)
+
+    def test_a_rolled_back_group_sends_no_event(self, client, settings, flushed_events):
+        """The rename wrote and the create was refused; both roll back, so neither save's event is sent."""
+        from netbox_librenms_plugin.tests.view_test_helpers import grant
+
+        permissions = [permission for permission in VLAN_PERMISSIONS if permission != ("add", VLAN)]
+        case = _DependentRename(client, settings, "rollback-events", permissions)
+        client.force_login(grant(case.user, "add", VLAN, constraints={"vid": 999}))
+
+        sync(client, case.device, [case.rename, case.create], confirm=True)
+
+        assert case.names() == {100: "users"}
+        assert flushed_events == []
 
     def test_an_unconfirmed_group_is_disclosed_whole_and_its_tokens_apply_it(self, client, settings):
         case = _DependentRename(client, settings, "disclosure")

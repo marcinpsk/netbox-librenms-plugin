@@ -21,6 +21,7 @@ from django.test import RequestFactory, override_settings
 from django_htmx.middleware import HtmxDetails
 
 import netbox_librenms_plugin.views as views_pkg
+from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 from netbox_librenms_plugin.tests.conftest import make_device
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 from netbox_librenms_plugin.tests.view_test_helpers import make_request
@@ -148,7 +149,7 @@ def test_field_sync_views_preserve_server_key_on_redirect(view_name, prod_server
 
     Each view resolves ``server_key`` via ``rebind_api_for_server`` up front; without preserving it
     on the redirect the page reloads scoped to the session/default server and the non-default tab
-    context is lost. This drives the real ``post()`` to the shared "Device not found" early redirect
+    context is lost. This drives the real ``post()`` to the shared "Not linked" early redirect
     (``server_key`` already resolved to 'prod') and asserts the follow-up URL carries it. The test
     uses a real request, a real superuser permission gate, the real HTTP client, and the real
     ``_device_sync_redirect`` / ``redirect_with_server_key`` path.
@@ -165,7 +166,10 @@ def test_field_sync_views_preserve_server_key_on_redirect(view_name, prod_server
 
     assert resp.status_code in (301, 302), f"{view_name} did not redirect (perm gate?): {resp}"
     assert "server_key=prod" in resp.url, f"{view_name} dropped server_key on redirect: {resp.url}"
-    assert prod_server.requests, f"{view_name} did not use the configured prod server"
+    # The refusal names the server that the view read the stored link on; an unlinked device asks LibreNMS nothing.
+    prod_name = LibreNMSAPI.get_available_servers()["prod"]
+    assert [str(message) for message in request._messages] == [f"Not linked to {prod_name}."]
+    assert prod_server.requests == []
 
 
 def test_scoped_tab_builders_exist():

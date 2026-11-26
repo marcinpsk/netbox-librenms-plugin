@@ -492,7 +492,7 @@ def test_a_change_between_the_render_and_the_lock_is_a_conflict(client, servers)
 
 
 @pytest.mark.django_db
-def test_an_own_id_cannot_be_cleared_because_discovery_would_restore_it(client, servers):
+def test_an_own_id_cannot_be_cleared_in_the_editor(client, servers):
     target = seed_mapping(make_device("edit-clear-own"), "primary", own=14028, oob=14029, oob_type="cimc")
     client.force_login(make_superuser("edit-clear-own-writer"))
 
@@ -579,8 +579,8 @@ def test_a_chassis_split_across_members_shows_no_editor_on_any_member_page(clien
 
 
 @pytest.mark.django_db
-def test_the_editor_shows_the_own_id_that_discovery_stored_on_a_vc_member(client, servers):
-    """Discovery writes another instance; the rendered form must bind the stored own ID for the OOB edit."""
+def test_a_vc_member_page_proposes_the_match_and_an_editor_save_stores_only_the_typed_values(client, servers):
+    """The page shows the LibreNMS device that matches the member by name; only Link would store its ID."""
     _chassis, (first, _second) = make_virtual_chassis_members("edit-vc-discovery")
     seed_mapping(first, "primary", own=14400)
     _register_device(servers.secondary, 14402, first.name)
@@ -592,6 +592,7 @@ def test_the_editor_shows_the_own_id_that_discovery_stored_on_a_vc_member(client
     created = _submit(client, first, "secondary", oob_id="14401", oob_type="idrac")
     rendered = client.get(created.url)
     assert rendered.status_code == 200
+    assert rendered.context["link"]["librenms_id"] == 14402
     parser = _EditorForms()
     parser.feed(rendered.content.decode())
     form = next(form for form in parser.forms.values() if form["fields"]["server_key"] == "secondary")
@@ -604,7 +605,7 @@ def test_the_editor_shows_the_own_id_that_discovery_stored_on_a_vc_member(client
     first.refresh_from_db()
     assert mapping_summary(first) == {
         "primary": {"own": 14400},
-        "secondary": {"own": 14402, "oob": 14403, "oob_type": "ilo"},
+        "secondary": {"oob": 14403, "oob_type": "ilo"},
         "preferred": "primary",
     }
 

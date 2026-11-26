@@ -11,5 +11,6 @@
         Select filters to check device status in LibreNMS. Click the status to view device LibreNMS sync details.
     </div>
     {% endif %}
+    {% if link_selected_url %}{% include "netbox_librenms_plugin/inc/_link_selected_forms.html" %}{% endif %}
     {{ block.super }}
 {% endblock %}

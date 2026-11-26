@@ -278,7 +278,7 @@ def test_a_deleted_planned_owner_refuses_without_resource_http(live_librenms):
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("expiry", ["delete", "expire"])
-def test_cached_identity_acquisition_and_snapshot_binding_are_read_only(live_librenms, expiry):
+def test_stored_identity_ignores_obsolete_cache_expiry_and_acquisition_is_read_only(live_librenms, expiry):
     from core.models import ObjectChange
     from dcim.models import Device
     from django.core.cache import cache
@@ -286,11 +286,10 @@ def test_cached_identity_acquisition_and_snapshot_binding_are_read_only(live_lib
     from netbox_librenms_plugin import source_cache
     from netbox_librenms_plugin.acquisition.coordinator import acquire
     from netbox_librenms_plugin.acquisition.registry import Resource
-    from netbox_librenms_plugin.librenms_api import librenms_id_cache_key
     from netbox_librenms_plugin.tests.conftest import make_device
 
-    subject = make_device("cache-only-source")
-    key = librenms_id_cache_key(subject, SERVER_KEY)
+    subject = seed_mapping(make_device("stored-source"), SERVER_KEY, own=501)
+    key = f"librenms_device_id_{subject._meta.model_name}_{subject.pk}_{SERVER_KEY}"
     cache.set(key, "501", timeout=60)
     _serve_ip_and_vlans(live_librenms.server, 501)
     before = (Device.objects.get(pk=subject.pk).last_updated, ObjectChange.objects.count(), cache.get(key))
@@ -306,23 +305,28 @@ def test_cached_identity_acquisition_and_snapshot_binding_are_read_only(live_lib
         cache.expire(key, 0)
     else:
         cache.delete(key)
+    assert source_cache.read(subject, Resource.IP_ADDRESSES, SERVER_KEY) == snapshot
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping_row
+
+    seed_mapping_row(subject, type(subject)())
     assert source_cache.read(subject, Resource.IP_ADDRESSES, SERVER_KEY) is None
     assert not source_cache.store(subject, Resource.IP_ADDRESSES, snapshot)
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("cached", [True, -1, "not-an-id", "7/ports", {}, None])
-def test_cached_identity_must_be_a_valid_id_on_the_selected_server(live_librenms, cached):
+@pytest.mark.parametrize("cached", [501, True, -1, "not-an-id", "7/ports", {}, None])
+def test_an_obsolete_cached_identity_cannot_link_an_unmapped_source(live_librenms, cached):
     from django.core.cache import cache
     from netbox_librenms_plugin.acquisition.coordinator import SubjectNotMapped, acquire
     from netbox_librenms_plugin.acquisition.registry import Resource
-    from netbox_librenms_plugin.librenms_api import librenms_id_cache_key, stored_librenms_id
     from netbox_librenms_plugin.tests.conftest import make_device
 
     subject = make_device("cache-only-invalid")
-    cache.set(librenms_id_cache_key(subject, "other"), 501, timeout=60)
-    cache.set(librenms_id_cache_key(subject, SERVER_KEY), cached, timeout=60)
-    assert stored_librenms_id(subject, SERVER_KEY) is None
+    cache.set(f"librenms_device_id_{subject._meta.model_name}_{subject.pk}_other", 501, timeout=60)
+    cache.set(f"librenms_device_id_{subject._meta.model_name}_{subject.pk}_{SERVER_KEY}", cached, timeout=60)
+    from netbox_librenms_plugin import source_cache
+
+    assert source_cache.read(subject, Resource.IP_ADDRESSES, SERVER_KEY) is None
     with pytest.raises(SubjectNotMapped):
         acquire(plan_acquisition(subject, server_key=SERVER_KEY, resources=[Resource.IP_ADDRESSES]))
     assert live_librenms.server.requests == []
@@ -333,11 +337,10 @@ def test_stored_identity_precedes_cached_identity(live_librenms):
     from django.core.cache import cache
     from netbox_librenms_plugin.acquisition.coordinator import acquire
     from netbox_librenms_plugin.acquisition.registry import Resource
-    from netbox_librenms_plugin.librenms_api import librenms_id_cache_key
     from netbox_librenms_plugin.tests.conftest import make_device
 
     subject = seed_mapping(make_device("cache-shadowed"), SERVER_KEY, own=501)
-    cache.set(librenms_id_cache_key(subject, SERVER_KEY), 502, timeout=60)
+    cache.set(f"librenms_device_id_{subject._meta.model_name}_{subject.pk}_{SERVER_KEY}", 502, timeout=60)
     _serve_ip_and_vlans(live_librenms.server, 501)
     snapshot = acquire(plan_acquisition(subject, server_key=SERVER_KEY, resources=[Resource.IP_ADDRESSES]))
     assert snapshot.resources[Resource.IP_ADDRESSES].host.librenms_id == 501
@@ -345,15 +348,16 @@ def test_stored_identity_precedes_cached_identity(live_librenms):
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("phase", ["acquire", "store"])
-def test_identity_expiry_refuses_a_ready_refresh_without_a_false_not_found(live_librenms, monkeypatch, phase):
+def test_removing_the_stored_identity_refuses_a_ready_refresh_without_a_false_not_found(
+    live_librenms, monkeypatch, phase
+):
     from django.core.cache import cache
     from netbox_librenms_plugin import source_cache
     from netbox_librenms_plugin.acquisition.registry import Resource
-    from netbox_librenms_plugin.librenms_api import librenms_id_cache_key
     from netbox_librenms_plugin.tests.conftest import make_device
 
-    subject = make_device("cache-only-expired")
-    key = librenms_id_cache_key(subject, SERVER_KEY)
+    subject = seed_mapping(make_device("removed-source"), SERVER_KEY, own=501)
+    key = f"librenms_device_id_{subject._meta.model_name}_{subject.pk}_{SERVER_KEY}"
     cache.set(key, 501, timeout=60)
     _serve_ip_and_vlans(live_librenms.server, 501)
     request = make_request("post")
@@ -361,8 +365,9 @@ def test_identity_expiry_refuses_a_ready_refresh_without_a_false_not_found(live_
     real_operation = getattr(source_cache, phase)
 
     def expire_then_run(*args, **kwargs):
-        assert cache.get(key) == 501
-        cache.expire(key, 0)
+        from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping_row
+
+        seed_mapping_row(subject, type(subject)())
         return real_operation(*args, **kwargs)
 
     monkeypatch.setattr(source_cache, phase, expire_then_run)
@@ -391,7 +396,7 @@ def test_a_refresh_plan_requires_its_source_owner_to_be_visible(live_librenms):
 
 
 @pytest.mark.django_db
-def test_an_optional_mapping_field_can_use_a_real_ip_refresh(client, live_librenms):
+def test_an_optional_mapping_field_cannot_refresh_an_unlinked_source(client, live_librenms):
     from django.urls import reverse
     from extras.models import CustomField
     from netbox_librenms_plugin import source_cache
@@ -410,10 +415,11 @@ def test_an_optional_mapping_field_can_use_a_real_ip_refresh(client, live_libren
         HTTP_HX_REQUEST="true",
     )
     assert response.status_code == 200
-    assert response.context["ip_sync"]["table"] is not None
+    assert response.context["ip_sync"]["table"] is None
     subject.refresh_from_db()
     assert read_mapping(subject).own_id(SERVER_KEY) is None
-    assert source_cache.read(subject, Resource.IP_ADDRESSES, SERVER_KEY) is not None
+    assert source_cache.read(subject, Resource.IP_ADDRESSES, SERVER_KEY) is None
+    assert live_librenms.server.requests == []
 
 
 @pytest.mark.django_db

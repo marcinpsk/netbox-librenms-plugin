@@ -7,7 +7,9 @@ To enhance device identification and synchronization between NetBox and LibreNMS
 !!! info "Automatic Creation"
     The plugin **automatically creates** the `librenms_id` custom field when migrations run. The field is created for Device, Virtual Machine, Interface, and VM Interface objects with JSON type for per-server device tracking.
 
-For the Device and Virtual Machine objects the plugin will automatically populate the LibreNMS ID custom field when opening the LibreNMS Sync page if the device has been found in LibreNMS.
+For Device and Virtual Machine objects, the plugin never stores the LibreNMS ID when a page loads. It
+proposes the LibreNMS device that matches the object, and stores the ID only when you click **Link**. See
+[Link a device or virtual machine](#link-a-device-or-virtual-machine).
 
 For Interface and VM Interface objects, the plugin will automatically populate the LibreNMS ID custom field when the interface data is synced from LibreNMS.
 
@@ -94,8 +96,7 @@ JSON value of the custom field by hand.
       (iDRAC, iLO, IPMI and others), and the controller type. See
       [Out-of-Band Management](../device_import/oob_management.md).
     - Clear the OOB controller ID to remove the OOB controller. You can replace a LibreNMS ID, but
-      you cannot remove it here: the next load of the sync page finds the device in LibreNMS and
-      stores its ID again.
+      you cannot remove it here.
 
 4. **Save the row:**
 
@@ -118,16 +119,18 @@ before you edit it. The editor does not repair a value with an invalid format.
 
 The master of a virtual chassis holds all the mappings of the chassis: the LibreNMS ID and the OOB
 controller of each server, a legacy value, and the preferred server. Leave `librenms_id` empty on
-the other members. The sync page of each member shows and edits the mappings of the master.
+the other members. The sync page of each member shows and edits the mappings of the master. When
+the master has no LibreNMS ID, the sync page of each member shows the match of the master, and
+**Link** stores the ID on the master.
 
 - When the chassis has no master, the sync page of each member shows an error, and no sync or
-  discovery runs. Set the master of the virtual chassis.
+  match runs. Set the master of the virtual chassis.
 - When a member that is not the master holds mapping data, the sync page of each member names that
-  member and the master, and no sync or discovery runs. Click **Move to master** to move the data.
+  member and the master, and no sync or match runs. Click **Move to master** to move the data.
   The move needs change permission on the master and on each member that holds data. It moves
   nothing when the master and a member hold different values for the same server or different
   preferred servers: correct one of the two values first.
-- When the master has no primary IP and no LibreNMS ID, the plugin looks up the chassis in
+- When the master has no primary IP and no LibreNMS ID, the plugin matches the chassis in
   LibreNMS only by the name of the master. It does not use the primary IP of another member.
 
 To remove the mapping for a server that is no longer configured, click **Remove** on its row in the
@@ -138,6 +141,30 @@ stored in the mapping as `_preferred_server`; do not use that name as a server k
 
 Interfaces get their `librenms_id` value from the interface sync, so the sync page has no editor for
 them.
+
+### Link a device or virtual machine
+
+When an object has no LibreNMS ID on the active server, the sync page looks for it in LibreNMS by the
+primary IP address, then the DNS name of the primary IP, then the object name. The **LibreNMS Status**
+card shows the match: the LibreNMS ID, its hostname and what matched it. Click **Link** to store the ID.
+When no device matches, the card offers **Add to LibreNMS**. When the IPv4 and the IPv6 primary address,
+or their DNS names, match two different LibreNMS devices, the card shows both IDs and proposes no link
+and no **Add to LibreNMS**. When LibreNMS does not answer, the card says that LibreNMS could not be
+reached, and nothing is proposed.
+
+The **Device LibreNMS Status** and **Virtual Machine LibreNMS Status** lists show the stored link of
+every listed object. For the unlinked objects on the visible page, they also show the match. Click
+**Link** on a row, or select rows and click **Link selected**. Matching on one page stops after 15
+seconds, and the rows that were not checked show **Not checked**. Reload the page to check them.
+
+The plugin refuses a link when:
+
+- the LibreNMS ID belongs to another object (the list names it only when you can view it);
+- two rows on the page match the same LibreNMS device, or two selected rows link one ID;
+- the object changed after the page showed the match, for example a new primary IP address, or it got
+  a LibreNMS ID in the meantime. Reload the page and try again.
+
+You need change permission on the object, and the plugin write permission.
 
 ## Notes
 

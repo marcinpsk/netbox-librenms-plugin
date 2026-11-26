@@ -23,7 +23,7 @@ from netbox_librenms_plugin.sync_cache import (
     schedule_request_cache_mutation,
 )
 from netbox_librenms_plugin.sync_query import page_query_url
-from netbox_librenms_plugin.transactions import atomic_with_events, saved_in_scope
+from netbox_librenms_plugin.transactions import row_savepoint, saved_in_scope
 from netbox_librenms_plugin.utils import (
     acquire_advisory_transaction_lock,
     coerce_model_pk,
@@ -335,7 +335,7 @@ class SyncVLANsView(
         if not self._valid_name(operation, outcome):
             return False
         try:
-            with transaction.atomic():
+            with row_savepoint():
                 vlan = VLAN.objects.create(
                     vid=effects.vid, group_id=effects.group, name=effects.name, status=effects.status
                 )
@@ -373,7 +373,7 @@ class SyncVLANsView(
         vlan.snapshot()
         vlan.name = operation.effects.name
         try:
-            with transaction.atomic():
+            with row_savepoint():
                 vlan.save(update_fields=["name", "last_updated"])
                 if not saved_in_scope(vlan, request.user, "change"):
                     raise PermissionsViolation()
@@ -437,7 +437,7 @@ class SyncVLANsView(
         group = _VLANSyncOutcome()
         held = []
         try:
-            with atomic_with_events():
+            with row_savepoint():
                 held = [m for m in members if self._write(request, m.operation, changeable_vlans, group)]
                 if len(held) != len(members):
                     raise _GroupRolledBack()
