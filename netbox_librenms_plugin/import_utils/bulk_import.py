@@ -10,6 +10,11 @@ from dcim.models import Device, VirtualChassis
 from django.core.cache import cache
 
 from ..import_validation_helpers import (
+    DEVICE_TYPE_ISSUES,
+    ROLE_ISSUE,
+    SITE_ISSUE_PREFIX,
+    VM_PLACEMENT_ISSUE,
+    VM_PLACEMENT_ISSUES,
     apply_cluster_to_validation,
     apply_role_to_validation,
     clear_match_derived_action_fields,
@@ -50,13 +55,13 @@ from .cache import (
 )
 from .collisions import detect_bulk_collisions, scope_bulk_collisions
 from .device_operations import (
-    SERIAL_UNAVAILABLE_ISSUE_MARKER,
     VALIDATION_ERROR_ISSUE_PREFIX,
     DeviceTypeOverrideError,
     _describe_existing_librenms_link,
     check_legacy_id_serial,
     effective_import_device_type,
     import_single_device,
+    is_serial_unavailable_issue,
     resolve_device_by_host_ip,
     serial_unavailable_issue,
     validate_device_for_import,
@@ -867,13 +872,13 @@ def _reassert_new_import_blockers(validation: dict) -> None:
     if validation.get("import_as_vm"):
         placement = validation.get("vm_placement") or {}
         if not placement.get("found"):
-            msg = "VM placement requires a matching site, selected cluster, or selected host device"
+            msg = VM_PLACEMENT_ISSUE
             if msg not in validation.setdefault("issues", []):
                 validation["issues"].append(msg)
     else:
         role = validation.get("device_role") or {}
         if not role.get("found") and not role.get("role"):
-            msg = "Device role must be manually selected before import"
+            msg = ROLE_ISSUE
             if msg not in validation.setdefault("issues", []):
                 validation["issues"].append(msg)
 
@@ -1096,9 +1101,7 @@ def _refresh_existing_device(  # noqa: C901
         # Same for the serial-unavailable blocker: the serial fallback below adds it again while the lookup cannot read.
         msgs = validation.get("issues")
         if isinstance(msgs, list):
-            validation["issues"] = [
-                m for m in msgs if not (isinstance(m, str) and SERIAL_UNAVAILABLE_ISSUE_MARKER in m)
-            ]
+            validation["issues"] = [m for m in msgs if not is_serial_unavailable_issue(m)]
 
         new_device = None
         match_type = None
@@ -1316,14 +1319,14 @@ def _refresh_existing_device(  # noqa: C901
             # match can carry the *other* model's blocker). Drop both before recalculating so a
             # stale message doesn't linger in the UI; the row stays force-blocked as an existing
             # match regardless. The VM path previously cleared neither.
-            remove_validation_issue(validation, "role")
-            remove_validation_issue(validation, "VM placement")
+            remove_validation_issue(validation, ROLE_ISSUE)
+            remove_validation_issue(validation, *VM_PLACEMENT_ISSUES)
             # A cached new-import row can also carry "No matching site found…" / "No matching
             # device type found…" create-time blockers (device_operations.py). They don't apply
             # to a now-resolved existing match either, so clear them too or the validation detail
             # stays inconsistent with the resolved match.
-            remove_validation_issue(validation, "site")
-            remove_validation_issue(validation, "device type")
+            remove_validation_issue(validation, SITE_ISSUE_PREFIX)
+            remove_validation_issue(validation, *DEVICE_TYPE_ISSUES)
             if not actual_is_vm and hasattr(new_device, "role") and new_device.role:
                 apply_role_to_validation(validation, new_device.role, is_vm=False)
             elif not actual_is_vm:
@@ -1394,7 +1397,7 @@ def _block_failed_recheck(validation: dict) -> None:
 
 def _stopped_at_unavailable_serial(validation: dict) -> bool:
     """Return whether validation stopped at an Unavailable serial lookup, before the site and type checks."""
-    return any(SERIAL_UNAVAILABLE_ISSUE_MARKER in str(issue) for issue in validation.get("issues", []))
+    return any(is_serial_unavailable_issue(issue) for issue in validation.get("issues", []))
 
 
 def _empty_return(return_cache_status: bool):
