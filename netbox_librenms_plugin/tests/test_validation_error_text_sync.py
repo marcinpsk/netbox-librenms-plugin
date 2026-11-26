@@ -13,9 +13,9 @@ from django.urls import reverse
 from extras.validators import CustomValidator
 from ipam.models import VRF
 
-from netbox_librenms_plugin.server_mappings import AmbiguousLibreNMSIdError, MappingRole, find_mapping, mark_migrated
+from netbox_librenms_plugin.server_mappings import AmbiguousLibreNMSIdError, MappingRole, find_mapping
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_superuser
-from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.test_ip_row_vrf_create import RD_ROWS, _create, seeded  # noqa: F401
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
 
@@ -26,7 +26,7 @@ HIDDEN = "(only a superuser sees the message)"
 def test_ambiguous_identity_text_does_not_disclose_other_owners(caplog):
     from netbox_librenms_plugin.utils import exception_text_for
 
-    owners = [make_device(name, librenms_cf={"default": 7201}) for name in ("identity-first", "identity-second")]
+    owners = [seed_mapping(make_device(name), "default", own=7201) for name in ("identity-first", "identity-second")]
     viewer = make_user_with_perms("identity-viewer", [("view", Device)], constraints={"pk": owners[0].pk})
     with pytest.raises(AmbiguousLibreNMSIdError) as caught:
         find_mapping(Device.objects.all(), server="default", identity=7201, roles=(MappingRole.OWN, MappingRole.OOB))
@@ -83,8 +83,7 @@ class _Refuses(CustomValidator):
 def test_an_interface_move_shows_netboxs_bridge_message_only_to_a_superuser(client, superuser):
     tag = f"vetext-move-{int(superuser)}"
     donor, winner, hidden = make_device(f"{tag}-donor"), make_device(f"{tag}-winner"), make_device(f"{tag}-hidden")
-    apply_mapping_change(donor, mark_migrated(donor, winner.pk, "default"))
-    donor.save(update_fields=["custom_field_data"])
+    seed_mapping(donor, "default", migrated_to=winner.pk)
     interface = make_interface(donor, "Ethernet1")
     bridge = make_interface(hidden, f"{tag}-bridge")
     # Written past validation, which is how a cross-device bridge reaches the database at all.

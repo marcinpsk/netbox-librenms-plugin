@@ -35,6 +35,7 @@ from netbox_librenms_plugin.tests.conftest import (
 from netbox_librenms_plugin.tests.mapping_fixtures import (
     mapping_from_change_record,
     seed_mapping,
+    seed_stored_mapping,
     stored_mapping_for_test,
 )
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, render_module_tab, rendered_module_form
@@ -421,7 +422,7 @@ def test_a_merge_saves_each_side_once_and_a_refusal_rolls_the_group_back():
 
 
 def test_reading_a_string_librenms_id_saves_nothing_and_records_no_change():
-    device = make_device("partial-save-string-id", librenms_cf={SERVER_KEY: "42"})
+    device = seed_stored_mapping(make_device("partial-save-string-id"), {SERVER_KEY: "42"}, save=True)
     before = _stored_last_updated(device)
 
     with _change_logging("partial-save-string-id-user"):

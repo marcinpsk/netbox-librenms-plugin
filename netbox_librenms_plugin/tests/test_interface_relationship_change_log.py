@@ -20,6 +20,7 @@ from netbox_librenms_plugin.tests.interface_sync_post_helpers import (
     seed_ports,
     sync_port,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import port_pair
 from netbox_librenms_plugin.tests.view_test_helpers import messages_on
 
@@ -74,7 +75,7 @@ def _bridge_link(device):
     ids=["lag", "parent", "bridge"],
 )
 def test_a_relationship_write_records_the_row_before_and_after_and_moves_last_updated(client, edge):
-    device = make_device(f"relationship-change-log{edge.__name__}", librenms_cf={SERVER_KEY: {"id": 30}})
+    device = seed_mapping(make_device(f"relationship-change-log{edge.__name__}"), SERVER_KEY, own=30)
     ports, source_facts, changes = edge(device)
     seed_ports(device, ports, **source_facts)
     last_updated = dict(Interface.objects.filter(pk__in=changes).values_list("pk", "last_updated"))

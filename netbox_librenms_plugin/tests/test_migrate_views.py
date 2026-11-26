@@ -5,7 +5,7 @@ from dcim.models import CableTermination, Device
 from django.urls import reverse
 from virtualization.models import VMInterface
 
-from netbox_librenms_plugin.server_mappings import mark_migrated, read_mapping
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.conftest import (
     cable_together,
     ip_on,
@@ -15,7 +15,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_vm,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change, seed_stored_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 from netbox_librenms_plugin.tests.view_test_helpers import (
     assert_update_logged,
     grant,
@@ -40,8 +40,7 @@ def _login(client, username):
 
 
 def _mark(donor, winner, server_key=SERVER_KEY):
-    apply_mapping_change(donor, mark_migrated(donor, winner.pk, server_key))
-    donor.save(update_fields=["custom_field_data"])
+    seed_mapping(donor, server_key, migrated_to=winner.pk)
 
 
 def _move_interface(client, interface, *, server_key=SERVER_KEY):

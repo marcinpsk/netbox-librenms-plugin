@@ -1299,7 +1299,7 @@ class TestRemoveServerMappingView:
         from dcim.models import Device
         from django.contrib.contenttypes.models import ContentType
 
-        device = make_device("mapping-remove-log", librenms_cf={SERVER_KEY: 6544, "retired": 9003})
+        device = seed_stored_mapping(make_device("mapping-remove-log"), {SERVER_KEY: 6544, "retired": 9003}, save=True)
         old_last_updated = Device.objects.values_list("last_updated", flat=True).get(pk=device.pk)
 
         _post(logged_in_client, "remove_server_mapping", device, {"object_type": "device", "server_key": "retired"})
@@ -1695,7 +1695,7 @@ class TestUpdateDeviceTypeSerialIdentity:
 @pytest.mark.django_db
 class TestConvertLegacyLibreNMSIdView:
     def test_matching_device_serial_converts_the_legacy_id(self, logged_in_client, librenms_server):
-        device = make_device("legacy-convert", serial="LEGACY-SERIAL", librenms_cf=" 6561 ")
+        device = seed_stored_mapping(make_device("legacy-convert", serial="LEGACY-SERIAL"), " 6561 ", save=True)
         librenms_server.device_info_response(
             device_id=6561,
             hostname=device.name,
@@ -1719,7 +1719,7 @@ class TestConvertLegacyLibreNMSIdView:
     def test_serial_mismatch_preserves_the_legacy_id(self, logged_in_client, librenms_server):
         from netbox_librenms_plugin.views.sync.device_fields import _SERIAL_MISMATCH_MESSAGE
 
-        device = make_device("legacy-mismatch", serial="NETBOX-SERIAL", librenms_cf=6562)
+        device = seed_stored_mapping(make_device("legacy-mismatch", serial="NETBOX-SERIAL"), 6562, save=True)
         librenms_server.device_info_response(
             device_id=6562,
             hostname=device.name,
@@ -1749,7 +1749,7 @@ class TestConvertLegacyLibreNMSIdView:
         NormalizationRule.objects.get_or_create(
             scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
         )
-        device = make_device("legacy-decorated", serial="ABC-LEGACY", librenms_cf=6566)
+        device = seed_stored_mapping(make_device("legacy-decorated", serial="ABC-LEGACY"), 6566, save=True)
         librenms_server.device_info_response(device_id=6566, hostname=device.name, serial="S/N ABC-LEGACY")
 
         with CaptureQueriesContext(connection) as queries:
@@ -1903,7 +1903,7 @@ class TestConvertLegacyLibreNMSIdView:
         NormalizationRule.objects.get_or_create(
             scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
         )
-        device = make_device("legacy-twin-target", serial="TWIN-LEGACY", librenms_cf=6567)
+        device = seed_stored_mapping(make_device("legacy-twin-target", serial="TWIN-LEGACY"), 6567, save=True)
         if hidden_twin:
             make_device("legacy-twin-hidden", serial="S/N TWIN-LEGACY")
         librenms_server.device_info_response(device_id=6567, hostname=device.name, serial="TWIN-LEGACY")
@@ -2019,7 +2019,7 @@ class TestConvertLegacyLibreNMSIdView:
         value,
         fragment,
     ):
-        device = make_device(f"legacy-invalid-{type(value).__name__}", librenms_cf=value)
+        device = seed_stored_mapping(make_device(f"legacy-invalid-{type(value).__name__}"), value, save=True)
 
         response = _post(
             logged_in_client,
@@ -2033,7 +2033,7 @@ class TestConvertLegacyLibreNMSIdView:
         assert any(fragment in text for text in _messages(response))
 
     def test_live_lookup_failure_preserves_the_legacy_id(self, logged_in_client, librenms_server):
-        device = make_device("legacy-live-failure", serial="LEGACY-LIVE", librenms_cf=6565)
+        device = seed_stored_mapping(make_device("legacy-live-failure", serial="LEGACY-LIVE"), 6565, save=True)
         librenms_server.register("/api/v0/devices/6565", {"status": "error"}, status=404)
 
         response = _post(
@@ -2048,7 +2048,7 @@ class TestConvertLegacyLibreNMSIdView:
         assert any("Could not retrieve device info" in text for text in _messages(response, "error"))
 
     def test_stale_server_key_fails_closed(self, logged_in_client, librenms_server):
-        device = make_device("legacy-stale-server", serial="LEGACY-STALE", librenms_cf=6566)
+        device = seed_stored_mapping(make_device("legacy-stale-server", serial="LEGACY-STALE"), 6566, save=True)
 
         response = _post(
             logged_in_client,
@@ -2062,7 +2062,7 @@ class TestConvertLegacyLibreNMSIdView:
         assert any("no longer configured" in text for text in _messages(response, "error"))
 
     def test_conflicting_assignment_blocks_conversion(self, logged_in_client, librenms_server):
-        device = make_device("legacy-conflict-source", serial="LEGACY-CONFLICT", librenms_cf=6567)
+        device = seed_stored_mapping(make_device("legacy-conflict-source", serial="LEGACY-CONFLICT"), 6567, save=True)
         seed_mapping(make_device("legacy-conflict-owner"), SERVER_KEY, own=6567)
         librenms_server.device_info_response(
             device_id=6567,
@@ -2089,7 +2089,9 @@ class TestConvertLegacyLibreNMSIdView:
 
         librenms_id = 6570 if converting == "device" else 6571
         if converting == "device":
-            obj = make_device(f"legacy-cross-{converting}", serial="LEGACY-CROSS", librenms_cf=librenms_id)
+            obj = seed_stored_mapping(
+                make_device(f"legacy-cross-{converting}", serial="LEGACY-CROSS"), librenms_id, save=True
+            )
         else:
             obj = make_vm(f"legacy-cross-{converting}")
             seed_stored_mapping(obj, librenms_id, save=True)

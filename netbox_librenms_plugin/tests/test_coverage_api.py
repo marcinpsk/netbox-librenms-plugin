@@ -13,6 +13,7 @@ from netbox_librenms_plugin.tests.mapping_fixtures import (
     mapping_summary,
     seed_mapping,
     seed_mapping_row,
+    seed_stored_mapping,
     seed_stored_mapping_row,
     stored_mapping_for_test,
 )
@@ -256,7 +257,7 @@ class TestGetLibreNMSIdDictServerKey:
         """The client returns the mapping for its bound server."""
         from netbox_librenms_plugin.tests.conftest import make_device
 
-        device = make_device("mapped-device", librenms_cf={"primary": "23", "secondary": 47})
+        device = seed_stored_mapping(make_device("mapped-device"), {"primary": "23", "secondary": 47}, save=True)
         api = api_for(settings, librenms_server.url, key="primary")
 
         assert api.get_librenms_id(device) == 23
@@ -269,7 +270,7 @@ class TestGetLibreNMSIdDictServerKey:
 
         from netbox_librenms_plugin.tests.conftest import make_device
 
-        device = make_device("stored-zero-device", librenms_cf={"default": 0})
+        device = seed_stored_mapping(make_device("stored-zero-device"), {"default": 0}, save=True)
         librenms_server.register(
             "/api/v0/devices/stored-zero-device",
             {"status": "ok", "devices": [{"device_id": 31}]},
