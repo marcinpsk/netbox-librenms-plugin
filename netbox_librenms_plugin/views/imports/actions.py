@@ -1277,9 +1277,8 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             )
             # The import writer refuses this row, so the form does not submit it. The text names no NetBox object.
             refusals = [*validation["write_refusals"]]
-            if not validation.get("import_as_vm") and (
-                refusal := import_refusal(validation, device_id, libre_device.get("serial"))
-            ):
+            # The form submits the operator's selection, so that mode decides the writer; validation can switch modes.
+            if not is_vm and (refusal := import_refusal(validation, device_id, libre_device.get("serial"))):
                 refusals.insert(0, refusal)
             if refusals:
                 refused.append(

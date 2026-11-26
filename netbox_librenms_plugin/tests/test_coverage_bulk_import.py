@@ -1167,7 +1167,7 @@ def test_the_bulk_confirmation_blocks_a_stack_member_that_the_writer_refuses(cli
 
 @pytest.mark.django_db
 @pytest.mark.parametrize(
-    "case", ["detection-failed", "existing", "ambiguous-id", "duplicate-serial", "unavailable-serial"]
+    "case", ["detection-failed", "existing", "ambiguous-id", "duplicate-serial", "unavailable-serial", "existing-vm"]
 )
 def test_the_bulk_confirmation_omits_a_row_that_the_writer_refuses_before_any_write(client, live_librenms, case):
     """The writer refuses these rows before it writes, so the form submits only the eligible row."""
@@ -1175,7 +1175,7 @@ def test_the_bulk_confirmation_omits_a_row_that_the_writer_refuses_before_any_wr
     from netbox_librenms_plugin.serial_identity import UNAVAILABLE_MASTER_LINK
     from netbox_librenms_plugin.tests.test_coverage_device_operations import _stray_chassis_member
 
-    cases = ["detection-failed", "existing", "ambiguous-id", "duplicate-serial", "unavailable-serial"]
+    cases = ["detection-failed", "existing", "ambiguous-id", "duplicate-serial", "unavailable-serial", "existing-vm"]
     prerequisites = TestBulkImportIntegration()._prerequisites()
     eligible, refused = 311, 312 + cases.index(case)
     _register_device(live_librenms, _cached_row(eligible, "confirm-eligible", "ELIGIBLE-311", prerequisites))
@@ -1195,6 +1195,10 @@ def test_the_bulk_confirmation_omits_a_row_that_the_writer_refuses_before_any_wr
         for index in range(2):
             make_device(f"confirm-serial-holder-{index}", serial=row["serial"])
         reason = f"Cannot import device {refused}: a NetBox device already has serial '{row['serial']}'. "
+    elif case == "existing-vm":
+        # Validation switches the row to VM mode, but the form submits the Device selection.
+        seed_stored_mapping(make_vm("confirm-existing-vm"), {"default": refused}, save=True)
+        reason = f"Device {refused} already exists in NetBox"
     else:
         _stray_chassis_member("confirm-unavailable-serial", row["serial"])
         reason = f"Cannot import device {refused}: its serial cannot be matched. {UNAVAILABLE_MASTER_LINK}"
