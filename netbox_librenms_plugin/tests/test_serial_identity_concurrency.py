@@ -22,7 +22,7 @@ from netbox_librenms_plugin.tests.conftest import (
     run_in_threads,
     transactional_db_with_all_apps,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, stored_mapping_for_test
+from netbox_librenms_plugin.tests.mapping_fixtures import mapping_summary, seed_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_mapped_modules
 from netbox_librenms_plugin.tests.view_test_helpers import (
     messages_on,
@@ -373,7 +373,7 @@ def test_an_import_type_change_reads_the_device_serial_again_under_its_locks(lib
     from netbox_librenms_plugin.tests.view_test_helpers import post as post_view
     from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
 
-    target = make_device("retype-race-target", serial="DEF456", librenms_cf={SERVER_KEY: 9811})
+    target = seed_mapping(make_device("retype-race-target", serial="DEF456"), SERVER_KEY, own=9811)
     make_device("retype-race-holder", serial="ABC")
     new_maker = Manufacturer.objects.create(name="Retype race maker", slug="retype-race-maker")
     NormalizationRule.objects.create(
@@ -430,7 +430,7 @@ def test_a_type_change_reads_the_new_type_again_under_its_lock(librenms_server, 
     from netbox_librenms_plugin.tests.view_test_helpers import post as post_view
     from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
 
-    target = make_device(f"type-lock-{surface}-target", serial="XABC", librenms_cf={SERVER_KEY: 9815})
+    target = seed_mapping(make_device(f"type-lock-{surface}-target", serial="XABC"), SERVER_KEY, own=9815)
     make_device(f"type-lock-{surface}-holder", serial="ABC")
     plain_maker = Manufacturer.objects.create(name=f"Type lock plain {surface}", slug=f"type-lock-plain-{surface}")
     strip_maker = Manufacturer.objects.create(name=f"Type lock strip {surface}", slug=f"type-lock-strip-{surface}")
@@ -542,11 +542,11 @@ def test_a_forced_link_checks_member_serials_under_the_locked_new_type(librenms_
     if concurrent:
         assert RETYPE_HELD in response.content.decode()
         assert stored == (old_type_id, "ABC123")
-        assert stored_mapping_for_test(Device.objects.get(pk=master.pk)) is None
+        assert mapping_summary(Device.objects.get(pk=master.pk)) == {}
     else:
         # Without the concurrent edit the same request links the master and stores the new type.
         assert stored == (new_type.pk, "ABC123")
-        assert stored_mapping_for_test(Device.objects.get(pk=master.pk)) == {SERVER_KEY: 9816}
+        assert mapping_summary(Device.objects.get(pk=master.pk)) == {SERVER_KEY: {"own": 9816}}
 
 
 @transactional_db_with_all_apps()
@@ -563,7 +563,7 @@ def test_a_type_and_serial_update_admits_the_serial_under_the_locked_new_type(li
     from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
 
     tag = f"stale-admission-{action}".replace("_", "-")
-    target = make_device(tag, serial="OLD12345", librenms_cf={SERVER_KEY: 9817})
+    target = seed_mapping(make_device(tag, serial="OLD12345"), SERVER_KEY, own=9817)
     empty_maker = Manufacturer.objects.create(name=f"{tag} empty", slug=f"{tag}-empty")
     NormalizationRule.objects.create(
         scope="serial", match_pattern=r"^SN-ABC123()$", replacement=r"\1", manufacturer=empty_maker

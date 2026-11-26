@@ -20,6 +20,7 @@ from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
 from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_source_snapshot
 from netbox_librenms_plugin.tests.test_interface_sync_filters import CELL, _visible_text, serve_sync_page
 from netbox_librenms_plugin.tests.vlan_intent_helpers import tab_tokens
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
 SERVER_KEY = "default"
 LIBRENMS_ID = 4242
@@ -49,7 +50,7 @@ def _mixed_device(tag):
     The rows are: 10 in sync (global), 20 with another name in NetBox (site group), 30 and 40 not in
     NetBox (40 inactive, of another type), an invalid VID, and VID 50 twice.
     """
-    device = make_device(f"vlan-filters-{tag}", librenms_cf={SERVER_KEY: {"id": LIBRENMS_ID}})
+    device = seed_mapping(make_device(f"vlan-filters-{tag}"), SERVER_KEY, own=LIBRENMS_ID)
     campus = VLANGroup.objects.create(name=f"campus-{tag}", slug=f"campus-{tag}", scope=device.site)
     VLANGroup.objects.create(name=f"global-{tag}", slug=f"global-{tag}")
     VLAN.objects.create(vid=10, name="users", status="active")
@@ -113,7 +114,7 @@ class TestMatching:
 
     def test_a_name_search_finds_a_vlan_on_another_page_with_the_filtered_total(self, client, settings):
         client = _client(client, settings, "page-two")
-        device = make_device("vlan-filters-page-two", librenms_cf={SERVER_KEY: {"id": LIBRENMS_ID}})
+        device = seed_mapping(make_device("vlan-filters-page-two"), SERVER_KEY, own=LIBRENMS_ID)
         _seed(device, [_vlan(100 + index, f"vlan-{index:03d}") for index in range(60)])
 
         assert "vlan-057" not in _rows(_tab(client, device, vlans_per_page="25"))
@@ -245,7 +246,7 @@ class TestInvalidFilters:
 
     def test_an_invalid_filter_on_a_device_without_vlans_still_shows_its_errors(self, client, settings):
         client = _client(client, settings, "invalid-empty")
-        device = make_device("vlan-filters-invalid-empty", librenms_cf={SERVER_KEY: {"id": LIBRENMS_ID}})
+        device = seed_mapping(make_device("vlan-filters-invalid-empty"), SERVER_KEY, own=LIBRENMS_ID)
         _seed(device, [])
 
         html = _tab(client, device, vlans_sync_state="bogus")
@@ -254,7 +255,7 @@ class TestInvalidFilters:
 
     def test_an_active_filter_on_an_empty_snapshot_keeps_its_controls(self, client, settings):
         client = _client(client, settings, "active-empty")
-        device = make_device("vlan-filters-active-empty", librenms_cf={SERVER_KEY: {"id": LIBRENMS_ID}})
+        device = seed_mapping(make_device("vlan-filters-active-empty"), SERVER_KEY, own=LIBRENMS_ID)
         _seed(device, [])
 
         html = _tab(client, device, vlans_q="voice")

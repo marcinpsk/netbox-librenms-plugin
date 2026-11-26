@@ -20,7 +20,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_virtual_chassis,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping, stored_mapping_for_test
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping, stored_mapping_for_test
 
 
 pytestmark = pytest.mark.django_db
@@ -149,8 +149,8 @@ class TestGetLibreNMSSyncDevice:
         from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
         _vc, (first, second, _third) = self._members("mapping")
-        seed_stored_mapping(first, {"other": 10}, save=True)
-        seed_stored_mapping(second, {"default": {"id": "42"}}, save=True)
+        seed_mapping(first, "other", own=10)
+        seed_mapping(second, own=42)
 
         assert get_librenms_sync_device(first, server_key="default") == second
         assert get_librenms_sync_device(first, server_key=None) == first
@@ -168,7 +168,7 @@ class TestGetLibreNMSSyncDevice:
 
         _vc, (first, second, third) = self._members("float")
         seed_stored_mapping(first, {"default": 1.0}, save=True)
-        seed_stored_mapping(third, {"other": 5}, save=True)
+        seed_mapping(third, "other", own=5)
 
         assert get_librenms_sync_device(first, server_key=None) == third
 
@@ -416,7 +416,7 @@ class TestStoredLibreNMSIdentifiers:
             )
             is None
         )
-        owner = make_device("stored-id-owner", librenms_cf={"default": 4242})
+        owner = seed_mapping(make_device("stored-id-owner"), "default", own=4242)
         with transaction.atomic():
             found = find_mapping(
                 Device.objects.select_for_update(),
@@ -590,7 +590,9 @@ class TestInterfaceNameFallbackMatchesPort:
 
     def test_unbound_and_other_server_entries_are_available(self):
         assert name_match_may_be_port(self._interface(None), server="default", port_id=42) is True
-        assert name_match_may_be_port(self._interface({"other": 42}), server="default", port_id=42) is True
+        other_server = make_interface(make_device("interface-fallback-other"), "Ethernet1", iface_type="1000base-t")
+        seed_mapping(other_server, "other", own=42)
+        assert name_match_may_be_port(other_server, server="default", port_id=42) is True
         assert (
             name_match_may_be_port(self._interface({"default": {"no_id": 42}}), server="default", port_id=42) is False
         )

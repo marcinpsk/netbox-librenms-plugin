@@ -43,7 +43,7 @@ from netbox_librenms_plugin.tests.test_interface_sync_filters import (
     _virtual_machine,
     serve_sync_page,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import seed_source_snapshot
 from netbox_librenms_plugin.tests.test_ip_address_sync_filters import _refresh
 from netbox_librenms_plugin.views.sync.cables import SyncCablesView
@@ -244,7 +244,7 @@ def _contract_ports():
 
 def _contract_owner(kind):
     if kind == "device":
-        device = make_device("contract-device", librenms_cf={SERVER_KEY: {"id": LIBRENMS_ID}})
+        device = seed_mapping(make_device("contract-device"), SERVER_KEY, own=LIBRENMS_ID)
         # A stale port holds the name of one row, so that row offers Rebind; by name it sorts onto page 2.
         _bind(device.interfaces.create(name="eth100", type="other"), STALE_PORT)
         return device, "device"
@@ -453,7 +453,7 @@ def _check_tab_filter_form(hops, tab, page_query):
 def _ip_owner(kind, client, server):
     """Return a device or VM with IP rows whose interface names match the IP filters of the page query."""
     if kind == "device":
-        owner = make_device(f"contract-ip-{kind}", librenms_cf={"default": {"id": 42}})
+        owner = seed_mapping(make_device(f"contract-ip-{kind}"), "default", own=42)
     else:
         owner = map_device_to_librenms(make_vm(f"contract-ip-{kind}"), 42, server_key=SERVER_KEY)
     rows = [
@@ -466,7 +466,7 @@ def _ip_owner(kind, client, server):
 
 def _vlan_owner(client, settings, server):
     """Return a device with VLAN rows whose names match the VLAN filters of the page query."""
-    device = make_device("contract-vlan", librenms_cf={SERVER_KEY: {"id": LIBRENMS_ID}})
+    device = seed_mapping(make_device("contract-vlan"), SERVER_KEY, own=LIBRENMS_ID)
     rows = [
         {"vlan_vlan": 100 + n, "vlan_name": f"v{n:02d} a&b+c É", "vlan_type": "ethernet", "vlan_state": 1}
         for n in range(12)
@@ -479,12 +479,12 @@ def _vlan_owner(client, settings, server):
 def _cable_owner(kind, client, settings, server):
     """Return a device or VC member with cable rows whose remote device and local ports match the cable filters."""
     if kind == "device":
-        owner = make_device("contract-cables", librenms_cf={SERVER_KEY: {"id": LIBRENMS_ID}})
+        owner = seed_mapping(make_device("contract-cables"), SERVER_KEY, own=LIBRENMS_ID)
         members = [owner]
     else:
         _vc, members = make_virtual_chassis_members("contract-cables", 2)
         owner = members[0]
-        seed_stored_mapping(owner, {SERVER_KEY: {"id": LIBRENMS_ID}}, save=True)
+        seed_mapping(owner, SERVER_KEY, own=LIBRENMS_ID)
     peer = make_device("contract-cables-peer")
     links = []
     ports = []
@@ -546,7 +546,8 @@ def test_a_server_switch_keeps_only_the_tab_page_sizes_and_sorts(client, setting
             "secondary": {"librenms_url": librenms_server.url, "api_token": "test-token"},
         },
     )
-    seed_stored_mapping(owner, {SERVER_KEY: {"id": LIBRENMS_ID}, "secondary": {"id": LIBRENMS_ID + 1}}, save=True)
+    seed_mapping(owner, SERVER_KEY, own=LIBRENMS_ID, save=False)
+    seed_mapping(owner, "secondary", own=LIBRENMS_ID + 1)
     page_query = {**PAGE_QUERY, "interface_name_field": "ifDescr", "cables_page": "3", "cables_per_page": "25"}
 
     response = client.get(reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[owner.pk]), page_query)
@@ -565,7 +566,7 @@ def _four_tab_owner(client, settings, librenms_server):
     bind_librenms_server(settings, librenms_server, server_key=SERVER_KEY)
     client.force_login(make_superuser("four-tab-user"))
     # The IP rows come from a refresh against the loopback LibreNMS, which serves the device as ID 42.
-    owner = make_device("four-tab-device", librenms_cf={SERVER_KEY: {"id": 42}})
+    owner = seed_mapping(make_device("four-tab-device"), SERVER_KEY, own=42)
     _seed(owner, _contract_ports())
     seed_source_snapshot(
         owner,

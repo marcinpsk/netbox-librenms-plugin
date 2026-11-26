@@ -17,6 +17,7 @@ from netbox_librenms_plugin.tests.test_sync_filter_navigation_contract import _h
 from netbox_librenms_plugin.tests.test_interface_sync_filters import _port
 from netbox_librenms_plugin.tests.test_interface_sync_filters import _seed as _seed_interfaces
 from netbox_librenms_plugin.tests.test_ip_address_sync_safety import _serve_librenms_ip_rows
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
 SERVER_KEY = "default"
 DEVICE_ID = 42
@@ -80,7 +81,7 @@ def _assert_keeps_the_page_query(url):
 def test_a_refresh_keeps_the_other_tabs_filters_on_its_page_links(client, settings, librenms_server, tab):
     refresh_name, serve = TABS[tab]
     bind_librenms_server(settings, librenms_server, server_key=SERVER_KEY)
-    device = make_device(f"refresh-query-{tab}", librenms_cf={SERVER_KEY: {"id": DEVICE_ID}})
+    device = seed_mapping(make_device(f"refresh-query-{tab}"), SERVER_KEY, own=DEVICE_ID)
     librenms_server.register(
         f"/api/v0/devices/{DEVICE_ID}",
         {"status": "ok", "devices": [{"device_id": DEVICE_ID, "sysName": device.name, "hostname": device.name}]},
@@ -118,7 +119,7 @@ def test_a_refresh_keeps_the_other_tabs_filters_on_its_page_links(client, settin
 def _interface_page(client, settings, librenms_server, tag, query):
     """Render the Interfaces tab with *query* and return the device and the Refresh URL its button posts to."""
     bind_librenms_server(settings, librenms_server, server_key=SERVER_KEY)
-    device = make_device(f"refresh-page-{tag}", librenms_cf={SERVER_KEY: {"id": DEVICE_ID}})
+    device = seed_mapping(make_device(f"refresh-page-{tag}"), SERVER_KEY, own=DEVICE_ID)
     librenms_server.register(
         f"/api/v0/devices/{DEVICE_ID}",
         {"status": "ok", "devices": [{"device_id": DEVICE_ID, "sysName": device.name, "os": "linux"}]},

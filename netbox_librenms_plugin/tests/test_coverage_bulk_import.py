@@ -1,6 +1,8 @@
 """Bulk-import behavior tests against real HTTP, cache, and NetBox rows."""
 
 import pytest
+
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
 from django.core.cache import cache
 
 from netbox_librenms_plugin.tests.conftest import (
@@ -8,7 +10,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_device,
     make_superuser,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, stored_mapping_for_test
+from netbox_librenms_plugin.tests.mapping_fixtures import mapping_summary, seed_mapping
 
 
 class TestStackKey:
@@ -198,7 +200,7 @@ class TestCollisionDetection:
         from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
         from netbox_librenms_plugin.tests.test_coverage_device_operations import _broken_serial_rule
 
-        target = make_device("collision-legacy-target", serial="LEGACY-COLLIDE", librenms_cf=53)
+        target = seed_stored_mapping(make_device("collision-legacy-target", serial="LEGACY-COLLIDE"), 53, save=True)
         _broken_serial_rule("collision-legacy")
         legacy = _libre_device(53, "collision-legacy-other-name", serial="LEGACY-COLLIDE")
         by_name = _libre_device(54, target.name)
@@ -308,7 +310,7 @@ class TestBulkImportIntegration:
         assert len(result["success"]) == 1
         imported = Device.objects.get(name="bulk-new-device")
         assert imported.serial == "TEST-SERIAL-81"
-        assert stored_mapping_for_test(imported)["default"] == 81
+        assert mapping_summary(imported)["default"] == {"own": 81}
 
     @pytest.mark.parametrize(
         "serial", [True, ["SECOND-CARD"], "ABC\x00DEF", "ABC\ud800DEF"], ids=["boolean", "list", "nul", "surrogate"]

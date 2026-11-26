@@ -18,7 +18,6 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
     transactional_db_with_all_apps,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 from netbox_librenms_plugin.tests.view_test_helpers import (
     assert_update_logged,
@@ -26,6 +25,7 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
     make_user_with_perms,
     message_texts,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
 pytestmark = pytest.mark.django_db
 
@@ -59,7 +59,7 @@ def _platform(name, *, parent=None):
 
 
 def _linked(name, server, device_id, *, platform=None, os="junos", version=VERSION):
-    device = make_device(name, librenms_cf={SERVER_KEY: device_id})
+    device = seed_mapping(make_device(name), SERVER_KEY, own=device_id)
     if platform is not None:
         device.platform = platform
         device.save()
@@ -69,7 +69,7 @@ def _linked(name, server, device_id, *, platform=None, os="junos", version=VERSI
 
 def _linked_vm(name, server, device_id, *, platform=None, os="junos", version=VERSION):
     vm = make_vm(name)
-    seed_stored_mapping(vm, {SERVER_KEY: device_id}, save=True)
+    seed_mapping(vm, SERVER_KEY, own=device_id)
     if platform is not None:
         vm.platform = platform
         vm.save()
@@ -666,7 +666,7 @@ class TestCreateAndSyncChecksTheFormAgainstNetBoxAndLibreNMS:
         from dcim.models import Platform
 
         _tracking(True)
-        device = make_device("create-unreadable", librenms_cf={SERVER_KEY: 7352})
+        device = seed_mapping(make_device("create-unreadable"), SERVER_KEY, own=7352)
         librenms_server.register("/api/v0/devices/7352", {"status": "error"}, status=404)
         client.force_login(make_superuser("create-unreadable-su"))
         count = Platform.objects.count()
@@ -859,7 +859,7 @@ class TestTheMappingFollowUpKeepsTheCommittedAssignment:
 
 def _import_linked(name, server, device_id, *, os="junos", version=VERSION):
     """A device that the import page matches to LibreNMS device *device_id*."""
-    device = make_device(name, librenms_cf={SERVER_KEY: device_id})
+    device = seed_mapping(make_device(name), SERVER_KEY, own=device_id)
     server.device_info_response(
         device_id=device_id, hostname=name, hardware=device.device_type.model, os=os, version=version, ip=""
     )

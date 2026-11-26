@@ -17,7 +17,12 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
     transactional_db_with_all_apps,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import (
+    mapping_summary,
+    seed_mapping,
+    seed_stored_mapping,
+    seed_unmapped,
+)
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 
 SERVER_KEY = "test-server"
@@ -290,10 +295,7 @@ class TestLinkNotes:
     def test_existing_link_description_reads_real_custom_field_data(self):
         from netbox_librenms_plugin.import_utils.device_operations import _describe_existing_librenms_link
 
-        device = make_device(
-            "described-link",
-            librenms_cf={SERVER_KEY: {"id": "42", "oob": {"id": "7", "type": "idrac"}}},
-        )
+        device = seed_mapping(make_device("described-link"), SERVER_KEY, own=42, oob=7, oob_type="idrac")
 
         assert _describe_existing_librenms_link(device, SERVER_KEY) == {
             "host_id": 42,
@@ -602,7 +604,7 @@ class TestSerialRoleDecision:
         assert result["oob_candidate"]["type"] == "idrac"
 
     def test_existing_named_controller_can_be_promoted_to_host(self):
-        device = make_device("serial-leaf-idrac", librenms_cf={SERVER_KEY: 99})
+        device = seed_mapping(make_device("serial-leaf-idrac"), SERVER_KEY, own=99)
         result = self._role(
             device,
             _device_payload(7, hostname="serial-leaf", sysName="serial-leaf", hardware="server"),
@@ -613,10 +615,7 @@ class TestSerialRoleDecision:
         assert result["serial_role_choice_available"] is True
 
     def test_existing_oob_link_turns_repeat_controller_into_information(self):
-        device = make_device(
-            "serial-linked-oob",
-            librenms_cf={SERVER_KEY: {"id": 42, "oob": {"id": 99, "type": "idrac"}}},
-        )
+        device = seed_mapping(make_device("serial-linked-oob"), SERVER_KEY, own=42, oob=99, oob_type="idrac")
         result = self._role(
             device,
             _device_payload(7, hostname="serial-linked-oob-idrac", hardware="iDRAC9", os="idrac"),
@@ -636,7 +635,7 @@ class TestSerialRoleDecision:
         assert result["serial_role_choice_available"] is False
 
     def test_weak_role_signal_defaults_to_the_less_destructive_oob_action(self):
-        device = make_device("serial-role-neutral", librenms_cf={SERVER_KEY: 99})
+        device = seed_mapping(make_device("serial-role-neutral"), SERVER_KEY, own=99)
 
         result = self._role(
             device,
@@ -812,7 +811,7 @@ class TestValidateDeviceForImport:
         assert any("VM placement" in issue for issue in result["issues"])
 
     def test_device_id_match_forces_device_mode_and_surfaces_link(self):
-        device = make_device("validation-linked", librenms_cf={SERVER_KEY: 5404})
+        device = seed_mapping(make_device("validation-linked"), SERVER_KEY, own=5404)
         payload = _device_payload(
             5404,
             hostname=device.name,
@@ -852,8 +851,8 @@ class TestValidateDeviceForImport:
         assert result["librenms_id_needs_migration"] is True
 
     def test_ambiguous_device_ids_are_terminal(self):
-        first = make_device("validation-ambiguous-id-a", librenms_cf={SERVER_KEY: 5407})
-        second = make_device("validation-ambiguous-id-b", librenms_cf={SERVER_KEY: 5407})
+        first = seed_mapping(make_device("validation-ambiguous-id-a"), SERVER_KEY, own=5407)
+        second = seed_mapping(make_device("validation-ambiguous-id-b"), SERVER_KEY, own=5407)
 
         result = self._validate(_device_payload(5407, hostname="unmatched-ambiguous", serial="-"))
 
@@ -865,9 +864,9 @@ class TestValidateDeviceForImport:
         assert result["can_import"] is False
 
     def test_cross_model_id_collision_is_terminal(self):
-        device = make_device("validation-cross-device", librenms_cf={SERVER_KEY: 5408})
+        device = seed_mapping(make_device("validation-cross-device"), SERVER_KEY, own=5408)
         vm = make_vm("validation-cross-vm")
-        seed_stored_mapping(vm, {SERVER_KEY: 5408}, save=True)
+        seed_mapping(vm, SERVER_KEY, own=5408)
 
         result = self._validate(_device_payload(5408, hostname="unmatched-cross", serial="-"))
 
@@ -879,7 +878,7 @@ class TestValidateDeviceForImport:
         first = make_vm("validation-ambiguous-vm-a")
         second = make_vm("validation-ambiguous-vm-b", cluster=make_cluster("Validation VM ID cluster"))
         for vm in (first, second):
-            seed_stored_mapping(vm, {SERVER_KEY: 5421}, save=True)
+            seed_mapping(vm, SERVER_KEY, own=5421)
 
         result = self._validate(_device_payload(5421, hostname="unmatched-vm-id", serial="-"))
 
@@ -889,9 +888,9 @@ class TestValidateDeviceForImport:
 
     def test_vm_id_with_ambiguous_device_owners_is_terminal(self):
         vm = make_vm("validation-vm-with-device-collision")
-        seed_stored_mapping(vm, {SERVER_KEY: 5422}, save=True)
-        make_device("validation-device-collision-a", librenms_cf={SERVER_KEY: 5422})
-        make_device("validation-device-collision-b", librenms_cf={SERVER_KEY: 5422})
+        seed_mapping(vm, SERVER_KEY, own=5422)
+        seed_mapping(make_device("validation-device-collision-a"), SERVER_KEY, own=5422)
+        seed_mapping(make_device("validation-device-collision-b"), SERVER_KEY, own=5422)
 
         result = self._validate(_device_payload(5422, hostname=vm.name, serial="-"))
 
@@ -980,11 +979,7 @@ class TestValidateDeviceForImport:
         assert not any("Validation error" in issue for issue in result["issues"])
 
     def test_linked_serial_match_confirms_trimmed_stored_value(self):
-        device = make_device(
-            "validation-linked-serial",
-            serial=" SERIAL-LINKED ",
-            librenms_cf={SERVER_KEY: 5411},
-        )
+        device = seed_mapping(make_device("validation-linked-serial", serial=" SERIAL-LINKED "), SERVER_KEY, own=5411)
         payload = _device_payload(
             5411,
             hostname=device.name,
@@ -1007,8 +1002,9 @@ class TestValidateDeviceForImport:
         NormalizationRule.objects.get_or_create(
             scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
         )
-        linked = {SERVER_KEY: 5427} if match == "librenms_id" else None
-        device = make_device(f"validation-keyed-drift-{match}", serial="S/N ABC-DRIFT", librenms_cf=linked)
+        device = make_device(f"validation-keyed-drift-{match}", serial="S/N ABC-DRIFT")
+        if match == "librenms_id":
+            seed_mapping(device, SERVER_KEY, own=5427)
         payload = _device_payload(5427, hostname=device.name, sysName=device.name, serial="ABC-DRIFT")
 
         result = self._validate(payload)
@@ -1141,11 +1137,7 @@ class TestValidateDeviceForImport:
         assert [issue for issue in result["issues"] if issue.startswith(VALIDATION_ERROR_ISSUE_PREFIX)]
 
     def test_linked_serial_drift_and_duplicate_are_distinguished(self):
-        linked = make_device(
-            "validation-serial-drift",
-            serial="OLD-SERIAL",
-            librenms_cf={SERVER_KEY: 5412},
-        )
+        linked = seed_mapping(make_device("validation-serial-drift", serial="OLD-SERIAL"), SERVER_KEY, own=5412)
         payload = _device_payload(5412, hostname=linked.name, serial="NEW-SERIAL")
 
         drift = self._validate(payload)
@@ -1328,10 +1320,8 @@ class TestValidateDeviceForImport:
 
     def test_a_serial_match_with_an_oob_os_offers_no_host_promotion(self):
         """An OOB OS is evidence: the row that is the controller is never offered as the host."""
-        device = make_device(
-            "validation-oob-os-serial-host",
-            serial="SHARED-CHASSIS-SN",
-            librenms_cf={SERVER_KEY: {"id": 6001}},
+        device = seed_mapping(
+            make_device("validation-oob-os-serial-host", serial="SHARED-CHASSIS-SN"), SERVER_KEY, own=6001
         )
         payload = _device_payload(
             5433, hostname="validation-oob-os-serial-bmc", hardware="iDRAC9", os="idrac", serial="SHARED-CHASSIS-SN"
@@ -1369,7 +1359,7 @@ class TestValidateDeviceForImport:
         host = make_device("validation-merge-oob-host")
         host.oob_ip = make_ip("198.18.21.46/32", assigned_object=make_interface(host, "mgmt"))
         host.save()
-        make_device("validation-merge-oob-peer", serial="MERGE-OOB-SN", librenms_cf={SERVER_KEY: {"id": 9146}})
+        seed_mapping(make_device("validation-merge-oob-peer", serial="MERGE-OOB-SN"), SERVER_KEY, own=9146)
         payload = _device_payload(5446, hostname=host.name, sysName=host.name, serial="MERGE-OOB-SN", ip="198.18.21.46")
 
         result = self._validate(payload)
@@ -1544,9 +1534,7 @@ class TestValidateDeviceForImport:
 
     def test_a_second_validation_keeps_the_ambiguous_serial_role_offer(self):
         """The host is linked to another LibreNMS ID, so the serial role still offers both roles."""
-        host = make_device(
-            "validation-serial-role-kept-host", serial="A164-KEPT", librenms_cf={SERVER_KEY: {"id": 9164}}
-        )
+        host = seed_mapping(make_device("validation-serial-role-kept-host", serial="A164-KEPT"), SERVER_KEY, own=9164)
         payload = _device_payload(5465, hostname="validation-serial-role-kept-row", serial="A164-KEPT", ip="")
         result = self._validate(payload)
         assert (result["serial_action"], result["row_is_oob_controller"]) == ("oob_candidate", False)
@@ -1610,7 +1598,7 @@ class TestValidateDeviceForImport:
         payload = _device_payload(5474, hostname="validation-already-linked-row", os="idrac", serial="A174-SN", ip="")
         result = self._validate(payload)
         assert result["serial_action"] == "oob_already_linked"
-        seed_stored_mapping(host, {}, save=True)
+        seed_unmapped(host, SERVER_KEY)
 
         result = self._validate({**payload, "os": "linux"})
 
@@ -1748,7 +1736,7 @@ class TestValidateDeviceForImport:
         payload = _device_payload(5502, hostname="validation-owner-change-row", os="idrac", serial="A202-SN", ip="")
         result = self._validate(payload)
         assert result["oob_candidate"]["device"] == first_owner
-        seed_stored_mapping(first_owner, {}, save=True)
+        seed_unmapped(first_owner, SERVER_KEY)
         seed_mapping(second_owner, SERVER_KEY, own=7203)
 
         result = self._validate(payload)
@@ -1788,10 +1776,7 @@ class TestValidateDeviceForImport:
     def test_linked_oob_ip_is_informational_instead_of_a_new_candidate(self):
         from netbox_librenms_plugin.import_utils.device_operations import OOB_ALREADY_LINKED_WARNING
 
-        device = make_device(
-            "validation-linked-oob-ip",
-            librenms_cf={SERVER_KEY: {"id": 42, "oob": {"id": 99, "type": "idrac"}}},
-        )
+        device = seed_mapping(make_device("validation-linked-oob-ip"), SERVER_KEY, own=42, oob=99, oob_type="idrac")
         device.oob_ip = make_ip("198.18.20.5/32")
         device.save()
 
@@ -1812,10 +1797,8 @@ class TestValidateDeviceForImport:
         assert OOB_ALREADY_LINKED_WARNING in result["warnings"]
 
     def test_oob_id_reimport_is_not_a_host_serial_conflict(self):
-        device = make_device(
-            "validation-oob-linked",
-            serial="HOST-SERIAL",
-            librenms_cf={SERVER_KEY: {"id": 42, "oob": {"id": 5416, "type": "idrac"}}},
+        device = seed_mapping(
+            make_device("validation-oob-linked", serial="HOST-SERIAL"), SERVER_KEY, own=42, oob=5416, oob_type="idrac"
         )
         payload = _device_payload(
             5416,
@@ -1841,11 +1824,7 @@ class TestValidateDeviceForImport:
         settings_row.vc_member_name_pattern = "-{serial}"
         settings_row.save()
         name = f"validation-oob-host-{int(in_chassis)}"
-        device = make_device(
-            name,
-            serial="HOST-SERIAL",
-            librenms_cf={SERVER_KEY: {"id": 42, "oob": {"id": 5417, "type": "idrac"}}},
-        )
+        device = seed_mapping(make_device(name, serial="HOST-SERIAL"), SERVER_KEY, own=42, oob=5417, oob_type="idrac")
         if in_chassis:
             make_virtual_chassis(f"{name}-vc", device)
         payload = _device_payload(
@@ -1864,16 +1843,8 @@ class TestValidateDeviceForImport:
         assert result["suggested_name"] is None
 
     def test_hostname_and_serial_on_different_linked_devices_surface_merge_candidates(self):
-        host = make_device(
-            "validation-merge-host",
-            serial="MERGE-SERIAL",
-            librenms_cf={SERVER_KEY: {"id": 42}},
-        )
-        oob = make_device(
-            "validation-merge-idrac",
-            serial="MERGE-SERIAL",
-            librenms_cf={SERVER_KEY: {"id": 99}},
-        )
+        host = seed_mapping(make_device("validation-merge-host", serial="MERGE-SERIAL"), SERVER_KEY, own=42)
+        oob = seed_mapping(make_device("validation-merge-idrac", serial="MERGE-SERIAL"), SERVER_KEY, own=99)
         payload = _device_payload(
             5417,
             hostname=host.name,
@@ -1938,10 +1909,8 @@ class TestValidateDeviceForImport:
         settings_row = LibreNMSSettings.objects.order_by("pk").first() or LibreNMSSettings()
         settings_row.vc_member_name_pattern = "-{serial}"
         settings_row.save()
-        device = make_device(
-            "validation-stack-master-SERIAL-VC-MEMBER",
-            serial=" SERIAL-VC-MEMBER ",
-            librenms_cf={SERVER_KEY: 5431},
+        device = seed_mapping(
+            make_device("validation-stack-master-SERIAL-VC-MEMBER", serial=" SERIAL-VC-MEMBER "), SERVER_KEY, own=5431
         )
         make_virtual_chassis("validation-member-name-vc", device)
 
@@ -1966,11 +1935,7 @@ class TestValidateDeviceForImport:
         settings_row = LibreNMSSettings.objects.order_by("pk").first() or LibreNMSSettings()
         settings_row.vc_member_name_pattern = "-{serial}"
         settings_row.save()
-        device = make_device(
-            "validation-old-member-name",
-            serial="SERIAL-VC-DRIFT",
-            librenms_cf={SERVER_KEY: 5432},
-        )
+        device = seed_mapping(make_device("validation-old-member-name", serial="SERIAL-VC-DRIFT"), SERVER_KEY, own=5432)
         make_virtual_chassis("validation-member-drift-vc", device)
 
         result = self._validate(
@@ -2028,7 +1993,7 @@ class TestValidateDeviceForImport:
     def test_linked_device_type_drift_is_reported(self):
         from dcim.models import DeviceType, Manufacturer
 
-        device = make_device("validation-type-drift", librenms_cf={SERVER_KEY: 5435})
+        device = seed_mapping(make_device("validation-type-drift"), SERVER_KEY, own=5435)
         manufacturer = Manufacturer.objects.create(
             name="Validation reported manufacturer",
             slug="validation-reported-manufacturer",
@@ -2059,7 +2024,9 @@ class TestValidateDeviceForImport:
 
         from netbox_librenms_plugin.import_utils.device_operations import VALIDATION_ERROR_ISSUE_PREFIX
 
-        device = make_device("validation-legacy-type-drift", serial="LEGACY-TYPE-SN", librenms_cf=5438)
+        device = seed_stored_mapping(
+            make_device("validation-legacy-type-drift", serial="LEGACY-TYPE-SN"), 5438, save=True
+        )
         _broken_serial_rule("legacy-type-drift")
         manufacturer = Manufacturer.objects.create(name="Legacy drift maker", slug="legacy-drift-maker")
         reported_type = DeviceType.objects.create(
@@ -2339,8 +2306,6 @@ class TestImportSingleDevice:
         """The import locks and looks up no serial identity, so the broken rule does not refuse it."""
         from netbox_librenms_plugin.import_utils.device_operations import import_single_device
 
-        from netbox_librenms_plugin.tests.mapping_fixtures import stored_mapping_for_test
-
         site, device_type, role = self._infrastructure("broken-rule")
         _broken_serial_rule("import", manufacturer=device_type.manufacturer)
         validation = _validation(site=site, device_type=device_type, role=role, resolved_name="broken-rule-import")
@@ -2359,7 +2324,7 @@ class TestImportSingleDevice:
         assert device.device_type_id == device_type.pk
         assert device.serial == ""
         assert device.virtual_chassis_id is None
-        assert stored_mapping_for_test(device) == {SERVER_KEY: 5604}
+        assert mapping_summary(device) == {SERVER_KEY: {"own": 5604}}
 
     def test_manual_mappings_use_real_objects(self, librenms_api):
         from dcim.models import Platform, Rack
@@ -2568,7 +2533,7 @@ class TestImportSingleDevice:
         from netbox_librenms_plugin.import_utils.device_operations import import_single_device
 
         _api, _server = librenms_api
-        owner = make_device("import-id-owner", librenms_cf={SERVER_KEY: 5605})
+        owner = seed_mapping(make_device("import-id-owner"), SERVER_KEY, own=5605)
         site, device_type, role = self._infrastructure("conflict")
 
         result = import_single_device(

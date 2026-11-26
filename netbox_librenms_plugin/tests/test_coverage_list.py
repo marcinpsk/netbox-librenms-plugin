@@ -4,6 +4,8 @@ from copy import deepcopy
 from uuid import uuid4
 
 import pytest
+
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 from django.core.cache import cache
 from django.http import QueryDict
 from django.test import RequestFactory
@@ -390,7 +392,7 @@ class TestCompletedJobResults:
         )
         cache.set(get_import_device_cache_key(4201, SERVER_KEY), _device(4201), timeout=600)
         # Mapped after the job cached the row: the loader validates the row again.
-        mapped = make_device("completed-job-mapped", librenms_cf={SERVER_KEY: {"id": 4201}})
+        mapped = seed_mapping(make_device("completed-job-mapped"), SERVER_KEY, own=4201)
 
         view = LibreNMSImportView()
         result = view._load_job_results(job.pk, user)
@@ -656,7 +658,7 @@ class TestImportListRequest:
         from django.template.loader import render_to_string
 
         payload = _device(4121)
-        make_device(payload["sysName"], serial=payload["serial"], librenms_cf=payload["device_id"])
+        seed_stored_mapping(make_device(payload["sysName"], serial=payload["serial"]), payload["device_id"], save=True)
         _register_devices(librenms_server, [payload])
         client.force_login(_create_user(django_user_model, "warm-legacy-serial"))
 
@@ -695,7 +697,9 @@ class TestImportListRequest:
         from dcim.models import Device
 
         payload = _device(4122)
-        device = make_device(payload["sysName"], serial=payload["serial"], librenms_cf=payload["device_id"])
+        device = seed_stored_mapping(
+            make_device(payload["sysName"], serial=payload["serial"]), payload["device_id"], save=True
+        )
         _register_devices(librenms_server, [payload])
         client.force_login(_create_user(django_user_model, "warm-legacy-changed-serial"))
 
@@ -813,7 +817,7 @@ class TestImportListRequest:
         params = _search_params(exclude_existing="on")
         first = client.get(_import_url(), params)
         assert sorted(row["device_id"] for row in first.context["table"].data) == [4801, 4802]
-        make_device("results-exclude-existing-mapped", librenms_cf={SERVER_KEY: {"id": 4801}})
+        seed_mapping(make_device("results-exclude-existing-mapped"), SERVER_KEY, own=4801)
         job = Job.objects.create(
             name="Completed import search",
             user=user,
@@ -891,7 +895,7 @@ class TestImportListRequest:
         DeviceType.objects.create(manufacturer=manufacturer, model="Test Router", slug="test-router")
         Site.objects.create(name="Test Lab", slug="test-lab")
         _register_devices(librenms_server, [_device(4113)])
-        twins = [make_device(f"warm-ambiguous-{n}", librenms_cf={SERVER_KEY: {"id": 4113}}) for n in (1, 2)]
+        twins = [seed_mapping(make_device(f"warm-ambiguous-{n}"), SERVER_KEY, own=4113) for n in (1, 2)]
         client.force_login(_create_user(django_user_model, "warm-ambiguous-id"))
 
         def validation():
@@ -926,7 +930,7 @@ class TestImportListRequest:
         DeviceType.objects.create(manufacturer=manufacturer, model="Test Router", slug="test-router")
         Site.objects.create(name="Test Lab", slug="test-lab")
         _register_devices(librenms_server, [_device(4114)])
-        twins = [make_device(f"results-ambiguous-{n}", librenms_cf={SERVER_KEY: {"id": 4114}}) for n in (1, 2)]
+        twins = [seed_mapping(make_device(f"results-ambiguous-{n}"), SERVER_KEY, own=4114) for n in (1, 2)]
         user = _create_user(django_user_model, "results-ambiguous-id")
         client.force_login(user)
         client.get(_import_url(), _search_params())
@@ -992,7 +996,7 @@ class TestImportListRequest:
         user = _create_user(django_user_model, "results-job-exclude-existing")
         client.force_login(user)
         client.get(_import_url(), _search_params(exclude_existing="on"))
-        make_device("results-job-exclude-mapped", librenms_cf={SERVER_KEY: {"id": 4116}})
+        seed_mapping(make_device("results-job-exclude-mapped"), SERVER_KEY, own=4116)
 
         def job(device_ids):
             return Job.objects.create(
@@ -1079,7 +1083,7 @@ class TestImportListRequest:
         site_issue = f"{SITE_ISSUE_PREFIX} '{location}'"
         assert site_issue in searched["_validation"]["issues"]
         if linked:
-            holder = make_device("results-quoted-location-linked", librenms_cf={SERVER_KEY: {"id": device_id}})
+            holder = seed_mapping(make_device("results-quoted-location-linked"), SERVER_KEY, own=device_id)
         job = Job.objects.create(
             name="Completed import search",
             user=user,

@@ -31,7 +31,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
     map_device_to_librenms,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import port_pair, port_vlans, seed_interfaces_snapshot
 
 SERVER_KEY = "default"
@@ -132,7 +132,7 @@ def _mixed_device(tag):
     InterfaceTypeMapping.objects.get_or_create(
         action=InterfaceTypeMapping.ACTION_IGNORE, name_pattern="^loopback", librenms_type=""
     )
-    device = make_device(f"filters-{tag}", librenms_cf={SERVER_KEY: {"id": LIBRENMS_ID}})
+    device = seed_mapping(make_device(f"filters-{tag}"), SERVER_KEY, own=LIBRENMS_ID)
     _bind(Interface.objects.create(device=device, name="eth0", type="1000base-t", speed=1_000_000, mtu=1500), 1001)
     _bind(Interface.objects.create(device=device, name="eth1", type="1000base-t", speed=1_000_000, mtu=9000), 1002)
     _bind(Interface.objects.create(device=device, name="Vlan10", type="virtual", mtu=1500), 1004)
@@ -175,7 +175,7 @@ MIXED_STATES = {
 def _chassis(tag):
     """Return a VC member page whose rows belong to both members, one row with no resolved owner."""
     _vc, (first, second) = make_virtual_chassis_members(f"filters-{tag}", 2)
-    seed_stored_mapping(first, {SERVER_KEY: {"id": LIBRENMS_ID}}, save=True)
+    seed_mapping(first, SERVER_KEY, own=LIBRENMS_ID)
     _bind(Interface.objects.create(device=second, name="Ethernet2/1", type="other"), 2001)
     _seed(
         first,
@@ -209,7 +209,7 @@ class TestMatching:
 
     def test_a_name_search_finds_a_port_on_another_page_with_the_filtered_total(self, client, settings):
         client = _superuser_client(client, settings, "page-two")
-        device = make_device("filters-page-two", librenms_cf={SERVER_KEY: {"id": LIBRENMS_ID}})
+        device = seed_mapping(make_device("filters-page-two"), SERVER_KEY, own=LIBRENMS_ID)
         _seed(device, [_port(5000 + index, f"eth{index:03d}") for index in range(120)])
 
         assert 5117 not in _rows(_tab(client, device, interfaces_per_page="25"))
@@ -272,7 +272,7 @@ class TestMatching:
         InterfaceTypeMapping.objects.get_or_create(
             librenms_type="ethernetCsmacd", librenms_speed=None, defaults={"netbox_type": "1000base-t"}
         )
-        device = make_device("filters-kept-type", librenms_cf={SERVER_KEY: {"id": LIBRENMS_ID}})
+        device = seed_mapping(make_device("filters-kept-type"), SERVER_KEY, own=LIBRENMS_ID)
         bond = _bind(Interface.objects.create(device=device, name="bond0", type="lag"), 6001)
         Interface.objects.create(device=device, name="member0", type="1000base-t", lag=bond)
         _seed(device, [_port(6001, "bond0"), _port(6002, "eth0")])
@@ -504,7 +504,7 @@ def test_interface_filter_query_budget_with_refused_type_changes(client, setting
     client.force_login(make_superuser("interface-filter-budget"))
 
     def page_queries(size):
-        device = make_device(f"filters-budget-{size}", librenms_cf={SERVER_KEY: {"id": LIBRENMS_ID + size}})
+        device = seed_mapping(make_device(f"filters-budget-{size}"), SERVER_KEY, own=LIBRENMS_ID + size)
         librenms_server.register(
             f"/api/v0/devices/{LIBRENMS_ID + size}",
             {"status": "ok", "devices": [{"device_id": LIBRENMS_ID + size, "sysName": device.name}]},

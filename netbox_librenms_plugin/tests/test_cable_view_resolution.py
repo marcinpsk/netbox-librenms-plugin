@@ -24,7 +24,8 @@ from netbox_librenms_plugin.tests.source_snapshot_helpers import (
     port_row,
     sensor_row,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+from netbox_librenms_plugin.server_mappings import mark_migrated
+from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change, seed_mapping, seed_unmapped
 
 import pytest
 
@@ -35,7 +36,6 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_virtual_chassis,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, make_view
 
 SERVER_KEY = "default"
@@ -607,10 +607,10 @@ class TestPrepareContextIncompleteRefresh:
         from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
         server_key = _point_at(settings, librenms_server.url)
-        make_device("ctx-ambiguous-owner-a", librenms_cf={server_key: 8801})
-        make_device("ctx-ambiguous-owner-b", librenms_cf={server_key: 8801})
+        seed_mapping(make_device("ctx-ambiguous-owner-a"), server_key, own=8801)
+        seed_mapping(make_device("ctx-ambiguous-owner-b"), server_key, own=8801)
         target, _csps, _ = make_serial_device("ctx-ambiguous-target", csp_names=["ttyS0"])
-        seed_stored_mapping(target, {server_key: None}, save=True)
+        seed_unmapped(target, server_key)
         librenms_server.register(
             f"/api/v0/devices/{target.name}",
             {"status": "ok", "devices": [{"device_id": 8801}]},
@@ -622,7 +622,7 @@ class TestPrepareContextIncompleteRefresh:
         cache_key = view.get_cache_key(target, "links", server_key)
         seed_mapping(target, server_key, own=8)
         seed_cables_snapshot(target, [], [], server_key=server_key)
-        seed_stored_mapping(target, {server_key: None}, save=True)
+        seed_unmapped(target, server_key)
 
         context = view._prepare_context(view.request, target, fetch_fresh=True, server_key=server_key)
 
@@ -696,11 +696,7 @@ class TestPrepareContextReadOnlyDonor:
             server_key=server_key,
         )
 
-        seed_stored_mapping(
-            donor,
-            {server_key: {"_migrated_to": {"device_id": 4242, "server_key": server_key, "at": "2026-09-16T00:00:00Z"}}},
-            save=True,
-        )
+        apply_mapping_change(donor, mark_migrated(donor, 4242, server_key, at="2026-09-16T00:00:00Z")).save()
 
         context = view._prepare_context(view.request, donor, fetch_fresh=False, server_key=server_key)
 

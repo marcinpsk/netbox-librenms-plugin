@@ -32,7 +32,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_virtual_chassis_members,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.source_snapshot_helpers import (
     ip_address_row,
     port_pair,
@@ -68,7 +68,7 @@ def _platform(slug):
 
 
 def _device(name, platform=None):
-    device = make_device(name, librenms_cf={SERVER_KEY: {"id": 64}})
+    device = seed_mapping(make_device(name), SERVER_KEY, own=64)
     device.platform = platform
     device.save()
     return device
@@ -306,7 +306,7 @@ class TestAChassisRowNeedsItsOwner:
 
     def test_the_row_is_refused_without_a_member_and_written_with_one(self, superuser_client):
         _vc, (first, second) = make_virtual_chassis_members("rule-write-vc")
-        seed_stored_mapping(first, {SERVER_KEY: {"id": 65}})
+        seed_mapping(first, SERVER_KEY, own=65, save=False)
         first.save()
         _seed(first, [_port(700, "Vlan10", if_type="propVirtual")])
 
@@ -318,7 +318,7 @@ class TestAChassisRowNeedsItsOwner:
 
     def test_two_members_posted_for_one_row_refuse_the_row(self, superuser_client):
         _vc, (first, second) = make_virtual_chassis_members("rule-write-vc-twice")
-        seed_stored_mapping(first, {SERVER_KEY: {"id": 67}})
+        seed_mapping(first, SERVER_KEY, own=67, save=False)
         first.save()
         _seed(first, [_port(702, "Vlan10", if_type="propVirtual")])
 
@@ -339,7 +339,7 @@ class TestAChassisRowNeedsItsOwner:
         _vc, (first, second) = make_virtual_chassis_members(f"rule-walk-owner-{posted_parent_member}")
         platform = _platform(f"rule-walk-owner-{posted_parent_member}")
         InterfaceTypeMapping.objects.create(action=IGNORE, platform=platform, name_pattern="^Po1$")
-        seed_stored_mapping(first, {SERVER_KEY: {"id": 69}})
+        seed_mapping(first, SERVER_KEY, own=69, save=False)
         first.platform = platform
         first.save()
         aggregate = _bound(first, "Po1", 20, iface_type="lag")
@@ -376,7 +376,7 @@ class TestAChassisRowNeedsItsOwner:
 
     def test_a_related_row_the_walk_refuses_is_reported_and_the_selected_row_syncs(self, superuser_client):
         _vc, (first, second) = make_virtual_chassis_members("rule-walk-refused")
-        seed_stored_mapping(first, {SERVER_KEY: {"id": 70}})
+        seed_mapping(first, SERVER_KEY, own=70, save=False)
         first.save()
         _seed(
             first,
@@ -404,7 +404,7 @@ class TestAChassisRowNeedsItsOwner:
         _vc, (first, second) = make_virtual_chassis_members("rule-write-vc-platform")
         platform = _platform("rule-write-vc-platform")
         InterfaceTypeMapping.objects.create(action=IGNORE, platform=platform, name_pattern="^Vlan")
-        seed_stored_mapping(first, {SERVER_KEY: {"id": 66}})
+        seed_mapping(first, SERVER_KEY, own=66, save=False)
         first.platform = platform
         first.save()
         _seed(first, [_port(701, "Vlan10", if_type="propVirtual")])
@@ -910,7 +910,7 @@ def test_the_swapped_tab_renders_the_platform_the_writer_read(settings, object_t
     else:
         owner = make_vm("rule-swap-vm")
         owner.platform = platform_p
-        seed_stored_mapping(owner, {SERVER_KEY: {"id": 71}})
+        seed_mapping(owner, SERVER_KEY, own=71, save=False)
         owner.save()
     configure_default_librenms_server(settings)
     view = _PlatformMovesAfterTheRead(moved_to=platform_q)
