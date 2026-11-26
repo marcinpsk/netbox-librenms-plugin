@@ -1219,7 +1219,7 @@ that may well be correct.
                                     {% else %}
                                     <select name="member_id_{{ forloop.counter }}" class="form-select form-select-sm">
                                         <option value="">Select member...</option>
-                                        {% for member in object.virtual_chassis.members.all %}
+                                        {% for member in item.member_options %}
                                         <option value="{{ member.pk }}" {% if item.selected_member and item.selected_member.pk == member.pk %}selected{% endif %}>
                                             {{ member.name }}
                                         </option>

@@ -1023,6 +1023,32 @@ class TestVirtualChassisInventory:
         assert (holder.serial, page.serial) == ("SCOPE-A", "SCOPE-B")
         assert rendered["member_id_1"] == ""
 
+    def test_the_dialog_offers_only_the_members_that_the_user_may_change(self, client, librenms_server):
+        """The user may change A and only view B, so no row offers B, and the row that B holds still names B."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms, module_tab_forms
+
+        _vc, (page, holder) = make_virtual_chassis_members("inventory-offer-scope", count=2)
+        holder.serial = "OFFER-B"
+        holder.save()
+        seed_mapping(page, SERVER_KEY, own=6665)
+        inventory = _stack_inventory({"entPhysicalSerialNum": "OFFER-A"}, {"entPhysicalSerialNum": "OFFER-B"})
+        _register_device(librenms_server, 6665, page.name, inventory=inventory)
+        user = make_user_with_perms("vc-serial-offer-a", [("view", Device)])
+        client.force_login(grant(user, "change", Device, constraints={"pk": page.pk}))
+
+        response = client.get(_sync_url(page))
+
+        html = response.content.decode()
+        (form,) = [form for form in module_tab_forms(html).forms if "assign-vc-serial" in form["action"]]
+        for row in ("member_id_1", "member_id_2"):
+            assert set(form["selects"][row]["options"]) == {"", str(page.pk)}, form["selects"][row]
+        start = html.index("<code>OFFER-B</code>", html.index('id="vc-serials-form"'))
+        held_row = html[start : html.index("</tr>", start)]
+        assert f'href="{holder.get_absolute_url()}"' in held_row
+        assert holder.name in held_row
+
     def test_two_rows_that_match_one_holder_select_no_member(self, logged_in_client, librenms_server):
         """Two rows report the serial of A, so neither row selects A and the post of a third row succeeds."""
         _vc, (holder, other) = make_virtual_chassis_members("inventory-shared-holder", count=2)

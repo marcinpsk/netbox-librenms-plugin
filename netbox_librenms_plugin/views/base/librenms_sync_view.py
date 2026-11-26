@@ -863,6 +863,7 @@ class BaseLibreNMSSyncView(
                     'librenms_serial': 'trimmed raw serial, as the dialog posts it',
                     'model': 'model name',
                     'assigned_member': Device object or None (if serial matches existing assignment)
+                    'member_options': the members that the user may change, which the row offers
                     'selected_member': the assigned member when the user may change it, no other row
                         has it too and the writer can store the serial, else None
                     'shared_holder': whether another row has the same assigned member
@@ -888,6 +889,9 @@ class BaseLibreNMSSyncView(
             .values_list("pk", flat=True)
         )
 
+        # The writer rolls back the whole post for a member outside the change scope, so the dialog offers none.
+        assignable = [member for member in vc_members if member.pk in changeable]
+
         result = []
         # Like admits(), the stack holds when the rules of any member explain it; the dialog shows the LibreNMS text.
         for component in extract_vc_members(inventory, members_by_serial.contexts()):
@@ -904,6 +908,7 @@ class BaseLibreNMSSyncView(
                     "librenms_serial": display(component["serial"]),
                     "model": component["model"] or "-",
                     "assigned_member": assigned_member,
+                    "member_options": assignable,
                 }
             )
 

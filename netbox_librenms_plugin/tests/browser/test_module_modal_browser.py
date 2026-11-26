@@ -302,8 +302,8 @@ def _vc_serials_modal(items):
     start = source.index("<!-- VC Member Serials Modal -->")
     dialog = source[start : source.index("{% endif %}", source.index("</table>", start))]
     members = [SimpleNamespace(pk=pk, name=f"core-stack-building-a-m{pk}") for pk in (1, 2)]
-    device = SimpleNamespace(pk=1, virtual_chassis=SimpleNamespace(members=SimpleNamespace(all=members)))
-    context = {"object": device, "vc_inventory_serials": items, "csrf_token": "test-token"}
+    items = [{"member_options": members, **item} for item in items]
+    context = {"object": SimpleNamespace(pk=1), "vc_inventory_serials": items, "csrf_token": "test-token"}
     return engine.from_string(dialog).render(Context(context, use_l10n=False))
 
 
