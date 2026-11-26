@@ -3274,14 +3274,15 @@ def _serial_rule_reads(view_class, send):
 
 
 def _serial_rule_queries(statements):
-    """Return the SQL statements that read the serial-scope NormalizationRules."""
+    """Return each read of the rule table, except a read whose filter names one other scope and not the serial scope."""
+    import re
+
     from netbox_librenms_plugin.models import NormalizationRule
 
-    return [
-        sql
-        for sql in statements
-        if '"netbox_librenms_plugin_normalizationrule"' in sql and f"'{NormalizationRule.SCOPE_SERIAL}'" in sql
-    ]
+    table = f'"{NormalizationRule._meta.db_table}"'
+    serial = f"'{NormalizationRule.SCOPE_SERIAL}'"
+    other_scope = re.compile(rf"{re.escape(table)}\.\"scope\" = '(?!{NormalizationRule.SCOPE_SERIAL}')")
+    return [sql for sql in statements if table in sql and (serial in sql or not other_scope.search(sql))]
 
 
 def _hidden_twin_scope(change, *devices):
