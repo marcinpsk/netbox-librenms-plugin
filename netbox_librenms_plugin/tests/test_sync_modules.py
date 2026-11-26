@@ -4144,13 +4144,21 @@ def _responses_under_module_owner_locks(source):
         ]
         if not locks:
             continue
-        # A response that ends before the first lock is safe; a loop that locks first is not seen.
+        # A response that ends before the first lock is safe.
         violations.update(
             call.lineno
             for call in calls
             if ast.unparse(call.func) == "_modules_action_response"
             and (call.end_lineno, call.end_col_offset) > min(locks)
         )
+        # A later loop iteration renders under the lock of an earlier iteration.
+        for loop in ast.walk(node):
+            if isinstance(loop, (ast.For, ast.AsyncFor, ast.While)):
+                inner = [item for item in ast.walk(loop) if isinstance(item, ast.Call)]
+                if any(ast.unparse(call.func) == "lock_module_write" for call in inner):
+                    violations.update(
+                        call.lineno for call in inner if ast.unparse(call.func) == "_modules_action_response"
+                    )
     return violations
 
 
@@ -4198,6 +4206,20 @@ def test_the_owner_lock_scan_allows_an_early_refusal_before_the_lock():
     )
 
     assert _responses_under_module_owner_locks(source) == {7}
+
+
+def test_the_owner_lock_scan_finds_a_response_after_a_lock_on_an_earlier_loop_iteration():
+    """The second iteration renders under the owner lock that the first iteration took."""
+    source = (
+        "def _install(self, request, page_device):\n"
+        "    with transaction.atomic():\n"
+        "        for index in (0, 1):\n"
+        "            if index == 1:\n"
+        "                return _modules_action_response(request, page_device)\n"
+        "            scope = lock_module_write(observe_module_write(device_ids=[page_device.pk]))\n"
+    )
+
+    assert _responses_under_module_owner_locks(source) == {5}
 
 
 def test_the_owner_lock_scan_finds_a_lock_in_a_response_argument():
