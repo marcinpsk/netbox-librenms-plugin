@@ -736,9 +736,10 @@ class TestCreateVirtualChassisWithMembers:
         Under ^X(.+)$ a stored "X123" keys to "123" and "XX123" to "X123": two identities, a documented limit.
 
         One batch creates both. A device that already stores "X123" can be an earlier keyed member,
-        so the import skips "XX123".
+        so the import refuses the stack.
         """
-        from dcim.models import Device
+        from dcim.models import Device, VirtualChassis
+        from django.core.exceptions import ValidationError
 
         from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
         from netbox_librenms_plugin.models import NormalizationRule
@@ -754,10 +755,14 @@ class TestCreateVirtualChassisWithMembers:
             make_device(f"vc-rematch-{earlier}-elsewhere", serial="X123")
         members.append({"serial": "XX123", "position": 3})
 
-        vc = create_virtual_chassis_with_members(master, members, {"device_id": 8009}, master_member=members[0])
-
+        if earlier == "batch":
+            vc = create_virtual_chassis_with_members(master, members, {"device_id": 8009}, master_member=members[0])
+            assert vc.members.count() == 3
+        else:
+            with pytest.raises(ValidationError, match="can be the same member"):
+                create_virtual_chassis_with_members(master, members, {"device_id": 8009}, master_member=members[0])
+            assert not VirtualChassis.objects.filter(domain="librenms-8009").exists()
         assert Device.objects.filter(serial="XX123").exists() is (earlier == "batch")
-        assert vc.members.count() == (3 if earlier == "batch" else 1)
         reported = {stored for _row, stored, _key, _reason in report_rows()}
         assert "X123" in reported
         assert ("XX123" in reported) is (earlier == "batch")
@@ -891,8 +896,9 @@ def test_placeholder_members_do_not_match_an_unrelated_device(use_manufacturer_r
     ids=["rule-matches-its-output", "later-rule-feeds-an-earlier-one"],
 )
 def test_a_member_is_not_created_beside_a_legacy_row_that_stores_its_rule_output(patterns, legacy, incoming):
-    """The rules key the legacy row again, so it does not match; it can still be the member, so the import skips it."""
+    """The rules key the legacy row again, so it does not match; it can still be the member, so the stack is refused."""
     from dcim.models import Device
+    from django.core.exceptions import ValidationError
 
     from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
     from netbox_librenms_plugin.models import NormalizationRule
@@ -903,9 +909,11 @@ def test_a_member_is_not_created_beside_a_legacy_row_that_stores_its_rule_output
     make_device("legacy-output-member", serial=legacy)
     members = [{"serial": master.serial, "position": 1}, {"serial": incoming, "position": 2}]
 
-    vc = create_virtual_chassis_with_members(master, members, {"device_id": 985}, master_member=members[0])
+    with pytest.raises(ValidationError, match="can be the same member"):
+        create_virtual_chassis_with_members(master, members, {"device_id": 985}, master_member=members[0])
 
-    assert list(vc.members.values_list("pk", flat=True)) == [master.pk]
+    master.refresh_from_db()
+    assert master.virtual_chassis_id is None
     assert not Device.objects.filter(serial=incoming).exists()
 
 
