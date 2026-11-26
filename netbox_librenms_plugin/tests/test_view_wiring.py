@@ -3517,7 +3517,9 @@ class TestModuleWriterOwnership:
                 # A move's mutation callback executes through update_existing_row.
                 if node is not method and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
                     return
-                for child in ast.iter_child_nodes(node):
+                # Python evaluates an assignment value before its targets.
+                children = [node.value, *node.targets] if isinstance(node, ast.Assign) else ast.iter_child_nodes(node)
+                for child in children:
                     walk(child, (*parents, node))
                 # After its receiver and arguments, so the list is in call order.
                 if isinstance(node, ast.Call):
@@ -3572,6 +3574,7 @@ class TestModuleWriterOwnership:
             "Module.objects.update(serial=value)\nlock_module_write(observe_module_write(device_ids=targets))",
             'match action:\n    case "install":\n        lock_module_write(observe_module_write(device_ids=targets))\n'
             "Module().save()",
+            "target[lock_module_write(observe_module_write(device_ids=targets))] = Module().save()",
         ],
         ids=[
             "missing",
@@ -3584,6 +3587,7 @@ class TestModuleWriterOwnership:
             "queryset-update-before-owner",
             "manager-update-before-owner",
             "owner-in-match-case",
+            "write-in-assignment-value",
         ],
     )
     def test_guard_rejects_known_omissions(self, body):
