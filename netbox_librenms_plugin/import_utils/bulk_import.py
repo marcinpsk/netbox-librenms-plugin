@@ -60,6 +60,7 @@ from .device_operations import (
     import_single_device,
     resolve_device_by_host_ip,
     serial_unavailable_issue,
+    stopped_at_unavailable_serial,
     validate_device_for_import,
 )
 from .filters import _safe_disabled, get_librenms_devices_for_import
@@ -276,7 +277,7 @@ def detect_collisions_for_device_ids(
             # guard can't silently drift from the producer's wording.
             unresolved[device_id] = LIBRENMS_ROW_UNREADABLE
             continue
-        if _stopped_at_unavailable_serial(validation):
+        if stopped_at_unavailable_serial(validation):
             unresolved[device_id] = NETBOX_SERIAL_UNVERIFIED
             continue
         vc_data = {} if device_id in vm_id_set else get_virtual_chassis_data(api, device_id, serial_rules=serial_rules)
@@ -1401,11 +1402,6 @@ def _block_failed_recheck(validation: dict) -> None:
         validation["issues"].append(message)
 
 
-def _stopped_at_unavailable_serial(validation: dict) -> bool:
-    """Return whether validation stopped at an Unavailable serial lookup, before the site and type checks."""
-    return any(SERIAL_UNAVAILABLE_ISSUE_MARKER in str(issue) for issue in validation.get("issues", []))
-
-
 def _empty_return(return_cache_status: bool):
     """Centralised empty-result return value for process_device_filters."""
     return ([], False) if return_cache_status else []
@@ -1565,7 +1561,7 @@ def process_device_filters(  # noqa: C901
         if not clear_cache:
             cached_device = cache.get(cache_key)
             # A row that stopped at an Unavailable serial lookup is partial, so validate it again.
-            if cached_device and not _stopped_at_unavailable_serial(cached_device["_validation"]):
+            if cached_device and not stopped_at_unavailable_serial(cached_device["_validation"]):
                 # Use cached validation
                 device["_validation"] = cached_device["_validation"]
 

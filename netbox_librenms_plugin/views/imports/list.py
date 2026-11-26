@@ -130,10 +130,8 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
 
         # Load cached devices from job using shared cache keys
         from netbox_librenms_plugin.import_utils import get_validated_device_cache_key
-        from netbox_librenms_plugin.import_utils.bulk_import import (
-            _refresh_existing_device,
-            _stopped_at_unavailable_serial,
-        )
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+        from netbox_librenms_plugin.import_utils.device_operations import stopped_at_unavailable_serial
         from netbox_librenms_plugin.import_utils.cache import search_metadata_is_current
         from netbox_librenms_plugin.serial_identity import SerialRules
 
@@ -188,7 +186,7 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
             if isinstance(device, dict) and isinstance(device.get("_validation"), dict):
                 # The rows may have changed since the job: refresh the match as a cached search does.
                 # A partial row keeps its blocker: only a new search validates it again.
-                if not _stopped_at_unavailable_serial(device["_validation"]):
+                if not stopped_at_unavailable_serial(device["_validation"]):
                     _refresh_existing_device(
                         device["_validation"], libre_device=device, server_key=server_key, serial_rules=serial_rules
                     )

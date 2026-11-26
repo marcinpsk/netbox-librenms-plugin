@@ -1903,7 +1903,12 @@ def import_platform_warnings(label, plan, text_viewer):
     return [f"Imported {label} with {assigned}: {detail}"]
 
 
-def import_refusal(validation, device_id) -> str:
+def stopped_at_unavailable_serial(validation: dict) -> bool:
+    """Return whether validation stopped at an Unavailable serial lookup, before the site and type checks."""
+    return any(SERIAL_UNAVAILABLE_ISSUE_MARKER in str(issue) for issue in validation.get("issues", []))
+
+
+def import_refusal(validation, device_id, incoming_serial) -> str:
     """Return why the import writer refuses the Device row of *validation* before any write, else ""."""
     if validation.get("virtual_chassis", {}).get("detection_failed"):
         return STACK_DETECTION_FAILED_MESSAGE
@@ -1918,6 +1923,12 @@ def import_refusal(validation, device_id) -> str:
             "Import blocked: this device's hostname, serial, or management IP matches multiple NetBox devices; "
             "resolve the duplicate first."
         )
+    # The writer's serial lookup under the lock refuses these rows too, with the same text.
+    if validation.get("serial_duplicate"):
+        return _serial_taken_message(device_id, incoming_serial, Resolution(ResolutionKind.AMBIGUOUS))
+    if stopped_at_unavailable_serial(validation):
+        unavailable = Resolution(ResolutionKind.UNAVAILABLE, reason=UNAVAILABLE_MASTER_LINK)
+        return _serial_taken_message(device_id, incoming_serial, unavailable)
     return ""
 
 
@@ -2005,7 +2016,7 @@ def import_single_device(  # noqa: C901
             )
 
         # The refusals before any write; the bulk confirmation reads the same function.
-        if refusal := import_refusal(validation, device_id):
+        if refusal := import_refusal(validation, device_id, libre_device.get("serial")):
             detection_failed = validation.get("virtual_chassis", {}).get("detection_failed")
             return {
                 "success": False,
