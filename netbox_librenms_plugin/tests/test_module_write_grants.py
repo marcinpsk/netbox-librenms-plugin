@@ -1997,6 +1997,8 @@ def test_a_row_order_position_attributes_no_stack_member_with_a_short_serial(
         on_page = CARD if positions[0] == 1 else CARD + 1
         _action, fields = rendered_module_form(content, "install-module", on_page)
         assert fields["selected_device_id"] == str(page.pk)
+        _action, fields = rendered_module_form(content, "install-module", CARD + CARD + 1 - on_page)
+        assert fields["selected_device_id"] == str(member.pk)
 
 
 @pytest.mark.parametrize(
