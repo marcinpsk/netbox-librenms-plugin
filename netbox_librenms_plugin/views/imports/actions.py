@@ -1407,6 +1407,14 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         if not devices:
             # All branches return 200 (not 400): this is HTMX modal content swapped into
             # #htmx-modal-content, and htmx does not swap 4xx responses by default.
+            # The expiry notice keeps the errors of the other rows: a refresh does not resolve a refusal.
+            error_alert = (
+                '<div class="alert alert-danger mt-2 mb-0">'
+                f"{len(errors)} error(s) occurred: {' '.join(escape(e) for e in errors)}"
+                "</div>"
+                if errors
+                else ""
+            )
             # Check if this is due to cache expiration
             if cache_expired_count > 0 and cache_expired_count == len(seen_ids):
                 return HttpResponse(
@@ -1416,7 +1424,7 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                     "The device data is no longer available in cache (5-minute timeout). "
                     'Please <a href="javascript:window.location.reload();" class="alert-link">refresh the page</a> '
                     "or re-run your filter to reload device data."
-                    "</div>"
+                    "</div>" + error_alert
                 )
             elif cache_expired_count > 0:
                 # Partial expiration - some devices lost their selections
@@ -1427,7 +1435,7 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                     f"{cache_expired_count} of {len(seen_ids)} selected devices had expired cache data and may be missing role/rack selections. "
                     'Please <a href="javascript:window.location.reload();" class="alert-link">refresh the page</a> '
                     "or re-run your filter to reload device data."
-                    "</div>"
+                    "</div>" + error_alert
                 )
             else:
                 # Generic error - validation failed for all devices

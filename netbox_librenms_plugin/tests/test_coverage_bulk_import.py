@@ -1207,3 +1207,19 @@ def test_the_bulk_confirmation_omits_a_row_that_the_writer_refuses_before_any_wr
 
     assert submitted == [eligible]
     assert f"Device ID {refused} cannot be imported: {reason}" in content
+
+
+@pytest.mark.django_db
+def test_the_bulk_confirmation_keeps_a_refusal_beside_the_expiry_notice(client, live_librenms):
+    """A refresh does not resolve a refusal, so the expiry notice still names the refused row."""
+    prerequisites = TestBulkImportIntegration()._prerequisites()
+    expired, refused = 321, 322
+    live_librenms.server.register(f"/api/v0/devices/{expired}", {"status": "error"}, status=404)
+    _register_device(live_librenms, _cached_row(refused, "confirm-expiry-refused", "EXPIRY-322", prerequisites))
+    make_device("confirm-expiry-holder", librenms_cf={"default": refused})
+
+    submitted, content = _confirm(client, [expired, refused], "expiry")
+
+    assert submitted == []
+    assert "Some device data has expired." in content
+    assert f"Device ID {refused} cannot be imported: Device {refused} already exists in NetBox" in content
