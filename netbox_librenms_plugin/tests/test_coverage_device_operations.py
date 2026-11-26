@@ -689,6 +689,7 @@ class TestValidateDeviceForImport:
             "naming_criteria",
             "virtual_chassis",
             "issues",
+            "write_refusals",
             "warnings",
             "site",
             "region",
